@@ -114,27 +114,56 @@ urlencode() {
 # --- Database (aws-rds) ------------------------------------------------------
 log "resolving database credentials from service '$DB_SERVICE_NAME'"
 
+# The broker publishes a complete `uri` alongside the individual components.
+# Prefer it: it is the authoritative connection string, already correctly
+# percent-encoded by the broker, which is strictly better than re-encoding the
+# parts ourselves in the one place a subtle error silently points the app at
+# the wrong database. Fall back to component assembly if `uri` is absent.
+DB_URI="$(cred "$DB_SERVICE_NAME" aws-rds uri)"
 DB_HOST="$(require_cred "$(cred "$DB_SERVICE_NAME" aws-rds host)" "database host")"
 DB_PORT="$(cred "$DB_SERVICE_NAME" aws-rds port)"
 DB_NAME="$(require_cred "$(cred "$DB_SERVICE_NAME" aws-rds db_name)" "database name")"
 DB_USER="$(require_cred "$(cred "$DB_SERVICE_NAME" aws-rds username)" "database username")"
-DB_PASSWORD="$(require_cred "$(cred "$DB_SERVICE_NAME" aws-rds password)" "database password")"
 DB_PORT="${DB_PORT:-5432}"
 
-# sslmode=require is mandatory: cloud.gov RDS rejects unencrypted connections,
-# and Go's pq defaults to "prefer", which would silently downgrade rather than
-# fail if that ever changed. (NIST SC-8)
+# sslmode=require is mandatory and is NOT in the broker's URI (verified against
+# the cloud.gov aws-rds broker). Go's pq defaults to "prefer", which silently
+# downgrades to an unencrypted connection rather than failing -- so omitting
+# this would hand us plaintext database traffic that still appears to work.
+# (NIST SC-8)
 #
-# Encode into locals first rather than inline in the export. `export VAR="$(cmd)"`
-# makes the export the command being evaluated, so a non-zero exit from the
-# substitution is masked even under `set -e` -- which would hand Obot a
-# half-formed DSN instead of aborting. (shellcheck SC2155)
-DB_USER_ENC="$(urlencode "$DB_USER")"
-DB_PASSWORD_ENC="$(urlencode "$DB_PASSWORD")"
-OBOT_SERVER_DSN="postgres://${DB_USER_ENC}:${DB_PASSWORD_ENC}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require"
+# Assign into a local before exporting: `export VAR="$(cmd)"` makes the export
+# the evaluated command, masking a non-zero substitution exit even under
+# `set -e`. (shellcheck SC2155)
+if [[ -n "$DB_URI" ]]; then
+  case "$DB_URI" in
+    *sslmode=*) OBOT_SERVER_DSN="$DB_URI" ;;
+    *\?*)       OBOT_SERVER_DSN="${DB_URI}&sslmode=require" ;;
+    *)          OBOT_SERVER_DSN="${DB_URI}?sslmode=require" ;;
+  esac
+  log "database: using broker-provided URI for ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+else
+  DB_PASSWORD="$(require_cred "$(cred "$DB_SERVICE_NAME" aws-rds password)" "database password")"
+  DB_USER_ENC="$(urlencode "$DB_USER")"
+  DB_PASSWORD_ENC="$(urlencode "$DB_PASSWORD")"
+  OBOT_SERVER_DSN="postgres://${DB_USER_ENC}:${DB_PASSWORD_ENC}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require"
+  unset DB_PASSWORD DB_PASSWORD_ENC
+  log "database: assembled DSN for ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME} (no broker URI)"
+fi
+
+# Obot only treats a DSN as PostgreSQL when it starts with "postgres://"
+# (pkg/services/config.go). A "postgresql://" scheme is equally valid to pq but
+# would make Obot fall through to its sqlite/in-container path, so normalize.
+if [[ "$OBOT_SERVER_DSN" == postgresql://* ]]; then
+  OBOT_SERVER_DSN="postgres://${OBOT_SERVER_DSN#postgresql://}"
+  log "database: normalized postgresql:// scheme to postgres://"
+fi
+if [[ "$OBOT_SERVER_DSN" != postgres://* ]]; then
+  fatal "assembled DSN does not start with postgres:// -- Obot would ignore it and start its own in-container database"
+fi
 export OBOT_SERVER_DSN
-unset DB_PASSWORD DB_PASSWORD_ENC
-log "database: ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME} (sslmode=require)"
+unset DB_URI
+log "database: sslmode=require enforced"
 
 # --- Artifact storage (s3) ---------------------------------------------------
 # Obot requires provider and bucket to be set together or not at all
@@ -146,23 +175,44 @@ S3_REGION="$(require_cred "$(cred "$S3_SERVICE_NAME" s3 region)" "S3 region")"
 S3_ACCESS_KEY_ID="$(require_cred "$(cred "$S3_SERVICE_NAME" s3 access_key_id)" "S3 access key ID")"
 S3_SECRET_ACCESS_KEY="$(require_cred "$(cred "$S3_SERVICE_NAME" s3 secret_access_key)" "S3 secret access key")"
 S3_ENDPOINT="$(cred "$S3_SERVICE_NAME" s3 endpoint)"
+S3_FIPS_ENDPOINT="$(cred "$S3_SERVICE_NAME" s3 fips_endpoint)"
 
 export OBOT_ARTIFACT_STORAGE_BUCKET="$S3_BUCKET"
 export OBOT_ARTIFACT_S3_REGION="$S3_REGION"
 export OBOT_ARTIFACT_S3_ACCESS_KEY_ID="$S3_ACCESS_KEY_ID"
 export OBOT_ARTIFACT_S3_SECRET_ACCESS_KEY="$S3_SECRET_ACCESS_KEY"
 
-# cloud.gov brokers S3 through AWS proper, so the plain "s3" provider works and
-# needs no endpoint. If the broker ever hands back a non-AWS endpoint (GovCloud
-# or a FIPS endpoint), switch to the "custom" provider, which is the only one
-# that honors OBOT_ARTIFACT_S3_ENDPOINT.
-if [[ -n "$S3_ENDPOINT" && "$S3_ENDPOINT" != *".amazonaws.com" ]]; then
+# Prefer the FIPS endpoint when the broker publishes one. cloud.gov's s3 broker
+# returns s3-fips.<region>.amazonaws.com for both `endpoint` and
+# `fips_endpoint`, and FIPS-validated transport is an explicit federal
+# expectation, not a nicety. (NIST SC-13)
+S3_EFFECTIVE_ENDPOINT="${S3_FIPS_ENDPOINT:-$S3_ENDPOINT}"
+
+# Use the "custom" provider whenever ANY endpoint is published, including an
+# *.amazonaws.com one. Two reasons, both load-bearing:
+#
+#   1. The plain "s3" provider ignores OBOT_ARTIFACT_S3_ENDPOINT entirely
+#      (pkg/storage/blob/s3.go builds its client with no BaseEndpoint), so it
+#      would resolve the DEFAULT non-FIPS endpoint and silently discard the
+#      FIPS endpoint the broker just handed us.
+#   2. The plain "s3" provider's Test() calls STS GetCallerIdentity, and
+#      pkg/services/config.go treats a failed artifact-store Test() as FATAL --
+#      making boot depend on STS reachability. CustomS3Store.Test() is a no-op.
+#
+# The custom provider uses path-style addressing, which S3 supports for all
+# buckets, and the broker's bucket name is DNS-compatible either way.
+if [[ -n "$S3_EFFECTIVE_ENDPOINT" ]]; then
   export OBOT_ARTIFACT_STORAGE_PROVIDER="custom"
-  export OBOT_ARTIFACT_S3_ENDPOINT="$S3_ENDPOINT"
-  log "artifact storage: custom S3 provider, bucket=${S3_BUCKET} endpoint=${S3_ENDPOINT}"
+  export OBOT_ARTIFACT_S3_ENDPOINT="https://${S3_EFFECTIVE_ENDPOINT#https://}"
+  if [[ -n "$S3_FIPS_ENDPOINT" ]]; then
+    log "artifact storage: custom S3 provider (FIPS endpoint), bucket=${S3_BUCKET} endpoint=${OBOT_ARTIFACT_S3_ENDPOINT}"
+  else
+    log "artifact storage: custom S3 provider, bucket=${S3_BUCKET} endpoint=${OBOT_ARTIFACT_S3_ENDPOINT}"
+  fi
 else
+  # No endpoint published: fall back to AWS default resolution for the region.
   export OBOT_ARTIFACT_STORAGE_PROVIDER="s3"
-  log "artifact storage: s3 provider, bucket=${S3_BUCKET} region=${S3_REGION}"
+  log "artifact storage: s3 provider (no endpoint published), bucket=${S3_BUCKET} region=${S3_REGION}"
 fi
 
 # --- Application secrets (user-provided) -------------------------------------
