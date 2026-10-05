@@ -68,14 +68,25 @@ tidy:
 	go mod tidy
 
 GOLANGCI_LINT_VERSION ?= v2.13.0
+# `go install` writes to GOBIN (or GOPATH/bin), which is not on PATH in a fresh
+# environment -- notably GitHub Actions runners. Invoking golangci-lint by bare
+# name after installing it there fails with "No such file or directory", which
+# reads like a tooling hiccup rather than a lint gate that never ran. Resolve
+# the install directory explicitly so the target either lints or fails loudly.
+GOBIN_DIR := $(shell go env GOBIN)
+ifeq ($(GOBIN_DIR),)
+GOBIN_DIR := $(shell go env GOPATH)/bin
+endif
+GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(GOBIN_DIR)/golangci-lint)
+
 setup-env:
-	if ! command -v golangci-lint >/dev/null 2>&1; then \
+	if ! command -v golangci-lint >/dev/null 2>&1 && [ ! -x "$(GOBIN_DIR)/golangci-lint" ]; then \
 		echo "Could not find golangci-lint, installing version $(GOLANGCI_LINT_VERSION)."; \
 		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
 	fi
 
 lint-go: setup-env
-	golangci-lint run
+	$(GOLANGCI_LINT) run
 
 generate:
 	go generate
