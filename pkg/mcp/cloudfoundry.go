@@ -12,10 +12,10 @@ import (
 //
 // Cloud Foundry has no equivalent of the docker or Kubernetes runtimes that the
 // other backends drive, so this backend supports exactly the runtimes that need
-// no orchestration: RuntimeRemote and RuntimeComposite, which are served by
-// Obot's own gateway process. Every runtime that requires Obot to start a
-// workload (uvx, npx, containerized) reports ErrNotSupportedByBackend, which the
-// API handlers translate into a 404 rather than a 500.
+// no orchestration: RuntimeRemote and RuntimeVMCP, which are served by Obot's
+// own gateway process. Every runtime that requires Obot to start a workload
+// (uvx, npx, containerized) reports ErrNotSupportedByBackend, which the API
+// handlers translate into a 404 rather than a 500.
 //
 // Deploying MCP servers as Cloud Foundry applications through the Cloud
 // Controller v3 API is deliberately out of scope here; streamServerLogs,
@@ -33,9 +33,13 @@ func newCloudFoundryBackend(authEnabled bool, httpListenPort int, _ Options) bac
 }
 
 // runtimeIsGatewayServed reports whether a runtime is served by Obot's own
-// process and therefore needs no deployment of any kind.
+// process and therefore needs no deployment of any kind. This mirrors the
+// docker and Kubernetes backends, which short-circuit the same two runtimes
+// before touching their orchestrator. RuntimeComposite is deliberately absent:
+// upstream retains it only to identify legacy resources during migration, and
+// the compositemigration controller rewrites those into vmcp servers.
 func runtimeIsGatewayServed(runtime otypes.Runtime) bool {
-	return runtime == otypes.RuntimeRemote || runtime == otypes.RuntimeComposite
+	return runtime == otypes.RuntimeRemote || runtime == otypes.RuntimeVMCP
 }
 
 func (c *cloudFoundryBackend) ensureServerDeployment(_ context.Context, server ServerConfig) (ServerConfig, error) {
