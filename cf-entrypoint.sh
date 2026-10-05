@@ -234,10 +234,12 @@ if [[ -n "$LOGINGOV_JWT_KEY_VALUE" ]]; then
   export OBOT_AUTH_PROVIDER_COOKIE_SECRET="$LOGINGOV_COOKIE_SECRET_VALUE"
   unset LOGINGOV_COOKIE_SECRET_VALUE
 
-  log "login.gov auth provider: configured (client_id=${OBOT_LOGINGOV_AUTH_PROVIDER_CLIENT_ID:-UNSET})"
+  # Validate before logging success. Logging "configured" and then failing on
+  # the next line is actively misleading in a crash-loop transcript.
   if [[ -z "${OBOT_LOGINGOV_AUTH_PROVIDER_CLIENT_ID:-}" ]]; then
     fatal "logingov_jwt_key is set but OBOT_LOGINGOV_AUTH_PROVIDER_CLIENT_ID is not; set it in manifest.yml"
   fi
+  log "login.gov auth provider: configured (client_id=${OBOT_LOGINGOV_AUTH_PROVIDER_CLIENT_ID})"
 else
   log "login.gov auth provider: not configured (no logingov_jwt_key); bootstrap-token auth only"
 fi
