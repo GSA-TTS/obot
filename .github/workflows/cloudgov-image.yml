@@ -45,6 +45,11 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Upstream builds this image on Depot. On a standard 4-CPU runner the Go
+    # build plus the pnpm UI build is slow, and the default 360-minute ceiling
+    # would burn six hours before reporting a hang. 90 is generous for a cold
+    # cache and fails fast on a genuine stall.
+    timeout-minutes: 90
 
     steps:
       - name: Checkout code
@@ -78,7 +83,12 @@ jobs:
         env:
           SUFFIX: ${{ inputs.tag_suffix }}
         run: |
-          base="${REGISTRY}/${IMAGE_NAME}"
+          # Docker repository names must be lowercase, but github.repository
+          # preserves the org's casing ("GSA-TTS/obot"), which buildx rejects
+          # outright: "repository name must be lowercase". Normalize here
+          # rather than hardcoding the path, so the workflow still works in a
+          # renamed or forked repo.
+          base="${REGISTRY}/$(printf '%s' "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
           tags="${base}:cloudgov-${GITHUB_SHA::7}"
           if [ -n "${SUFFIX}" ]; then
             tags="${tags},${base}:cloudgov-${SUFFIX}"
@@ -96,6 +106,13 @@ jobs:
           # double build time for an architecture that cannot run there.
           platforms: linux/amd64
           tags: ${{ steps.tags.outputs.tags }}
+          # BASE_IMAGE is deliberately left at the Dockerfile default
+          # (cgr.dev/chainguard/wolfi-base), which installs the Go/pnpm
+          # toolchain via apk. Upstream passes a prebuilt
+          # ghcr.io/obot-platform/obot/base:latest to skip that, but it builds
+          # on Depot; adding an external image dependency we have not verified
+          # is public would trade a slow build for a new failure mode. If build
+          # time becomes a problem, that arg is the first thing to try.
           build-args: |
             PROVIDERS_IMAGE=${{ inputs.providers_image || 'ghcr.io/obot-platform/providers:latest' }}
           cache-from: type=gha
