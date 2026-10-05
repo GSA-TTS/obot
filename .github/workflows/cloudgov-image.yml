@@ -1,0 +1,151 @@
+name: Build cloud.gov Image
+
+# Builds the Cloud Foundry / cloud.gov variant of the Obot image and pushes it
+# to GHCR. Separate from docker-build-and-push.yml because that workflow builds
+# on Depot (upstream's infrastructure, which this fork cannot use) and bakes in
+# the upstream providers image.
+#
+# The image this produces differs from upstream's only in that it:
+#   1. contains cf-entrypoint.sh and jq (see Dockerfile), and
+#   2. optionally bakes in a custom providers layer carrying the login.gov auth
+#      provider built from GSA-TTS/mcp-server-hub-tools.
+#
+# The image must be PUBLIC: cloud.gov pulls it with no registry credentials.
+
+permissions:
+  contents: read
+  packages: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      providers_image:
+        description: >-
+          Providers image to bake in. Use the GSA providers image to include the
+          login.gov auth provider; leave as upstream for a vanilla build.
+        required: true
+        default: ghcr.io/obot-platform/providers:latest
+      tag_suffix:
+        description: "Extra tag to apply alongside cloudgov-<sha> (e.g. 'latest')"
+        required: false
+        default: ""
+  push:
+    branches:
+      - cloudgov-phase1
+    paths:
+      - "cf-entrypoint.sh"
+      - "Dockerfile"
+      - "pkg/mcp/cloudfoundry*.go"
+      - ".github/workflows/cloudgov-image.yml"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history so `go build` derives a real version rather than
+          # v0.0.0-<ts>-<rev>, which trips vulnerability scanners.
+          fetch-depth: 0
+
+      # Verify the entrypoint is syntactically valid and lint-clean before
+      # spending ~15 minutes on an image build. A shell typo here does not
+      # surface until the app crash-loops on cloud.gov.
+      - name: Lint cf-entrypoint.sh
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          bash -n cf-entrypoint.sh
+          shellcheck cf-entrypoint.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        env:
+          SUFFIX: ${{ inputs.tag_suffix }}
+        run: |
+          base="${REGISTRY}/${IMAGE_NAME}"
+          tags="${base}:cloudgov-${GITHUB_SHA::7}"
+          if [ -n "${SUFFIX}" ]; then
+            tags="${tags},${base}:cloudgov-${SUFFIX}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "Tags: ${tags}"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          push: true
+          # cloud.gov Diego cells are amd64 only. Building arm64 as well would
+          # double build time for an architecture that cannot run there.
+          platforms: linux/amd64
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            PROVIDERS_IMAGE=${{ inputs.providers_image || 'ghcr.io/obot-platform/providers:latest' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The login.gov provider is only usable if its binary actually landed in
+      # /obot-providers. Upstream's Dockerfile assembles that directory from
+      # three separate images, and the auth providers are built by a different
+      # stage than the workspace/encryption providers -- so a providers image
+      # that builds successfully can still omit login.gov entirely. This is
+      # login_auth_roadmap.md open item #3, checked here rather than discovered
+      # after deploy.
+      - name: Verify baked-in providers
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+          PROVIDERS_IMAGE: ${{ inputs.providers_image }}
+        run: |
+          image="$(echo "${TAGS}" | cut -d, -f1)"
+          echo "Inspecting ${image}"
+          docker pull "${image}"
+          echo "--- /obot-providers ---"
+          docker run --rm --entrypoint ls "${image}" /obot-providers
+          echo "--- cf-entrypoint.sh present and executable ---"
+          docker run --rm --entrypoint test "${image}" -x /cf-entrypoint.sh
+          echo "--- jq present ---"
+          docker run --rm --entrypoint jq "${image}" --version
+          if echo "${PROVIDERS_IMAGE}" | grep -qi 'gsa'; then
+            echo "--- login.gov provider expected (GSA providers image) ---"
+            if ! docker run --rm --entrypoint ls "${image}" /obot-providers | grep -qi login; then
+              echo "::error::login.gov provider not found in /obot-providers." \
+                   "The providers image likely built only the workspace/encryption" \
+                   "stage. See login_auth_roadmap.md open item #3."
+              exit 1
+            fi
+            echo "login.gov provider present"
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### cloud.gov image built"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Tags | \`${{ steps.tags.outputs.tags }}\` |"
+            echo "| Digest | \`${{ steps.build.outputs.digest }}\` |"
+            echo "| Providers image | \`${{ inputs.providers_image || 'ghcr.io/obot-platform/providers:latest' }}\` |"
+            echo "| Platform | linux/amd64 |"
+            echo
+            echo "Set this in \`cloudgov/.env\` as \`OBOT_IMAGE\` and run \`make push\`."
+            echo
+            echo "> The image must be **public** for cloud.gov to pull it."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1055,7 +1055,7 @@ export interface Version {
 	licenseEntitlementViolations?: LicenseEntitlementViolation[];
 	missingLicenseEntitlements?: string[];
 	upgradeAvailable?: boolean;
-	engine?: 'docker' | 'kubernetes' | 'local';
+	engine?: 'docker' | 'kubernetes' | 'local' | 'cloudfoundry';
 	mcpNetworkPolicyEnabled?: boolean;
 	mcpDefaultDenyAllEgress?: boolean;
 	messagePoliciesEnabled?: boolean;

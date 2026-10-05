@@ -36,12 +36,18 @@ FROM ${ENTERPRISE_PROVIDERS_IMAGE} AS enterprise-providers
 FROM ${ENCRYPTION_BINS_IMAGE} AS encryption-bins
 
 FROM final-base AS final
-RUN apk add --no-cache bash tini
+# jq parses VCAP_SERVICES in cf-entrypoint.sh. It is only needed for the Cloud
+# Foundry (cloud.gov) deployment, but adding it unconditionally keeps a single
+# image for every target and costs ~1MB.
+RUN apk add --no-cache bash tini jq
 
 COPY aws-encryption.yaml /
 COPY azure-encryption.yaml /
 COPY gcp-encryption.yaml /
 COPY --chmod=0755 run.sh /bin/run.sh
+# Cloud Foundry entrypoint. Not the image ENTRYPOINT: manifest.yml selects it
+# via `command:` so the default (docker/Kubernetes) behavior is unchanged.
+COPY --chmod=0755 cf-entrypoint.sh /cf-entrypoint.sh
 
 COPY --link --from=providers /obot-providers /obot-providers
 COPY --link --from=enterprise-providers /obot-providers /obot-providers
