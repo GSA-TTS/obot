@@ -224,8 +224,23 @@ secret() {
   cred "$SECRETS_SERVICE_NAME" user-provided "$1"
 }
 
-OPENAI_API_KEY_VALUE="$(require_cred "$(secret openai_api_key)" "openai_api_key (model provider key)")"
-export OPENAI_API_KEY="$OPENAI_API_KEY_VALUE"
+# The model-provider key is OPTIONAL. Obot's MCP gateway function -- catalog,
+# remote/vmcp servers, auth, audit -- needs no LLM at all. Requiring a key here
+# would force an operator to invent a bogus value just to boot a gateway, and a
+# bogus value is worse than none: the openai-model-provider daemon then fails
+# 401 in a retry loop that looks like a real misconfiguration.
+#
+# Fail-closed is reserved for things whose absence means silent data loss or
+# plaintext credentials (the database, the encryption key). An absent model
+# provider degrades a feature nobody is using here.
+OPENAI_API_KEY_VALUE="$(secret openai_api_key)"
+if [[ -n "$OPENAI_API_KEY_VALUE" ]]; then
+  export OPENAI_API_KEY="$OPENAI_API_KEY_VALUE"
+  log "model provider: openai_api_key present"
+else
+  log "model provider: no openai_api_key (MCP gateway needs none; agent/LLM features will be unavailable)"
+fi
+unset OPENAI_API_KEY_VALUE
 
 BOOTSTRAP_TOKEN_VALUE="$(require_cred "$(secret bootstrap_token)" "bootstrap_token")"
 export OBOT_BOOTSTRAP_TOKEN="$BOOTSTRAP_TOKEN_VALUE"
