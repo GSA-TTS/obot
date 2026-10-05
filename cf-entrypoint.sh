@@ -124,7 +124,16 @@ DB_PORT="${DB_PORT:-5432}"
 # sslmode=require is mandatory: cloud.gov RDS rejects unencrypted connections,
 # and Go's pq defaults to "prefer", which would silently downgrade rather than
 # fail if that ever changed. (NIST SC-8)
-export OBOT_SERVER_DSN="postgres://$(urlencode "$DB_USER"):$(urlencode "$DB_PASSWORD")@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require"
+#
+# Encode into locals first rather than inline in the export. `export VAR="$(cmd)"`
+# makes the export the command being evaluated, so a non-zero exit from the
+# substitution is masked even under `set -e` -- which would hand Obot a
+# half-formed DSN instead of aborting. (shellcheck SC2155)
+DB_USER_ENC="$(urlencode "$DB_USER")"
+DB_PASSWORD_ENC="$(urlencode "$DB_PASSWORD")"
+OBOT_SERVER_DSN="postgres://${DB_USER_ENC}:${DB_PASSWORD_ENC}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require"
+export OBOT_SERVER_DSN
+unset DB_PASSWORD DB_PASSWORD_ENC
 log "database: ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME} (sslmode=require)"
 
 # --- Artifact storage (s3) ---------------------------------------------------
