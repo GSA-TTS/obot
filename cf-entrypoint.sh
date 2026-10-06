@@ -292,33 +292,6 @@ export OBOT_SERVER_ENCRYPTION_PROVIDER="custom"
 export OBOT_SERVER_ENCRYPTION_CONFIG_FILE="$ENCRYPTION_CONFIG_FILE"
 log "credential encryption: custom AES-GCM over 9 resource types"
 
-# --- login.gov auth provider (optional) --------------------------------------
-# The provider binary is baked into the image at build time (from the
-# mcp-server-hub-tools fork). These variables only configure it. When the JWT
-# key is absent the variables are omitted entirely, so the image still boots
-# with bootstrap-token auth.
-LOGINGOV_JWT_KEY_VALUE="$(secret logingov_jwt_key)"
-if [[ -n "$LOGINGOV_JWT_KEY_VALUE" ]]; then
-  export OBOT_LOGINGOV_AUTH_PROVIDER_JWT_KEY="$LOGINGOV_JWT_KEY_VALUE"
-
-  LOGINGOV_COOKIE_SECRET_VALUE="$(secret auth_cookie_secret)"
-  if [[ -z "$LOGINGOV_COOKIE_SECRET_VALUE" ]]; then
-    fatal "logingov_jwt_key is set but auth_cookie_secret is missing; the login.gov session cookie cannot be signed"
-  fi
-  export OBOT_AUTH_PROVIDER_COOKIE_SECRET="$LOGINGOV_COOKIE_SECRET_VALUE"
-  unset LOGINGOV_COOKIE_SECRET_VALUE
-
-  # Validate before logging success. Logging "configured" and then failing on
-  # the next line is actively misleading in a crash-loop transcript.
-  if [[ -z "${OBOT_LOGINGOV_AUTH_PROVIDER_CLIENT_ID:-}" ]]; then
-    fatal "logingov_jwt_key is set but OBOT_LOGINGOV_AUTH_PROVIDER_CLIENT_ID is not; set it in manifest.yml"
-  fi
-  log "login.gov auth provider: configured (client_id=${OBOT_LOGINGOV_AUTH_PROVIDER_CLIENT_ID})"
-else
-  log "login.gov auth provider: not configured (no logingov_jwt_key); bootstrap-token auth only"
-fi
-unset LOGINGOV_JWT_KEY_VALUE
-
 # --- Hostname sanity check ---------------------------------------------------
 # Obot derives OAuth issuer, authorization, token, and callback URLs from this
 # value. A wrong or http:// hostname produces an app that boots fine and then
