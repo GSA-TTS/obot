@@ -404,3 +404,81 @@ func TestAllowListMatchesExactAndSuffixHosts(t *testing.T) {
 		})
 	}
 }
+
+// HostAllowed is the exported entry point that pre-dial validators use. It must
+// agree with the dialer's own isAllowed for every input, since the entire point
+// of exporting it is to prevent a second matching implementation from drifting.
+func TestHostAllowedMatchesDialerDecision(t *testing.T) {
+	allowList := []string{
+		"api.example.com",
+		"*.apps.internal:8080",
+		"db.example.com:8443",
+	}
+	dialer := safeDialer{allowList: parseAllowList(allowList)}
+
+	tests := []struct {
+		name string
+		host string
+		port string
+		want bool
+	}{
+		{name: "exact host", host: "api.example.com", port: "443", want: true},
+		{name: "cf internal route", host: "mcp-cdc-places.apps.internal", port: "8080", want: true},
+		{name: "cf internal route other port", host: "mcp-nih-reporter.apps.internal", port: "443", want: false},
+		{name: "cf internal apex is not matched", host: "apps.internal", port: "8080", want: false},
+		{name: "lookalike suffix rejected", host: "evil-apps.internal", port: "8080", want: false},
+		{name: "unrelated host", host: "metadata.google.internal", port: "80", want: false},
+		{name: "cloud metadata ip", host: "169.254.169.254", port: "80", want: false},
+		{name: "trailing dot normalized", host: "mcp.apps.internal.", port: "8080", want: true},
+		{name: "uppercase normalized", host: "MCP.APPS.INTERNAL", port: "8080", want: true},
+		{name: "port-scoped entry matches", host: "db.example.com", port: "8443", want: true},
+		{name: "port-scoped entry rejects other port", host: "db.example.com", port: "443", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exported := HostAllowed(allowList, tt.host, tt.port)
+			internal := dialer.isAllowed(tt.host, tt.port)
+
+			if exported != tt.want {
+				t.Errorf("HostAllowed(%q, %q) = %v, want %v", tt.host, tt.port, exported, tt.want)
+			}
+			if exported != internal {
+				t.Errorf("HostAllowed and dialer.isAllowed disagree for %q:%q (%v vs %v)", tt.host, tt.port, exported, internal)
+			}
+		})
+	}
+}
+
+func TestHostAllowedEmptyAllowList(t *testing.T) {
+	if HostAllowed(nil, "mcp.apps.internal", "8080") {
+		t.Error("nil allow list must not allow anything")
+	}
+	if HostAllowed([]string{}, "mcp.apps.internal", "8080") {
+		t.Error("empty allow list must not allow anything")
+	}
+}
+
+func TestPortForURLDefaultsByScheme(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "http://mcp.apps.internal:8080/mcp", want: "8080"},
+		{raw: "http://mcp.apps.internal/mcp", want: "80"},
+		{raw: "https://mcp.apps.internal/mcp", want: "443"},
+		{raw: "ftp://mcp.apps.internal/mcp", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			u, err := url.Parse(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := PortForURL(u); got != tt.want {
+				t.Errorf("PortForURL(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}

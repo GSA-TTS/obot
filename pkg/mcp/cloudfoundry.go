@@ -7,6 +7,19 @@ import (
 	otypes "github.com/obot-platform/obot/apiclient/types"
 )
 
+// cfInternalDomain is the Cloud Foundry internal domain. Routes on it resolve to
+// container IPs in 10.255.0.0/16 and are reachable only from inside the space,
+// and only where a container-to-container network policy permits it.
+//
+// The domain is reserved by the platform: an operator cannot point it at an
+// arbitrary host, and the Cloud Controller will not create a route on it for a
+// hostname another space owns. That is what makes allow-listing the whole
+// suffix narrow rather than broad.
+const (
+	cfInternalDomain  = "apps.internal"
+	cfInternalMCPPort = "8080"
+)
+
 // cloudFoundryBackend runs Obot as a Cloud Foundry application without a
 // container-orchestration runtime for MCP servers.
 //
@@ -20,6 +33,8 @@ import (
 // Deploying MCP servers as Cloud Foundry applications through the Cloud
 // Controller v3 API is deliberately out of scope here; streamServerLogs,
 // restartServer, and getServerDetails are the seams that work would grow into.
+// Until then, MCP servers are deployed as their own Cloud Foundry apps on the
+// internal domain and registered as RuntimeRemote -- see remoteConfig.
 type cloudFoundryBackend struct {
 	authEnabled    bool
 	httpListenPort int
@@ -110,11 +125,34 @@ func (c *cloudFoundryBackend) transformObotHostname(url string) string {
 	return url
 }
 
-// remoteConfig returns the global validation config untouched, which keeps
-// localhost, private-IP, and link-local blocking exactly as the operator
-// configured it. The docker backend has to relax private-IP blocking because it
-// talks to MCP containers over a bridge network; this backend talks to nothing
-// internal, so it grants no exceptions and returns an empty allowlist.
+// remoteConfig keeps the operator's address-range policy untouched and adds the
+// Cloud Foundry internal domain and MCP listener port to the allow list.
+//
+// MCP servers that this backend cannot deploy (containerized, uvx, npx) are
+// instead deployed as their own Cloud Foundry apps with a route on
+// apps.internal, no public route, and a container-to-container network policy
+// admitting only the gateway. They are then registered as RuntimeRemote.
+//
+// Those routes resolve to 10.255.0.0/16, which is RFC1918, so Obot's default
+// DisallowPrivateIPMCP would reject them -- at admission, before any of the
+// network plumbing is exercised. Allow-listing the suffix on port 8080 is the
+// narrow fix:
+//
+//   - Private, loopback, and link-local blocking all remain in force for every
+//     other host, which is what protects operator- and partner-supplied remote
+//     URLs from being used for SSRF against the platform's internal network.
+//   - apps.internal is platform-reserved and space-scoped. A route on it cannot
+//     be created for a hostname another space owns, so the suffix cannot be
+//     used to reach anything the gateway was not deliberately given a network
+//     policy for.
+//
+// The alternative -- setting DisallowPrivateIPMCP=false -- would unblock the
+// entire RFC1918 space for every remote server, including partner-supplied
+// URLs. That is a much larger hole than the one being opened here.
+//
+// The flags are returned unwidened on purpose: unlike the docker backend, this
+// one does not need private-IP blocking relaxed wholesale, because every host
+// it legitimately reaches is nameable.
 func (c *cloudFoundryBackend) remoteConfig(globalConfig RemoteMCPURLValidationConfig) (RemoteMCPURLValidationConfig, []string) {
-	return globalConfig, nil
+	return globalConfig, []string{"*." + cfInternalDomain + ":" + cfInternalMCPPort}
 }

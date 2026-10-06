@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	otypes "github.com/obot-platform/obot/apiclient/types"
+	"github.com/obot-platform/obot/pkg/safehttp"
 )
 
 var (
@@ -209,21 +210,81 @@ func TestCloudFoundryTransformObotHostnameIsIdentity(t *testing.T) {
 // grant no network exceptions. The docker backend has to relax private-IP
 // blocking to reach bridge-network containers; this backend talks to nothing
 // internal, so weakening the operator's posture here would be a regression.
-func TestCloudFoundryRemoteConfigGrantsNoExceptions(t *testing.T) {
+// remoteConfig must not widen the operator's address-range flags. Only the
+// allow list is the backend's contribution. Widening the flags here would
+// relax blocking for EVERY remote server, including operator- and
+// partner-supplied URLs, which is the hole this design exists to avoid.
+func TestCloudFoundryRemoteConfigDoesNotWidenOperatorFlags(t *testing.T) {
 	backend := &cloudFoundryBackend{}
 
 	for _, global := range []RemoteMCPURLValidationConfig{
 		{},
 		{AllowLocalhostMCP: true, AllowPrivateIPMCP: true, AllowLinkLocalMCP: true},
 		{AllowPrivateIPMCP: true},
+		{AllowLocalhostMCP: true},
 	} {
-		got, allowlist := backend.remoteConfig(global)
-		if got != global {
-			t.Fatalf("remoteConfig(%+v) = %+v, want unchanged", global, got)
+		got, _ := backend.remoteConfig(global)
+
+		if got.AllowLocalhostMCP != global.AllowLocalhostMCP ||
+			got.AllowPrivateIPMCP != global.AllowPrivateIPMCP ||
+			got.AllowLinkLocalMCP != global.AllowLinkLocalMCP {
+			t.Fatalf("remoteConfig(%+v) changed the operator flags: %+v", global, got)
 		}
-		if len(allowlist) != 0 {
-			t.Fatalf("expected empty allowlist, got %v", allowlist)
-		}
+	}
+}
+
+// The allow list must contain exactly the Cloud Foundry internal domain and MCP
+// listener port.
+//
+// MCP servers this backend cannot deploy are instead run as their own CF apps
+// on apps.internal, which resolves into 10.255.0.0/16 -- RFC1918. Without this
+// entry, Obot's default DisallowPrivateIPMCP rejects them at admission, before
+// any network plumbing is exercised.
+func TestCloudFoundryRemoteConfigAllowsInternalDomain(t *testing.T) {
+	backend := &cloudFoundryBackend{}
+
+	_, allowList := backend.remoteConfig(RemoteMCPURLValidationConfig{})
+
+	if len(allowList) != 1 {
+		t.Fatalf("expected exactly one allow-list entry, got %v", allowList)
+	}
+	if allowList[0] != "*.apps.internal:8080" {
+		t.Fatalf("allow list = %q, want %q", allowList[0], "*.apps.internal:8080")
+	}
+}
+
+// The allow list is only useful if it admits real internal routes and nothing
+// else. Assert against safehttp.HostAllowed -- the same function the dialer
+// uses -- rather than re-deriving the matching rules here.
+func TestCloudFoundryAllowListScope(t *testing.T) {
+	backend := &cloudFoundryBackend{}
+	_, allowList := backend.remoteConfig(RemoteMCPURLValidationConfig{})
+
+	tests := []struct {
+		name string
+		host string
+		port string
+		want bool
+	}{
+		{name: "internal MCP route", host: "mcp-cdc-places.apps.internal", port: "8080", want: true},
+		{name: "another internal route", host: "mcp-nih-reporter.apps.internal", port: "8080", want: true},
+		{name: "internal route on another port", host: "mcp-cdc-places.apps.internal", port: "80", want: false},
+		{name: "internal apex is not a route", host: "apps.internal", port: "8080", want: false},
+		{name: "lookalike domain", host: "evil-apps.internal", port: "8080", want: false},
+		{name: "attacker-controlled suffix", host: "apps.internal.evil.com", port: "443", want: false},
+		{name: "public route", host: "mcp-server-hub.app.cloud.gov", port: "443", want: false},
+		{name: "cloud metadata endpoint", host: "169.254.169.254", port: "80", want: false},
+		{name: "loopback", host: "127.0.0.1", port: "8080", want: false},
+		{name: "arbitrary private IP", host: "10.0.0.5", port: "8080", want: false},
+		{name: "kubernetes service domain", host: "svc.cluster.local", port: "443", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := safehttp.HostAllowed(allowList, tt.host, tt.port); got != tt.want {
+				t.Errorf("HostAllowed(%q, %q) = %v, want %v", tt.host, tt.port, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -250,4 +311,69 @@ func TestNewCloudFoundryBackendReturnsUsableBackend(t *testing.T) {
 	if cf.httpListenPort != 8080 {
 		t.Errorf("httpListenPort = %d, want 8080 (constructor argument ignored)", cf.httpListenPort)
 	}
+}
+
+// End-to-end admission check for the Tier 2 topology: an MCP server deployed as
+// its own Cloud Foundry app on apps.internal, registered as a remote server.
+//
+// This is the case that motivated the allow list. apps.internal resolves into
+// 10.255.0.0/16, so with Obot's default DisallowPrivateIPMCP the URL is
+// rejected at admission -- in the admin UI, before any network policy or C2C
+// path is exercised. The test asserts the allow list reaches
+// ValidateRemoteMCPURL, and that it opens nothing wider than that one domain.
+//
+// Hostnames here never resolve, which is the point: the allow list must be
+// consulted BEFORE DNS, exactly as safeDialer.checkHost does. A blocked host
+// therefore fails on resolution rather than on address range, so the assertion
+// is only that it fails.
+func TestCloudFoundryInternalURLPassesRemoteValidation(t *testing.T) {
+	backend := &cloudFoundryBackend{}
+	// The operator's strictest posture, which is also the default.
+	strict := RemoteMCPURLValidationConfig{
+		AllowLocalhostMCP: false,
+		AllowPrivateIPMCP: false,
+		AllowLinkLocalMCP: false,
+	}
+	_, allowList := backend.remoteConfig(strict)
+	strict.AllowedHosts = allowList
+
+	t.Run("internal MCP URL is admitted", func(t *testing.T) {
+		for _, rawURL := range []string{
+			"http://mcp-cdc-places.apps.internal:8080/mcp",
+			"http://mcp-nih-reporter.apps.internal:8080/mcp",
+			"http://some-server.apps.internal:8080/mcp",
+		} {
+			if err := ValidateRemoteMCPURL(t.Context(), rawURL, strict); err != nil {
+				t.Errorf("ValidateRemoteMCPURL(%q) = %v, want nil", rawURL, err)
+			}
+		}
+	})
+
+	t.Run("the allow list does not admit anything else", func(t *testing.T) {
+		for _, rawURL := range []string{
+			"http://localhost:8080/mcp",
+			"http://127.0.0.1:8080/mcp",
+			"http://169.254.169.254/latest/meta-data/",
+			"http://10.0.0.5:8080/mcp",
+			"http://mcp-cdc-places.apps.internal/mcp",
+			"http://apps.internal/mcp",
+			"http://evil-apps.internal/mcp",
+			"http://apps.internal.attacker.example/mcp",
+		} {
+			if err := ValidateRemoteMCPURL(t.Context(), rawURL, strict); err == nil {
+				t.Errorf("ValidateRemoteMCPURL(%q) = nil, want an error", rawURL)
+			}
+		}
+	})
+
+	t.Run("without the allow list the internal URL is rejected", func(t *testing.T) {
+		// Pins the regression this fixes: the same URL under the same operator
+		// policy, minus the backend's contribution, must fail.
+		noAllowList := strict
+		noAllowList.AllowedHosts = nil
+
+		if err := ValidateRemoteMCPURL(t.Context(), "http://mcp-cdc-places.apps.internal:8080/mcp", noAllowList); err == nil {
+			t.Error("expected rejection without the backend allow list")
+		}
+	})
 }

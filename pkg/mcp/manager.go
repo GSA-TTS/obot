@@ -14,6 +14,7 @@ import (
 	"github.com/obot-platform/obot/apiclient/types"
 	gateway "github.com/obot-platform/obot/pkg/gateway/client"
 	"github.com/obot-platform/obot/pkg/jwt/persistent"
+	"github.com/obot-platform/obot/pkg/safehttp"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	"github.com/obot-platform/obot/pkg/system"
 	"github.com/obot-platform/obot/pkg/tunnel"
@@ -118,6 +119,23 @@ type RemoteMCPURLValidationConfig struct {
 	AllowLocalhostMCP bool
 	AllowPrivateIPMCP bool
 	AllowLinkLocalMCP bool
+
+	// AllowedHosts exempts specific hosts from the address-range checks above.
+	// It is supplied by the runtime backend, not the operator, and names the
+	// backend's own internal plumbing: the Kubernetes service domain, the
+	// docker bridge address, or the Cloud Foundry internal domain.
+	//
+	// This exists because the backend is the only thing that knows where it
+	// puts MCP servers. Without it, a backend that reaches its servers over a
+	// private address range would have to disable private-IP blocking
+	// wholesale, which would also unblock every operator- and
+	// partner-supplied remote URL -- a much larger hole than the one being
+	// opened.
+	//
+	// Entries use the same syntax as safehttp.Options.AllowList ("host",
+	// "host:port", "*.suffix", "*.suffix:port") and are matched by
+	// safehttp.HostAllowed so that validation and the dialer cannot disagree.
+	AllowedHosts []string
 }
 
 func NewSessionManager(ctx context.Context, authEnabled bool, globalTokenStore GlobalTokenStore, tokenService *persistent.TokenService, baseURL string, httpListenPort int, opts Options, webhookHelper *WebhookHelper, localK8sConfig *rest.Config, client, cachedClient, obotStorageClient kclient.WithWatch, gatewayClient *gateway.Client, obotNamespace string, tunnelManager *tunnel.Manager) (*SessionManager, error) {
@@ -208,8 +226,29 @@ func (sm *SessionManager) MCPRuntimeBackend() string {
 	return sm.runtimeBackend
 }
 
+// RemoteMCPURLValidationConfig returns the operator's address-range policy with
+// the runtime backend's allowed hosts attached.
+//
+// The operator's three Disallow* flags are passed through UNCHANGED. Only
+// AllowedHosts is contributed by the backend, naming the internal plumbing it
+// reaches MCP servers over -- the Cloud Foundry internal domain, the Kubernetes
+// service domain, the docker bridge. Backends can also widen the flags
+// themselves (docker does), but that widening applies to the HTTP client only,
+// via RemoteConfigForBackend; admission must not inherit it, because it would
+// then unblock every operator- and partner-supplied URL as well.
+//
+// Attaching AllowedHosts here, rather than at each call site, keeps all four
+// validation paths consistent: catalog/server admission, launch, the OAuth
+// metadata sync, and the gateway OAuth flow. Previously none of them saw the
+// backend's allow list at all, so a URL the HTTP client would happily dial
+// could still be rejected at admission.
 func (sm *SessionManager) RemoteMCPURLValidationConfig() RemoteMCPURLValidationConfig {
-	return sm.remoteURLValidationConfig
+	config := sm.remoteURLValidationConfig
+	if sm.backend != nil {
+		_, allowedHosts := sm.backend.remoteConfig(sm.remoteURLValidationConfig)
+		config.AllowedHosts = allowedHosts
+	}
+	return config
 }
 
 func (sm *SessionManager) ResourceMaximums() ResourceMaximums {
@@ -272,6 +311,10 @@ func (sm *SessionManager) TransformObotHostname(hostname string) string {
 	return sm.backend.transformObotHostname(hostname)
 }
 
+// RemoteConfigForBackend returns the backend-adjusted policy and allow list for
+// constructing the outbound HTTP client. Unlike RemoteMCPURLValidationConfig,
+// this includes any widening the backend applies to the flags themselves, which
+// the docker backend needs to reach containers over the bridge network.
 func (sm *SessionManager) RemoteConfigForBackend() (RemoteMCPURLValidationConfig, []string) {
 	return sm.backend.remoteConfig(sm.remoteURLValidationConfig)
 }
@@ -409,6 +452,13 @@ func (sm *SessionManager) ensureDeployment(ctx context.Context, server ServerCon
 }
 
 // ValidateRemoteMCPURL rejects remote MCP URLs that resolve to blocked local address ranges.
+//
+// Hosts in config.AllowedHosts are exempt. That list comes from the runtime
+// backend and names the backend's own internal plumbing (the Cloud Foundry
+// internal domain, the Kubernetes service domain, the docker bridge), so this
+// function must apply it for the same reason safehttp's dialer does: a server
+// the backend deliberately placed on a private address must be reachable
+// without unblocking private addresses generally.
 func ValidateRemoteMCPURL(ctx context.Context, rawURL string, config RemoteMCPURLValidationConfig) error {
 	if strings.TrimSpace(rawURL) == "" {
 		return nil
@@ -423,6 +473,14 @@ func ValidateRemoteMCPURL(ctx context.Context, rawURL string, config RemoteMCPUR
 	}
 
 	hostname := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+
+	// Delegate to safehttp so the allow-list decision here is literally the
+	// same code the dialer will run. Checking the allow-list before the
+	// address-range checks mirrors safeDialer.checkHost.
+	if len(config.AllowedHosts) > 0 && safehttp.HostAllowed(config.AllowedHosts, hostname, safehttp.PortForURL(u)) {
+		return nil
+	}
+
 	if !config.AllowLocalhostMCP && (hostname == "localhost" || strings.HasSuffix(hostname, ".localhost")) {
 		return fmt.Errorf("MCP server URL must not be a localhost URL: %s", rawURL)
 	}

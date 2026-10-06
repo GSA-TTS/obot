@@ -194,8 +194,24 @@ func (d *safeDialer) checkHost(ctx context.Context, host, port string) ([]net.IP
 }
 
 func (d *safeDialer) isAllowed(host, port string) bool {
+	return hostMatchesAllowList(d.allowList, host, port)
+}
+
+// HostAllowed reports whether host:port matches an allow-list entry, using the
+// same parsing and matching rules the dialer applies.
+//
+// Exported so that callers which validate a URL *before* dialing it -- notably
+// MCP remote-URL admission -- can reach the identical decision. A second
+// implementation of this matching would be free to drift from the one that
+// actually governs the connection, which is the worst kind of security bug:
+// a check that agrees with the enforcement right up until it does not.
+func HostAllowed(allowList []string, host, port string) bool {
+	return hostMatchesAllowList(parseAllowList(allowList), host, port)
+}
+
+func hostMatchesAllowList(allowList []allowListEntry, host, port string) bool {
 	host = normalizeHost(host)
-	for _, entry := range d.allowList {
+	for _, entry := range allowList {
 		if entry.port != "" && entry.port != port {
 			continue
 		}
@@ -317,4 +333,11 @@ func portForURL(u *url.URL) string {
 	default:
 		return ""
 	}
+}
+
+// PortForURL returns the effective port for a URL, defaulting by scheme when no
+// port is explicit. Exported alongside HostAllowed so pre-dial validators derive
+// the port exactly as the dialer does.
+func PortForURL(u *url.URL) string {
+	return portForURL(u)
 }
