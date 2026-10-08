@@ -179,11 +179,59 @@ func TestEnsureIdentityWithRoleAllowsVerifiedIdentityForExistingUserAtLimit(t *t
 	if existing.ID != first.ID {
 		t.Fatalf("linked user ID = %d, want existing user ID %d", existing.ID, first.ID)
 	}
+
+	loginGovIdentity := &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		ProviderUsername:      "google-user",
+		ProviderUserID:        "login-gov-user",
+		Email:                 "same-user@example.com",
+	}
+	existing, err = c.EnsureIdentityWithRole(t.Context(), loginGovIdentity, "", apitypes.RoleBasic, limit)
+	if err != nil {
+		t.Fatalf("linking Login.gov identity with an existing username: %v", err)
+	}
+	if existing.ID != first.ID {
+		t.Fatalf("Login.gov linked user ID = %d, want existing user ID %d", existing.ID, first.ID)
+	}
 	if got := countIdentityUserLimitTestUsers(t, c, true); got != 1 {
 		t.Fatalf("users counted toward limit = %d, want 1", got)
 	}
-	if got := countIdentityUserLimitTestIdentities(t, c); got != 2 {
-		t.Fatalf("identities = %d, want 2", got)
+	if got := countIdentityUserLimitTestIdentities(t, c); got != 3 {
+		t.Fatalf("identities = %d, want 3", got)
+	}
+}
+
+func TestEnsureIdentityWithRoleDoesNotLinkVerifiedIdentityByUsername(t *testing.T) {
+	c := newIdentityUserLimitTestClient(t)
+	limit := UserLimit{Unlimited: true}
+
+	first, err := c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "google-auth-provider",
+		ProviderUsername:      "shared-username",
+		ProviderUserID:        "google-user",
+		Email:                 "first-user@example.com",
+	}, "", apitypes.RoleBasic, limit)
+	if err != nil {
+		t.Fatalf("creating first verified identity: %v", err)
+	}
+
+	_, err = c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		ProviderUsername:      first.Username,
+		ProviderUserID:        "login-gov-user",
+		Email:                 "second-user@example.com",
+	}, "", apitypes.RoleBasic, limit)
+	if err == nil {
+		t.Fatal("linking a verified identity with a different email succeeded, want unique username error")
+	}
+	if got := countIdentityUserLimitTestUsers(t, c, true); got != 1 {
+		t.Fatalf("users counted toward limit = %d, want 1", got)
+	}
+	if got := countIdentityUserLimitTestIdentities(t, c); got != 1 {
+		t.Fatalf("identities = %d, want 1; rejected identity was not rolled back", got)
 	}
 }
 

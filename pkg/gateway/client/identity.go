@@ -33,6 +33,7 @@ var (
 	verifiedAuthProviders = []string{
 		"default/google-auth-provider",
 		"default/github-auth-provider",
+		"default/login-gov-auth-provider",
 	}
 
 	identityGroupResource = schema.GroupResource{
