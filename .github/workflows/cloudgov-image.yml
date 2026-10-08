@@ -96,6 +96,21 @@ jobs:
           echo "tags=${tags}" >> "$GITHUB_OUTPUT"
           echo "Tags: ${tags}"
 
+      - name: Resolve providers image
+        id: providers
+        env:
+          INPUT_IMAGE: ${{ inputs.providers_image }}
+        run: |
+          set -euo pipefail
+          image="${INPUT_IMAGE:-ghcr.io/obot-platform/providers:latest}"
+          if echo "${image}" | grep -qi '^ghcr.io/gsa-tts/' && \
+             ! echo "${image}" | grep -q '@sha256:'; then
+            echo "::error::GSA providers images must be pinned by digest"
+            exit 1
+          fi
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "Providers image: ${image}"
+
       - name: Build and push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         id: build
@@ -114,7 +129,7 @@ jobs:
           # is public would trade a slow build for a new failure mode. If build
           # time becomes a problem, that arg is the first thing to try.
           build-args: |
-            PROVIDERS_IMAGE=${{ inputs.providers_image || 'ghcr.io/obot-platform/providers:latest' }}
+            PROVIDERS_IMAGE=${{ steps.providers.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -123,7 +138,7 @@ jobs:
       - name: Verify baked-in providers
         env:
           TAGS: ${{ steps.tags.outputs.tags }}
-          PROVIDERS_IMAGE: ${{ inputs.providers_image }}
+          PROVIDERS_IMAGE: ${{ steps.providers.outputs.image }}
         run: |
           set -euo pipefail
           image="$(echo "${TAGS}" | cut -d, -f1)"
@@ -161,7 +176,7 @@ jobs:
             echo "|---|---|"
             echo "| Tags | \`${{ steps.tags.outputs.tags }}\` |"
             echo "| Digest | \`${{ steps.build.outputs.digest }}\` |"
-            echo "| Providers image | \`${{ inputs.providers_image || 'ghcr.io/obot-platform/providers:latest' }}\` |"
+            echo "| Providers image | \`${{ steps.providers.outputs.image }}\` |"
             echo "| Platform | linux/amd64 |"
             echo
             echo "Set this in \`cloudgov/.env\` as \`OBOT_IMAGE\` and run \`make push\`."
