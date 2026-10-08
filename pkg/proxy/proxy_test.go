@@ -61,3 +61,27 @@ func TestStagedVerificationProviderIgnoresAnEmptyVerifyCookie(t *testing.T) {
 		t.Fatalf("stagedVerificationProvider() = %q, want %q", got, "")
 	}
 }
+
+func TestValidateSerializableState(t *testing.T) {
+	tests := []struct {
+		name    string
+		state   serializableState
+		wantErr bool
+	}{
+		{name: "valid", state: serializableState{User: "subject", Email: " User@GSA.GOV "}},
+		{name: "missing user ID", state: serializableState{Email: "user@gsa.gov"}, wantErr: true},
+		{name: "missing email", state: serializableState{User: "subject"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSerializableState(&tt.state)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateSerializableState() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && tt.state.Email != "user@gsa.gov" {
+				t.Fatalf("normalized email = %q, want user@gsa.gov", tt.state.Email)
+			}
+		})
+	}
+}

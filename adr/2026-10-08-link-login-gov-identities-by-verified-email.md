@@ -31,7 +31,7 @@ Obot links identities from explicitly trusted providers to an existing user when
 
 ## Decision
 
-Treat only `default/login-gov-auth-provider` as a verified-email provider, alongside the existing Google and GitHub providers. Normalize external-provider email addresses before hashing, and link a trusted provider's identity to an active user when that normalized email hash matches. The incoming verified identity upgrades an account originally created by an unverified provider, including Local auth. Do not link identities by username, Login.gov subject, or an unverified incoming email.
+Treat only `default/login-gov-auth-provider` as a verified-email provider, alongside the existing Google and GitHub providers. Normalize external-provider email addresses before hashing, and link a trusted provider's identity to an active user when that normalized email hash matches. The incoming verified identity upgrades an account originally created by an unverified provider, including Local auth. Require every provider identity to have a non-empty stable user ID, username, and email; reject an established provider subject if its email changes. Linking another identity must not overwrite the existing account's canonical username or email. Do not link identities by username, Login.gov subject, or an unverified incoming email.
 
 ## Rationale
 
@@ -39,7 +39,7 @@ The Login.gov provider establishes the trust needed by validating the signed ID 
 
 ## Consequences
 
-A Login.gov identity with the same verified email as an existing user inherits that user's account and role, even when the existing account was created through Local auth and marked unverified. Operators must preserve the provider's userinfo verification behavior; weakening it requires revisiting this decision. Users with different emails remain separate even if their provider usernames collide, and the unique username constraint continues to reject that collision rather than linking accounts.
+A Login.gov identity with the same verified email as an existing user inherits that user's account and role, even when the existing account was created through Local auth and marked unverified. Operators must preserve the provider's userinfo verification behavior and stable-subject mapping; weakening either requires revisiting this decision. Users with distinct subjects and emails remain separate, and a malformed or inconsistent provider identity fails closed before it can reuse or mutate another user's account.
 
 ## References
 

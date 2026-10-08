@@ -161,6 +161,9 @@ func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Iden
 	email := NormalizeEmail(id.Email)
 	providerUserID := id.ProviderUserID
 	providerUsername := id.ProviderUsername
+	if strings.TrimSpace(providerUserID) == "" || strings.TrimSpace(providerUsername) == "" {
+		return nil, false, errors.New("auth provider identity requires a user ID and username")
+	}
 	id.Email = email
 
 	if id.ProviderUserID != "" {
@@ -218,6 +221,9 @@ func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Iden
 	}
 	if err := c.decryptIdentity(ctx, id); err != nil {
 		return nil, false, fmt.Errorf("failed to decrypt identity: %w", err)
+	}
+	if NormalizeEmail(id.Email) != email {
+		return nil, false, errors.New("auth provider changed the email for an existing identity")
 	}
 
 	var updateIdentity bool
@@ -303,18 +309,6 @@ func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Iden
 
 			if time.Since(user.LastActiveDay) > 24*time.Hour {
 				user.LastActiveDay = time.Now().UTC().Truncate(24 * time.Hour)
-				userChanged = true
-			}
-
-			if user.Username != id.ProviderUsername {
-				user.Username = id.ProviderUsername
-				user.HashedUsername = hash.String(user.Username)
-				userChanged = true
-			}
-
-			if user.Email != email {
-				user.Email = email
-				user.HashedEmail = hash.String(user.Email)
 				userChanged = true
 			}
 
