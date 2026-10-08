@@ -158,9 +158,10 @@ func (c *Client) EncryptIdentities(ctx context.Context, force bool) error {
 func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Identity, timezone string, role types2.Role, userLimit UserLimit) (*types.User, bool, error) {
 	verified := slices.Contains(verifiedAuthProviders, fmt.Sprintf("%s/%s", id.AuthProviderNamespace, id.AuthProviderName))
 
-	email := id.Email
+	email := NormalizeEmail(id.Email)
 	providerUserID := id.ProviderUserID
 	providerUsername := id.ProviderUsername
+	id.Email = email
 
 	if id.ProviderUserID != "" {
 		id.HashedProviderUserID = hash.String(id.ProviderUserID)
@@ -249,8 +250,9 @@ func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Iden
 		checkForExistingUser = true
 	} else if verified {
 		// Check for an existing user with this exact verified email address.
-		// We check for both true and null values, because the email might have been verified before we started tracking verified emails.
-		userQuery = userQuery.Where("hashed_email = ? and (verified_email = true or verified_email is null)", user.HashedEmail)
+		// The incoming provider proves ownership of the address, so an account created by an
+		// unverified provider can be linked and upgraded instead of duplicated.
+		userQuery = userQuery.Where("hashed_email = ?", user.HashedEmail)
 		checkForExistingUser = true
 	}
 

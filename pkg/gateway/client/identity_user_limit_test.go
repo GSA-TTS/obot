@@ -202,6 +202,51 @@ func TestEnsureIdentityWithRoleAllowsVerifiedIdentityForExistingUserAtLimit(t *t
 	}
 }
 
+func TestEnsureIdentityWithRoleLinksVerifiedIdentityToUnverifiedUser(t *testing.T) {
+	c := newIdentityUserLimitTestClient(t)
+	limit := UserLimit{Unlimited: true}
+
+	first, err := c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      system.LocalAuthProvider,
+		ProviderUsername:      "same-user@example.com",
+		ProviderUserID:        "same-user@example.com",
+		Email:                 "same-user@example.com",
+	}, "", apitypes.RoleOwner, limit)
+	if err != nil {
+		t.Fatalf("creating unverified Local auth user: %v", err)
+	}
+	if first.VerifiedEmail == nil || *first.VerifiedEmail {
+		t.Fatalf("Local auth verified email = %v, want false", first.VerifiedEmail)
+	}
+
+	linked, err := c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		ProviderUsername:      "same-user@example.com",
+		ProviderUserID:        "login-gov-user",
+		Email:                 "Same-User@Example.COM ",
+	}, "", apitypes.RoleBasic, limit)
+	if err != nil {
+		t.Fatalf("linking verified Login.gov identity to Local auth user: %v", err)
+	}
+	if linked.ID != first.ID {
+		t.Fatalf("Login.gov linked user ID = %d, want Local auth user ID %d", linked.ID, first.ID)
+	}
+	if linked.VerifiedEmail == nil || !*linked.VerifiedEmail {
+		t.Fatalf("linked user verified email = %v, want true", linked.VerifiedEmail)
+	}
+	if linked.Email != "same-user@example.com" {
+		t.Fatalf("linked user email = %q, want normalized email", linked.Email)
+	}
+	if got := countIdentityUserLimitTestUsers(t, c, true); got != 1 {
+		t.Fatalf("users counted toward limit = %d, want 1", got)
+	}
+	if got := countIdentityUserLimitTestIdentities(t, c); got != 2 {
+		t.Fatalf("identities = %d, want 2", got)
+	}
+}
+
 func TestEnsureIdentityWithRoleDoesNotLinkVerifiedIdentityByUsername(t *testing.T) {
 	c := newIdentityUserLimitTestClient(t)
 	limit := UserLimit{Unlimited: true}
