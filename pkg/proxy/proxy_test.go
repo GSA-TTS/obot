@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/obot-platform/obot/pkg/auth"
@@ -81,6 +83,42 @@ func TestValidateSerializableState(t *testing.T) {
 			}
 			if !tt.wantErr && tt.state.Email != "user@gsa.gov" {
 				t.Fatalf("normalized email = %q, want user@gsa.gov", tt.state.Email)
+			}
+		})
+	}
+}
+
+func TestDecodeSerializableState(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		body        string
+		wantInvalid bool
+		wantErr     bool
+		wantUser    string
+	}{
+		{name: "valid", status: http.StatusOK, body: "{\"user\":\"subject\",\"email\":\"user@gsa.gov\"}", wantUser: "subject"},
+		{name: "unauthorized plain text", status: http.StatusUnauthorized, body: "failed to get authentication state", wantInvalid: true, wantErr: true},
+		{name: "forbidden", status: http.StatusForbidden, body: "forbidden", wantInvalid: true, wantErr: true},
+		{name: "legacy missing session", status: http.StatusInternalServerError, body: "record not found", wantInvalid: true, wantErr: true},
+		{name: "sanitized server error", status: http.StatusInternalServerError, body: "sensitive upstream detail", wantErr: true},
+		{name: "malformed success", status: http.StatusOK, body: "failed", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ss, err := decodeSerializableState(tt.status, []byte(tt.body))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("decodeSerializableState() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if errors.Is(err, ErrInvalidSession) != tt.wantInvalid {
+				t.Fatalf("decodeSerializableState() invalid session = %v, want %v", errors.Is(err, ErrInvalidSession), tt.wantInvalid)
+			}
+			if !tt.wantInvalid && err != nil && strings.Contains(err.Error(), tt.body) {
+				t.Fatal("decodeSerializableState() leaked the provider response body")
+			}
+			if ss.User != tt.wantUser {
+				t.Fatalf("decodeSerializableState() user = %q, want %q", ss.User, tt.wantUser)
 			}
 		})
 	}
