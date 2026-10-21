@@ -20,6 +20,12 @@ Obot is an open source AI governance platform with the following features:
 
 ## Common Commands
 
+### Agent Sandbox Constraints
+
+- Do not run memory-intensive Go tests or broad Go test suites in the agent sandbox; the sandbox does not have enough memory to run them reliably. Instead, provide the exact Go test command for the user to run in their local terminal and ask for the output when it is needed to continue.
+- The agent sandbox does not have Cloud Foundry CLI access. Do not run `cf` commands in the sandbox; provide the exact commands for the user to run in their authenticated local terminal.
+- Sandbox-safe checks such as formatting, conflict-marker searches, and `git diff --check` may still be run by the agent.
+
 ### Development
 ```bash
 make dev              # Run full dev environment (Go server + SvelteKit UI) with hot reload
