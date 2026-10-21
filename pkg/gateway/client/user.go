@@ -14,8 +14,10 @@ import (
 	"github.com/obot-platform/obot/pkg/accesstoken"
 	"github.com/obot-platform/obot/pkg/gateway/types"
 	"github.com/obot-platform/obot/pkg/hash"
+	"github.com/obot-platform/obot/pkg/principal"
 	"github.com/obot-platform/obot/pkg/system"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kuser "k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/storage/value"
@@ -56,7 +58,14 @@ func (c *Client) UserFromToken(ctx context.Context, token string) (*types.User, 
 
 	// Get the user and their group IDs for this auth provider
 	u, groupIDs, err := c.getUserAndGroupIDs(ctx, userID, namespace, name)
-	if err != nil {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// The token outlived its user. Deny it rather than treating it as an unknown token, which would let the
+		// request continue as anonymous.
+		return nil, "", "", "", nil, &UserAccessDeniedError{
+			UserID: userID,
+			Status: types2.UserStatusDeleted,
+		}
+	} else if err != nil {
 		return nil, "", "", "", nil, err
 	}
 
@@ -79,11 +88,7 @@ func (c *Client) Users(ctx context.Context, query types.UserQuery) ([]types.User
 }
 
 func (c *Client) UserCount(ctx context.Context) (int64, error) {
-	var count int64
-	if err := c.db.WithContext(ctx).Model(&types.User{}).Where("deleted_at IS NULL").Where("hashed_username != ?", hash.String(system.BootstrapName)).Count(&count).Error; err != nil {
-		return 0, err
-	}
-	return count, nil
+	return countUsersTowardLimit(c.db.WithContext(ctx))
 }
 
 func (c *Client) User(ctx context.Context, username string) (*types.User, error) {
@@ -145,9 +150,10 @@ func (c *Client) UserInfoByID(ctx context.Context, userID uint) (kuser.Info, err
 		UID:    fmt.Sprintf("%d", u.ID),
 		Groups: u.Role.Groups(),
 		Extra: map[string][]string{
-			"obot_groups":          u.Role.Groups(),
-			"auth_provider_groups": groupIDs,
-			"email":                {u.Email},
+			"obot_groups":             u.Role.Groups(),
+			"auth_provider_groups":    groupIDs,
+			"email":                   {u.Email},
+			principal.UserStatusExtra: {string(u.Status())},
 		},
 	}, nil
 }
@@ -220,7 +226,17 @@ func (c *Client) DeleteUser(ctx context.Context, userID string) error {
 	existingUser := new(types.User)
 
 	return c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := refuseClaudeTagUserMutation(tx, userID); err != nil {
+			return err
+		}
+
 		if err := tx.Where("id = ?", userID).First(existingUser).Error; err != nil {
+			return err
+		}
+
+		// A user that SCIM has provisioned can be deleted only once the identity provider has deprovisioned them.
+		// Their SCIM ID is retired, so it answers 404 and userName lookups no longer find them.
+		if err := retireSCIMUserBindingForDeletionTx(tx, existingUser.ID); err != nil {
 			return err
 		}
 
@@ -286,7 +302,7 @@ func (c *Client) DeleteUser(ctx context.Context, userID string) error {
 		}
 
 		// Update the user with soft delete fields and modified email/username
-		if err := tx.Save(existingUser).Error; err != nil {
+		if err := tx.Omit(types.UserLifecycleColumns...).Save(existingUser).Error; err != nil {
 			return err
 		}
 
@@ -297,7 +313,13 @@ func (c *Client) DeleteUser(ctx context.Context, userID string) error {
 func (c *Client) UpdateUser(ctx context.Context, actingUserCanChangeRole bool, updatedUser *types.User, userID string) (*types.User, error) {
 	existingUser := new(types.User)
 	return existingUser, c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("id = ?", userID).First(existingUser).Error; err != nil {
+		if err := refuseClaudeTagUserMutation(tx, userID); err != nil {
+			return err
+		}
+
+		// Every column of the user is written back, so it is locked, and a concurrent SCIM write of its profile is
+		// never overwritten with a stale copy.
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", userID).First(existingUser).Error; err != nil {
 			return err
 		}
 
@@ -307,6 +329,10 @@ func (c *Client) UpdateUser(ctx context.Context, actingUserCanChangeRole bool, u
 
 		// If the username is being changed, then ensure that a user with that name doesn't already exist.
 		if len(updatedUser.Username) != 0 && updatedUser.Username != existingUser.Username {
+			if err := refuseSCIMProvisionedUserTx(tx, existingUser.ID, "this user's profile is managed by the identity provider through SCIM"); err != nil {
+				return err
+			}
+
 			if err := tx.Model(updatedUser).Where("username = ? AND deleted_at IS NULL", updatedUser.Username).First(new(types.User)).Error; err == nil {
 				return &AlreadyExistsError{name: fmt.Sprintf("user with username %q", updatedUser.Username)}
 			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -376,12 +402,18 @@ func (c *Client) UpdateUser(ctx context.Context, actingUserCanChangeRole bool, u
 			return fmt.Errorf("failed to encrypt user: %w", err)
 		}
 
-		return tx.Updates(&u).Error
+		return tx.Omit(types.UserLifecycleColumns...).Updates(&u).Error
 	})
 }
 
 func (c *Client) UpdateUserInternalStatus(ctx context.Context, userID string, internal bool) error {
-	return c.db.WithContext(ctx).Model(new(types.User)).Where("id = ? AND deleted_at IS NULL", userID).Update("internal", internal).Error
+	return c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := refuseClaudeTagUserMutation(tx, userID); err != nil {
+			return err
+		}
+
+		return tx.Model(new(types.User)).Where("id = ? AND deleted_at IS NULL", userID).Update("internal", internal).Error
+	})
 }
 
 func (c *Client) UpdateProfileIfNeeded(ctx context.Context, user *types.User, authProviderName, authProviderNamespace, authProviderURL string) error {
@@ -394,13 +426,37 @@ func (c *Client) UpdateProfileIfNeeded(ctx context.Context, user *types.User, au
 		return nil
 	}
 
-	var identity types.Identity
-	if err := c.db.WithContext(ctx).Where("user_id = ?", user.ID).
-		Where("auth_provider_name = ?", authProviderName).
-		Where("auth_provider_namespace = ?", authProviderNamespace).
-		First(&identity).Error; err != nil {
+	// While a SCIM connection manages the auth provider, only SCIM writes the profiles of its users, so they are not
+	// refreshed at sign-in, and neither are the profiles of users SCIM has provisioned. The one exception is a user
+	// of a SCIM-managed provider whom SCIM has not provisioned yet and who has no display name: sign-in fills it in,
+	// because until SCIM provisions the user it is the only name Obot has for them. Both are read with the identity,
+	// before the provider is asked, and checked again before its answer is written. A failed lookup fails the refresh.
+	var rows []struct {
+		types.Identity
+		SCIMManaged bool
+		SCIMBound   bool
+	}
+	if err := c.db.WithContext(ctx).Model(new(types.Identity)).
+		Select("identities.*, "+
+			"EXISTS (SELECT 1 FROM scim_connections WHERE scim_connections.auth_provider_namespace = identities.auth_provider_namespace AND scim_connections.auth_provider_name = identities.auth_provider_name) AS scim_managed, "+
+			"EXISTS (SELECT 1 FROM scim_user_bindings WHERE scim_user_bindings.user_id = identities.user_id AND scim_user_bindings.retired_at IS NULL) AS scim_bound").
+		Where("identities.user_id = ?", user.ID).
+		Where("identities.auth_provider_name = ?", authProviderName).
+		Where("identities.auth_provider_namespace = ?", authProviderNamespace).
+		Limit(1).
+		Scan(&rows).Error; err != nil {
 		return err
 	}
+	if len(rows) == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	if rows[0].SCIMBound {
+		return nil
+	}
+	if rows[0].SCIMManaged {
+		return c.fillUnprovisionedDisplayName(ctx, user, authProviderURL, accessToken)
+	}
+	identity := rows[0].Identity
 
 	if err := c.decryptIdentity(ctx, &identity); err != nil {
 		return fmt.Errorf("failed to decrypt identity: %w", err)
@@ -496,12 +552,91 @@ func (c *Client) UpdateProfileIfNeeded(ctx context.Context, user *types.User, au
 	}
 
 	return c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Updates(u).Error; err != nil {
+		// A SCIM connection may have been created, or SCIM may have provisioned the user, while the profile was being
+		// fetched. SCIM's profile wins. The mode lock keeps a connection from being created, and the user lock keeps
+		// SCIM from provisioning the user, between these checks and the write.
+		conn, err := scimConnectionForAuthProviderLockedTx(tx, authProviderNamespace, authProviderName)
+		if err != nil {
+			return err
+		}
+		if conn != nil {
+			return nil
+		}
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Where("id = ?", user.ID).Take(new(types.User)).Error; err != nil {
+			return err
+		}
+		binding, err := activeSCIMUserBindingForUserTx(tx, user.ID, false)
+		if err != nil {
+			return err
+		}
+		if binding != nil {
+			return nil
+		}
+
+		// The user was read before the profile was fetched, so its lifecycle state may be stale. Only lifecycle
+		// operations write that state.
+		if err := tx.Omit(types.UserLifecycleColumns...).Updates(u).Error; err != nil {
 			return err
 		}
 
 		// Omit the group check column to prevent resetting the group refresh window
 		return tx.Omit(groupsLastCheckedColumn).Updates(&identity).Error
+	})
+}
+
+// fillUnprovisionedDisplayName gives a user of a SCIM-managed auth provider whom SCIM has not provisioned the display
+// name that the provider reports, when the user has none. It never overwrites a display name and writes nothing else,
+// so SCIM stays the only writer of every profile it has started managing.
+func (c *Client) fillUnprovisionedDisplayName(ctx context.Context, user *types.User, authProviderURL, accessToken string) error {
+	if user.DisplayName != "" {
+		return nil
+	}
+
+	profile, err := c.fetchUserProfile(ctx, authProviderURL, accessToken)
+	if err != nil {
+		return err
+	}
+	displayName, _ := profile["name"].(string)
+	if displayName = strings.TrimSpace(displayName); displayName == "" {
+		return nil
+	}
+
+	return c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// SCIM may have provisioned the user, or another sign-in may have filled in the display name, while the
+		// profile was being fetched. The SCIM write lock keeps SCIM from provisioning the user between these checks
+		// and the write; the user lock alone does not, because SCIM binds a user without locking it when the profile
+		// carries neither an email nor a display name. The locks are taken in the order SCIM takes them.
+		if err := lockSCIMWrites(tx); err != nil {
+			return err
+		}
+		current := new(types.User)
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", user.ID).Take(current).Error; err != nil {
+			return err
+		}
+		binding, err := activeSCIMUserBindingForUserTx(tx, user.ID, false)
+		if err != nil {
+			return err
+		}
+		if binding != nil {
+			return nil
+		}
+		if err := c.decryptUser(ctx, current); err != nil {
+			return fmt.Errorf("failed to decrypt user: %w", err)
+		}
+		if current.DisplayName != "" {
+			return nil
+		}
+
+		current.DisplayName = displayName
+		if err := c.encryptUser(ctx, current); err != nil {
+			return fmt.Errorf("failed to encrypt user: %w", err)
+		}
+		if err := tx.Omit(types.UserLifecycleColumns...).Updates(current).Error; err != nil {
+			return err
+		}
+
+		user.DisplayName = displayName
+		return nil
 	})
 }
 
@@ -526,7 +661,7 @@ func (c *Client) EncryptUsers(ctx context.Context, force bool) error {
 				return fmt.Errorf("failed to encrypt user: %w", err)
 			}
 
-			if err := tx.Updates(users[i]).Error; err != nil {
+			if err := tx.Omit(types.UserLifecycleColumns...).Updates(users[i]).Error; err != nil {
 				return err
 			}
 		}
@@ -545,12 +680,12 @@ func (c *Client) fetchUserProfile(ctx context.Context, authProviderURL, accessTo
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch profile icon URL: %w", err)
+		return nil, fmt.Errorf("failed to fetch user profile: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch profile icon URL: %s", resp.Status)
+		return nil, fmt.Errorf("failed to fetch user profile: %s", resp.Status)
 	}
 
 	var body map[string]any

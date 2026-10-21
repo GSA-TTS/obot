@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/obot-platform/obot/apiclient/types"
+	"github.com/obot-platform/obot/pkg/version"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -37,6 +38,7 @@ type RuntimeValidators map[types.Runtime]RuntimeValidator
 
 // Options configures runtime validation behavior.
 type ValidationOptions struct {
+	DevMode                      bool
 	AllowMissingURL              bool
 	RemoteMCPURLValidationConfig RemoteMCPURLValidationConfig
 	ResourceMaximums             ResourceMaximums
@@ -50,6 +52,12 @@ type NPXValidator struct{}
 
 // ContainerizedValidator implements RuntimeValidator for containerized runtime
 type ContainerizedValidator struct{}
+
+// OpenAPIValidator implements RuntimeValidator for hosted OpenAPI runtimes.
+type OpenAPIValidator struct {
+	RemoteMCPURLValidationConfig RemoteMCPURLValidationConfig
+	DevMode                      bool
+}
 
 // RemoteValidator implements RuntimeValidator for remote runtime
 type RemoteValidator struct {
@@ -501,6 +509,9 @@ func (v RemoteValidator) ValidateSystemConfig(ctx context.Context, manifest type
 }
 
 func (v RemoteValidator) validateRemoteConfig(ctx context.Context, config types.RemoteRuntimeConfig) error {
+	if err := ValidateLocalhostCallbackPath(config.LocalhostCallbackPath); err != nil {
+		return err
+	}
 	config.TunnelName = strings.TrimSpace(config.TunnelName)
 	if config.TunnelName != "" &&
 		(config.IsTemplate || strings.TrimSpace(config.URLTemplate) != "" || len(extractEnvRefs(config.URL)) > 0) {
@@ -547,6 +558,9 @@ func (v RemoteValidator) validateRemoteConfig(ctx context.Context, config types.
 }
 
 func (v RemoteValidator) validateRemoteCatalogConfig(ctx context.Context, config types.RemoteCatalogConfig) error {
+	if err := ValidateLocalhostCallbackPath(config.LocalhostCallbackPath); err != nil {
+		return err
+	}
 	// Either FixedURL, Hostname, or URLTemplate must be provided, but only one
 	hasFixedURL := strings.TrimSpace(config.FixedURL) != ""
 	hasHostname := strings.TrimSpace(config.Hostname) != ""
@@ -688,6 +702,10 @@ func getRuntimeValidators(options ValidationOptions) RuntimeValidators {
 		types.RuntimeUVX:           UVXValidator{},
 		types.RuntimeNPX:           NPXValidator{},
 		types.RuntimeContainerized: ContainerizedValidator{},
+		types.RuntimeOpenAPI: OpenAPIValidator{
+			RemoteMCPURLValidationConfig: options.RemoteMCPURLValidationConfig,
+			DevMode:                      options.DevMode,
+		},
 		types.RuntimeRemote: RemoteValidator{
 			RemoteMCPURLValidationConfig: options.RemoteMCPURLValidationConfig,
 			AllowMissingURL:              options.AllowMissingURL,
@@ -811,7 +829,19 @@ func ValidateServerManifest(ctx context.Context, manifest types.MCPServerManifes
 	}
 }
 
+// ValidateObotVersionRange validates minObotVersion and maxObotVersion. They are only enforced
+// during catalog sync, so they are rejected on entries that are not synced from a catalog source.
+func ValidateObotVersionRange(minVersion, maxVersion string, catalogSynced bool) error {
+	if !catalogSynced && (minVersion != "" || maxVersion != "") {
+		return fmt.Errorf("minObotVersion and maxObotVersion are only supported for catalog-synced entries")
+	}
+	return version.ValidateRange(minVersion, maxVersion)
+}
+
 func ValidateCatalogEntryManifest(ctx context.Context, manifest types.MCPServerCatalogEntryManifest, gitManaged bool, options ValidationOptions) error {
+	if err := ValidateObotVersionRange(manifest.MinObotVersion, manifest.MaxObotVersion, gitManaged); err != nil {
+		return err
+	}
 	if err := manifest.ValidateConfig(); err != nil {
 		return err
 	}
@@ -871,6 +901,10 @@ func validateCatalogSyncedTunnelName(manifest types.MCPServerCatalogEntryManifes
 }
 
 func ValidateSystemMCPServerCatalogEntryManifest(ctx context.Context, manifest types.SystemMCPServerCatalogEntryManifest, options ValidationOptions) error {
+	if err := ValidateObotVersionRange(manifest.MinObotVersion, manifest.MaxObotVersion, true); err != nil {
+		return err
+	}
+
 	if manifest.RemoteConfig != nil && manifest.RemoteConfig.TunnelName != "" {
 		return types.RuntimeValidationError{
 			Runtime: manifest.Runtime,
@@ -938,10 +972,12 @@ func ValidateSystemMCPServerCatalogEntryManifest(ctx context.Context, manifest t
 			AllowMissingURL:              options.AllowMissingURL,
 			RemoteMCPURLValidationConfig: options.RemoteMCPURLValidationConfig,
 		}).validateRemoteCatalogConfig(ctx, types.RemoteCatalogConfig{
-			FixedURL:            manifest.RemoteConfig.FixedURL,
-			URLTemplate:         manifest.RemoteConfig.URLTemplate,
-			Hostname:            manifest.RemoteConfig.Hostname,
-			StaticOAuthRequired: manifest.RemoteConfig.StaticOAuthRequired,
+			FixedURL:                 manifest.RemoteConfig.FixedURL,
+			URLTemplate:              manifest.RemoteConfig.URLTemplate,
+			Hostname:                 manifest.RemoteConfig.Hostname,
+			LocalhostCallbackEnabled: manifest.RemoteConfig.LocalhostCallbackEnabled,
+			LocalhostCallbackPath:    manifest.RemoteConfig.LocalhostCallbackPath,
+			StaticOAuthRequired:      manifest.RemoteConfig.StaticOAuthRequired,
 		})
 	}
 	if validator, ok := getRuntimeValidators(options)[manifest.Runtime]; ok {
@@ -1041,10 +1077,6 @@ func validateStartupTimeout(runtime types.Runtime, field string, startupTimeoutS
 // ValidateSecretBindingsCatalogEntry validates binding ownership and the
 // catalog-specific restrictions on secret-bound URL template inputs.
 func ValidateSecretBindingsCatalogEntry(manifest types.MCPServerCatalogEntryManifest, gitManaged, userIsAdmin bool, mcpBackend string) error {
-	if err := validateNoAdminAddedCatalogBindings(manifest); err != nil {
-		return err
-	}
-
 	// Reject URL templates that reference secret-bound env vars. Remote
 	// secretBinding support is limited to headers; URL templates are not a
 	// supported binding target.
@@ -1078,20 +1110,14 @@ func ValidateSecretBindingsCatalogEntry(manifest types.MCPServerCatalogEntryMani
 		if config.Static {
 			return fmt.Errorf("config %q: secretBinding and static are mutually exclusive", config.Key)
 		}
+		if len(config.Options) > 0 {
+			return fmt.Errorf("config %q: secretBinding and options are mutually exclusive", config.Key)
+		}
 		if config.SecretBinding.Name == "" || config.SecretBinding.Key == "" {
 			return fmt.Errorf("config %q: secretBinding requires both name and key", config.Key)
 		}
 		if manifest.Runtime == types.RuntimeRemote && config.Usage != types.Header {
 			return fmt.Errorf("config %q: secretBinding is only supported for headers on remote runtime", config.Key)
-		}
-	}
-	return nil
-}
-
-func validateNoAdminAddedCatalogBindings(manifest types.MCPServerCatalogEntryManifest) error {
-	for _, config := range manifest.Config {
-		if config.SecretBinding != nil && config.SecretBinding.AdminAdded {
-			return fmt.Errorf("config %q: secretBinding.adminAdded is not valid for catalog entry", config.Key)
 		}
 	}
 	return nil

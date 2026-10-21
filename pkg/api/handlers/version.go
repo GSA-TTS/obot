@@ -30,22 +30,20 @@ type UpgradeStatusReader interface {
 }
 
 type VersionHandlerOptions struct {
-	ProviderConfiguration   mcptester.ProviderConfigurationResolver
-	ModelProxyURL           *url.URL
-	ModelProxySettings      mcptester.ModelProxySettingsReader
-	GatewayClient           *client.Client
-	StorageClient           storage.Client
-	LicenseProvider         *license.Provider
-	PostgresDSN             string
-	Engine                  string
-	MCPNetworkPolicyEnabled bool
-	MCPDefaultDenyAllEgress bool
-	AuthEnabled             bool
-	MessagePoliciesEnabled  bool
-	AgentsEnabled           bool
-	HostedAgentsEnabled     bool
-	HideK8sDetails          bool
-	UpgradeStatusReader     UpgradeStatusReader
+	ProviderConfiguration     mcptester.ProviderConfigurationResolver
+	ModelProxyURL             *url.URL
+	ModelProxySettings        mcptester.ModelProxySettingsReader
+	GatewayClient             *client.Client
+	StorageClient             storage.Client
+	LicenseProvider           *license.Provider
+	PostgresDSN               string
+	Engine                    string
+	MCPNetworkPolicyEnabled   bool
+	MCPDefaultDenyAllEgress   bool
+	AuthEnabled               bool
+	ClaudeEnvironmentsEnabled bool
+	HideK8sDetails            bool
+	UpgradeStatusReader       UpgradeStatusReader
 }
 
 type VersionHandler struct {
@@ -182,10 +180,8 @@ func (v *VersionHandler) upgradeStatus() upgrade.Status {
 
 func (v *VersionHandler) featureValues() map[string]bool {
 	return map[string]bool{
-		"messagePoliciesEnabled": v.MessagePoliciesEnabled,
-		"agentsEnabled":          v.AgentsEnabled,
-		"hostedAgentsEnabled":    v.HostedAgentsEnabled,
-		"hideK8sDetails":         v.HideK8sDetails,
+		"claudeEnvironmentsEnabled": v.ClaudeEnvironmentsEnabled,
+		"hideK8sDetails":            v.HideK8sDetails,
 	}
 }
 

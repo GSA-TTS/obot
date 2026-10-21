@@ -1,10 +1,15 @@
-# Google Cloud GKE
+---
+displayed_sidebar: sidebar
+title: "Google GKE"
+---
+
+# Google GKE {#google-cloud-gke}
 
 Deploying Obot to Google Kubernetes Engine follows the standard Helm workflow. As a prerequisite, you'll need the following resources set up in your Google Cloud environment:
 
 * GCP project
 * VPC Network
-* Google Cloud SQL instance running PostgreSQL 17+
+* Google Cloud SQL instance running PostgreSQL 17+. Obot also uses a second database on the same server, `<db name>_llm_gateway`, for the LLM gateway. Give Obot's database user `CREATEDB`, create it first with `CREATE DATABASE <db name>_llm_gateway OWNER <db user>;`, or set `OBOT_SERVER_LLM_GATEWAY_POSTGRES_DSN`.
 * VPC Network Peering between your VPC Network and the Cloud SQL instance
 * (Optional) Google Cloud KMS key for encrypting sensitive information
 * (Optional) IAM role with necessary permissions if you're using Google Cloud KMS for encryption
@@ -100,7 +105,7 @@ secret:
   # Optional: generated automatically when omitted from the chart-managed Secret
   OBOT_BOOTSTRAP_TOKEN: "<bootstrap password>"
 
-  # Optionally configure model providers
+  # Optional: configures the LLM gateway's OpenAI provider at startup
   OPENAI_API_KEY: "<your openai api key>"
 
 # Non-sensitive configuration
@@ -116,9 +121,6 @@ config:
   OBOT_SERVER_AUTH_ADMIN_EMAILS: "<comma separated list of admin emails>"
   OBOT_SERVER_AUTH_OWNER_EMAILS: "<comma separated list of owner emails>"
 
-mcpServerDefaults:
-  storageClassName: hyperdisk # replace with the name of your StorageClass
-  nanobotWorkspaceSize: 4Gi # Some disk types have a minimum size, read the documentation for the storage type you select.
 ```
 
 With the default configuration on GKE, this will set up ingress to expose Obot through a load balancer. You should also consider adding TLS termination to your load balancer for secure HTTPS access.

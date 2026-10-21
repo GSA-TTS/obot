@@ -4,18 +4,18 @@
 	import Search from '$lib/components/Search.svelte';
 	import Skeleton from '$lib/components/Skeleton.svelte';
 	import { parseErrorContent } from '$lib/errors';
+	import { m } from '$lib/i18n';
 	import {
 		AdminService,
 		ModelAliasLabels,
-		type HostedAgent,
 		type Model,
 		type ModelAlias,
 		type OrgUser,
 		UserService,
-		type SkillRepository
+		type SkillRepository,
+		type Skill
 	} from '$lib/services';
-	import type { Skill } from '$lib/services/nanobot/types';
-	import { errors, mcpServersAndEntries, version } from '$lib/stores';
+	import { errors, mcpServersAndEntries } from '$lib/stores';
 	import { getUserDisplayName } from '$lib/utils';
 	import {
 		ACCESS_MATCH_REASON_LABEL,
@@ -45,7 +45,6 @@
 		mcp: [],
 		models: [],
 		skills: [],
-		hostedAgents: [],
 		vmcps: []
 	});
 
@@ -53,7 +52,6 @@
 		mcp: false,
 		models: false,
 		skills: false,
-		hostedAgents: false,
 		vmcps: false
 	});
 
@@ -70,7 +68,6 @@
 	let models = $state<Model[]>([]);
 	let skills = $state<Skill[]>([]);
 	let skillRepositories = $state<SkillRepository[]>([]);
-	let hostedAgents = $state<HostedAgent[]>([]);
 	let mcpOwners = $state<OrgUser[]>([]);
 	let loadingResources = $state<Record<SectionKey, boolean>>(idleLoading());
 	let loadedPolicySections = new SvelteSet<SectionKey>();
@@ -126,7 +123,7 @@
 					return;
 				}
 				sectionErrors[section] =
-					parseErrorContent(error).message || 'Failed to load access policies.';
+					parseErrorContent(error).message || m.identity_access_current_access_load_failed();
 			} finally {
 				if (generation === loadGeneration) {
 					loadingSections[section] = false;
@@ -181,9 +178,6 @@
 						AdminService.listSkillRepositories()
 					]);
 					break;
-				case 'hostedAgents':
-					hostedAgents = await AdminService.listHostedAgents({ all: true });
-					break;
 			}
 		} catch (error) {
 			loadedResourceSections.delete(section);
@@ -204,7 +198,6 @@
 	const skillRepositoriesMap = $derived(
 		new Map(skillRepositories.map((repository) => [repository.id, repository]))
 	);
-	const hostedAgentsMap = $derived(new Map(hostedAgents.map((agent) => [agent.id, agent])));
 	const mcpOwnersMap = $derived(new Map(mcpOwners.map((owner) => [owner.id, owner])));
 
 	function describeResource(resource: AccessPolicyResource): AccessResourceDescription {
@@ -212,22 +205,28 @@
 			case 'mcpServerCatalogEntry':
 				return {
 					name: mcpEntriesMap.get(resource.id)?.manifest?.name || resource.id,
-					typeLabel: 'Catalog Entry'
+					typeLabel: m.identity_access_current_access_type_catalog_entry()
 				};
 			case 'mcpServer': {
 				const server = mcpServersMap.get(resource.id);
 				return {
 					name: server?.alias || server?.manifest?.name || resource.id,
-					typeLabel: 'MCP Server'
+					typeLabel: m.identity_access_current_access_type_mcp_server()
 				};
 			}
 			case 'model': {
 				if (resource.id.startsWith('obot://')) {
 					const alias = resource.id.replace('obot://', '') as ModelAlias;
-					return { name: ModelAliasLabels[alias] || alias, typeLabel: 'Model Alias' };
+					return {
+						name: ModelAliasLabels[alias] || alias,
+						typeLabel: m.identity_access_current_access_type_model_alias()
+					};
 				}
 				if (resource.id.endsWith('*')) {
-					return { name: resource.id, typeLabel: 'Model Pattern' };
+					return {
+						name: resource.id,
+						typeLabel: m.identity_access_current_access_type_model_pattern()
+					};
 				}
 				const model = modelsMap.get(resource.id);
 				return { name: model?.displayName || model?.name || resource.id };
@@ -237,10 +236,8 @@
 			case 'skillRepository':
 				return {
 					name: skillRepositoriesMap.get(resource.id)?.displayName || resource.id,
-					typeLabel: 'Skill Repository'
+					typeLabel: m.identity_access_current_access_type_skill_repository()
 				};
-			case 'hostedAgent':
-				return { name: hostedAgentsMap.get(resource.id)?.name || resource.id };
 			case 'vmcp':
 				return { name: resource.name || resource.id };
 			default:
@@ -249,20 +246,34 @@
 	}
 
 	const titleName = $derived(viewing?.name ?? target?.name ?? '');
-	const subjectLabel = $derived(viewing?.kind === 'group' ? 'group' : 'user');
 
-	let hostedAgentsFeatureEnabled = $derived(version.current.hostedAgentsEnabled === true);
 	const tabs = $derived([
-		{ label: 'vMCPs', value: 'vmcps' as const, noun: 'vMCPs' },
-		{ label: 'MCP Servers', value: 'mcp' as const, noun: 'MCP servers' },
-		{ label: 'Models', value: 'models' as const, noun: 'models' },
-		{ label: 'Skills', value: 'skills' as const, noun: 'skills' },
-		...(hostedAgentsFeatureEnabled
-			? [{ label: 'Hosted Agents', value: 'hostedAgents' as const, noun: 'hosted agents' }]
-			: [])
+		{
+			label: m.nav_vmcps(),
+			value: 'vmcps' as const,
+			noun: m.identity_access_current_access_noun_vmcps()
+		},
+		{
+			label: m.nav_mcp_servers(),
+			value: 'mcp' as const,
+			noun: m.identity_access_current_access_noun_mcp_servers()
+		},
+		{
+			label: m.nav_models(),
+			value: 'models' as const,
+			noun: m.identity_access_current_access_noun_models()
+		},
+		{
+			label: m.nav_skills(),
+			value: 'skills' as const,
+			noun: m.identity_access_current_access_noun_skills()
+		}
 	]);
 
-	const currentNoun = $derived(tabs.find((tab) => tab.value === currentTab)?.noun ?? 'resources');
+	const currentNoun = $derived(
+		tabs.find((tab) => tab.value === currentTab)?.noun ??
+			m.identity_access_current_access_noun_resources()
+	);
 	const currentPolicies = $derived(sections[currentTab]);
 	const currentResources = $derived(
 		collectAccessResources(
@@ -299,8 +310,6 @@
 						id: repository.id
 					}))
 				];
-			case 'hostedAgents':
-				return hostedAgents.map((agent) => ({ type: 'hostedAgent' as const, id: agent.id }));
 			default:
 				return [];
 		}
@@ -340,7 +349,9 @@
 			return '';
 		}
 		const owner = mcpOwnersMap.get(powerUserID);
-		return `${owner ? getUserDisplayName(mcpOwnersMap, powerUserID) : 'Unknown'}'s Registry`;
+		return m.identity_access_current_access_owner_registry({
+			name: owner ? getUserDisplayName(mcpOwnersMap, powerUserID) : m.core_unknown()
+		});
 	}
 
 	function matchesSearch(...parts: (string | undefined)[]): boolean {
@@ -360,11 +371,10 @@
 	}
 
 	const everythingLabel: Record<SectionKey, string> = {
-		vmcps: 'All vMCPs',
-		mcp: 'All MCP servers',
-		models: 'All models',
-		skills: 'All skills',
-		hostedAgents: 'All hosted agents'
+		vmcps: m.identity_access_current_access_all_vmcps(),
+		mcp: m.identity_access_current_access_all_mcp_servers(),
+		models: m.identity_access_current_access_all_models(),
+		skills: m.identity_access_current_access_all_skills()
 	};
 
 	function policiesGrantingEverything(policies: MatchedAccessPolicy[]): MatchedAccessPolicy[] {
@@ -423,18 +433,18 @@
 	bind:this={dialog}
 	{onOpen}
 	{onClose}
-	title={titleName ? `${titleName} | Access Policies` : 'Access Policies'}
+	title={titleName
+		? m.identity_access_current_access_title_named({ name: titleName })
+		: m.identity_access_current_access_title()}
 	class="w-full overflow-hidden md:h-150 md:max-w-4xl"
 	classes={{ header: 'p-4 md:pb-0', content: 'min-h-inherit p-0' }}
 >
 	<div class="default-scrollbar-thin flex grow flex-col gap-0 overflow-y-auto px-4 pt-0 pb-4">
 		<div class="sticky top-0 left-0 w-full bg-base-100 dark:bg-base-300 flex flex-col gap-2 pb-2">
 			<p class="text-muted-content text-sm font-light mt-4 md:mt-0">
-				Resources this {subjectLabel} can access through assigned policies, including those assigned to
-				All Obot Users
-				{#if viewing?.kind === 'user'}
-					and any groups they belong to
-				{/if}.
+				{viewing?.kind === 'user'
+					? m.identity_access_current_access_description_user()
+					: m.identity_access_current_access_description_group()}
 			</p>
 
 			<div>
@@ -457,7 +467,7 @@
 						bind:this={search}
 						compact
 						value={resourceQuery}
-						placeholder="Search {currentNoun}..."
+						placeholder={m.identity_access_current_access_search_noun({ noun: currentNoun })}
 						onChange={(value) => (resourceQuery = value)}
 					/>
 				</div>
@@ -481,7 +491,7 @@
 	<div class="flex flex-col px-2 py-2">
 		<span class="text-sm">{name}</span>
 		<span class="text-muted-content text-xs font-light">
-			<span>Granted by</span>
+			<span>{m.identity_access_current_access_granted_by()}</span>
 			{#each policies as policy, index (policy.id)}
 				{#if index > 0}<span>,</span>{/if}
 				<a class="link link-hover" href={resolve(policy.href)}>{policy.displayName}</a>
@@ -516,7 +526,9 @@
 	<section>
 		{#if currentPolicies.length === 0}
 			<p class="text-muted-content px-1 py-2 text-sm font-light italic">
-				No policies currently apply to this {subjectLabel}.
+				{viewing?.kind === 'group'
+					? m.identity_access_current_access_no_policies_group()
+					: m.identity_access_current_access_no_policies_user()}
 			</p>
 		{:else if currentTab === 'mcp'}
 			{#if loadingResources.mcp}
@@ -525,8 +537,8 @@
 				{#if filteredMcpPolicyGroups.length === 0}
 					<p class="text-muted-content px-1 text-sm font-light">
 						{hasResourceQuery
-							? `No ${currentNoun} match this search.`
-							: 'No MCP servers are granted through this registry.'}
+							? m.identity_access_current_access_no_match({ noun: currentNoun })
+							: m.identity_access_current_access_no_mcp_in_registry()}
 					</p>
 				{:else}
 					{#each filteredMcpPolicyGroups as group, groupIndex (group.key)}
@@ -546,7 +558,7 @@
 							{/if}
 							{#if group.resources.length === 0 && group.unexpandedPolicies.length === 0}
 								<p class="text-muted-content px-2 py-2 text-sm font-light">
-									No MCP servers are granted through this registry.
+									{m.identity_access_current_access_no_mcp_in_registry()}
 								</p>
 							{:else}
 								{@render resourceRows(group.resources)}
@@ -564,8 +576,10 @@
 			{#if filteredCurrentResources.length === 0 && !showOriginalEverythingPolicies}
 				<p class="text-muted-content px-1 text-sm font-light">
 					{hasResourceQuery
-						? `No ${currentNoun} match this search.`
-						: `The policies that apply to this ${subjectLabel} do not grant access to any ${currentNoun}.`}
+						? m.identity_access_current_access_no_match({ noun: currentNoun })
+						: viewing?.kind === 'group'
+							? m.identity_access_current_access_no_grant_group({ noun: currentNoun })
+							: m.identity_access_current_access_no_grant_user({ noun: currentNoun })}
 				</p>
 			{:else}
 				{#if showOriginalEverythingPolicies}

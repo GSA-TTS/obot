@@ -1,17 +1,31 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import { tooltip } from '$lib/actions/tooltip.svelte';
 	import Confirm from '$lib/components/Confirm.svelte';
 	import DotDotDot from '$lib/components/DotDotDot.svelte';
-	import Table from '$lib/components/table/Table.svelte';
+	import Table, { type InitSort } from '$lib/components/table/Table.svelte';
+	import { m } from '$lib/i18n';
 	import { stripMarkdownToText } from '$lib/markdown';
 	import { vmcpItemContext } from '$lib/runes/vmcps/vmcpItem.svelte';
-	import { UserService, type OrgUser, type VMCP } from '$lib/services';
+	import { UserService, type OrgUser, type VMCP, type VMCPInstance } from '$lib/services';
 	import { MCP_CONNECTION_INVALID_LICENSE_MESSAGE } from '$lib/services/user/constants';
-	import type { VMcpComponentView, VMcpConnectOptions } from '$lib/services/vmcps/types';
-	import { getDisplayListText, getVMcpCreator } from '$lib/services/vmcps/utils';
+	import { VMCP_STATUS_FILTER_OPTIONS } from '$lib/services/vmcps/constants';
+	import type {
+		VMcpComponentView,
+		VMcpConnectOptions,
+		VMcpListSettings,
+		VMcpSortBy
+	} from '$lib/services/vmcps/types';
+	import {
+		getDisplayListText,
+		getVMcpCreator,
+		parseSelectedFilterIds,
+		vmcpMatchesStatusFilter
+	} from '$lib/services/vmcps/utils';
 	import { errors, profile, responsive, version, vmcpInstances } from '$lib/stores';
 	import { success } from '$lib/stores/success';
-	import { goto } from '$lib/url';
+	import { clearUrlParams, goto, setSortUrlParams, setUrlParamAndUpdateUrl } from '$lib/url';
+	import { getUserDisplayName } from '$lib/utils';
 	import IconButton from '../primitives/IconButton.svelte';
 	import McpServerIcon from './McpServerIcon.svelte';
 	import VMcpActions from './VMcpActions.svelte';
@@ -21,12 +35,12 @@
 	import VMcpMenuActions from './VMcpMenuActions.svelte';
 	import VMcpStatusBadge from './VMcpStatusBadge.svelte';
 	import { Ellipsis, MessageCircle, Plug, Trash2 } from '@lucide/svelte';
-	import { type Snippet } from 'svelte';
+	import { untrack, type Snippet } from 'svelte';
 
 	interface Props {
 		items: VMCP[];
+		filterItems?: VMCP[];
 		components: (vmcp: VMCP) => VMcpComponentView[];
-		onConnect?: (vmcp: VMCP, options?: VMcpConnectOptions) => void;
 		onDelete?: (vmcp: VMCP) => void;
 		onDeleted?: (vmcp: VMCP) => void;
 		onUpdate?: (vmcp: VMCP) => void;
@@ -34,21 +48,30 @@
 		usersMap: Map<string, OrgUser>;
 		variant?: 'grid' | 'table';
 		isSelectMode?: boolean;
+		initSort?: InitSort;
+		filters?: VMcpListSettings;
+		onFilterChange?: (property: keyof VMcpListSettings, values: string[]) => void;
+		onSort?: (property: VMcpSortBy, direction: 'asc' | 'desc') => void;
 	}
 
 	let {
 		items: initialItems,
+		filterItems,
 		components,
-		onConnect,
 		onDelete,
 		onDeleted,
 		onUpdate,
 		noDataContent,
 		usersMap,
-		variant = 'grid'
+		variant = 'grid',
+		initSort,
+		filters,
+		onFilterChange,
+		onSort
 	}: Props = $props();
 
 	let items = $derived(initialItems.map(translateItem));
+	let filterRows = $derived((filterItems ?? initialItems).map(translateItem));
 	let overflowHiddenById = $state<Record<string, number>>({});
 	let vmcpActions = $state<ReturnType<typeof VMcpActions>>();
 	let tableRef = $state<ReturnType<typeof Table>>();
@@ -64,7 +87,62 @@
 		(version.current.licenseEntitlementViolations || []).length > 0
 	);
 
+	let openedConnectID: string | undefined;
+
+	$effect(() => {
+		const connectID = page.url.searchParams.get('connect');
+		if (!connectID) {
+			openedConnectID = undefined;
+			return;
+		}
+
+		const match = initialItems.find((item) => item.id === connectID);
+		if (!match) {
+			openedConnectID = undefined;
+			setUrlParamAndUpdateUrl(page.url, 'connect', undefined);
+			return;
+		}
+
+		const actions = vmcpActions;
+		if (!actions || openedConnectID === connectID) return;
+
+		openedConnectID = connectID;
+		setUrlParamAndUpdateUrl(page.url, 'connect', undefined);
+		untrack(() =>
+			actions.openConnect(match, undefined, {
+				connectReturn: 'list'
+			})
+		);
+	});
+
+	$effect(() => {
+		if (page.url.searchParams.has('inspector')) {
+			const id = page.url.searchParams.get('inspector');
+			setUrlParamAndUpdateUrl(page.url, 'inspector', undefined);
+			const match = initialItems.find((item) => item.id === id);
+			if (match) {
+				handleTest(match);
+			}
+		}
+	});
+
 	type Item = ReturnType<typeof translateItem>;
+
+	/** Catalog entry id first, matching the id stored by the vMCP settings server filter. */
+	function componentFilterId(component: { id?: string; mcpServerCatalogEntryID?: string }) {
+		return component.mcpServerCatalogEntryID || component.id || '';
+	}
+
+	function serverFilterLabel(id: string) {
+		for (const row of filterRows) {
+			const source = row.vmcp.components ?? [];
+			for (let index = 0; index < source.length; index++) {
+				if (componentFilterId(source[index]) !== id) continue;
+				return row.componentServers[index]?.name || id;
+			}
+		}
+		return id;
+	}
 
 	function translateItem(item: VMCP) {
 		const componentServers = components(item);
@@ -72,11 +150,17 @@
 			id: item.id,
 			componentServers,
 			vmcp: item,
-			displayName: item.displayName || 'Untitled vMCP',
+			displayName: item.displayName || m.vmcps_untitled_vmcp(),
 			description: item.description ?? '',
-			owner: getVMcpCreator(item, usersMap, '') ?? '',
+			owner: getVMcpCreator(item, usersMap, false, true) ?? '',
+			ownerId: item.creatorUserID,
 			serverNames: componentServers.map((component) => component.name),
-			status: ''
+			componentIds: (item.components ?? [])
+				.map((component) => componentFilterId(component))
+				.filter(Boolean),
+			status: VMCP_STATUS_FILTER_OPTIONS.filter((option) =>
+				vmcpMatchesStatusFilter(item, option.id, vmcpInstances.current.items, profile.current.id)
+			).map((option) => option.id)
 		};
 	}
 
@@ -85,11 +169,12 @@
 	}
 
 	function connectHandler(vmcp: VMCP, options?: VMcpConnectOptions) {
-		if (onConnect) {
-			onConnect(vmcp, options);
-			return;
-		}
-		vmcpActions?.openConnect(vmcp, undefined, options);
+		const connectOptions: VMcpConnectOptions = { connectReturn: 'list', ...options };
+		vmcpActions?.openConnect(vmcp, undefined, connectOptions);
+	}
+
+	function editInstanceConfiguration(vmcp: VMCP, instance: VMCPInstance) {
+		vmcpActions?.openEditInstanceConfiguration(vmcp, instance, { connectReturn: 'list' });
 	}
 
 	function connectDisabled(canConnect: boolean) {
@@ -100,8 +185,8 @@
 		if (hasLicenseEntitlementViolations) return MCP_CONNECTION_INVALID_LICENSE_MESSAGE;
 		if (!ctx.canConnect)
 			return ctx.isShared
-				? 'Requires access to connect or test this vMCP'
-				: 'Cannot connect or test a personal vMCP';
+				? m.vmcps_requires_access_to_connect()
+				: m.vmcps_cannot_connect_personal();
 		return undefined;
 	}
 
@@ -114,7 +199,14 @@
 			toggle?.(false);
 			return;
 		}
-		connectHandler(vmcp, { onConnected: () => goto(`/vmcps/${vmcp.id}?view=inspector`) });
+		connectHandler(vmcp, {
+			onDismissed: () => setUrlParamAndUpdateUrl(page.url, 'inspector', undefined),
+			onConnected: () => {
+				setUrlParamAndUpdateUrl(page.url, 'inspector', undefined);
+				goto(`/vmcps/${vmcp.id}?view=inspector`);
+			},
+			connectReturn: 'inspector'
+		});
 		toggle?.(false);
 	}
 
@@ -178,11 +270,11 @@
 			}
 			success.add(
 				deleted.length === 1
-					? `${deleted[0].displayName || 'vMCP'} deleted.`
-					: `${deleted.length} vMCPs deleted.`
+					? m.vmcps_named_deleted({ name: deleted[0].displayName || 'vMCP' })
+					: m.vmcps_count_vmcps_deleted({ count: deleted.length })
 			);
 		} catch {
-			errors.append('Failed to delete vMCP(s).');
+			errors.append(m.vmcps_failed_to_delete_vmcps());
 		} finally {
 			tableRef?.clearSelectAll();
 			bulkDeleting = false;
@@ -243,7 +335,7 @@
 
 			if (more) {
 				more.hidden = false;
-				more.textContent = `+${items.length - Math.max(visible, 1)} more`;
+				more.textContent = m.vmcps_n_more({ count: items.length - Math.max(visible, 1) });
 				const moreWidth = more.offsetWidth + gap;
 				while (visible > 0 && used + moreWidth > available + 0.5) {
 					visible -= 1;
@@ -259,7 +351,7 @@
 				const hidden = items.length - visible;
 				more.hidden = hidden <= 0;
 				if (hidden > 0) {
-					more.textContent = `+${hidden} more`;
+					more.textContent = m.vmcps_n_more({ count: hidden });
 				}
 			}
 			setOverflowHidden(current.cardId, Math.max(items.length - visible, 0));
@@ -281,12 +373,12 @@
 </script>
 
 <div class="@container">
-	{#if items.length === 0}
+	{#if items.length === 0 && (variant !== 'table' || filterRows.length === 0)}
 		<div class="flex h-full items-center justify-center">
 			{#if noDataContent}
 				{@render noDataContent()}
 			{:else}
-				<p class="text-muted-content text-sm font-light">No vMCPs available.</p>
+				<p class="text-muted-content text-sm font-light">{m.vmcps_no_vmcps_available_period()}</p>
 			{/if}
 		</div>
 	{:else}
@@ -308,10 +400,10 @@
 	<div
 		class="border-base-300 bg-base-100 dark:border-base-400 dark:bg-base-300 sticky inset-x-0 bottom-4 z-50 flex items-center gap-4 rounded-full px-4 py-2 shadow-sm"
 		role="toolbar"
-		aria-label="Selected vMCP actions"
+		aria-label={m.vmcps_selected_vmcp_actions()}
 	>
 		<p class="text-muted-content pl-4 text-sm font-semibold">
-			{selectedCount} of {selectableCount} selected
+			{m.vmcps_selected_of_total({ selected: selectedCount, total: selectableCount })}
 		</p>
 		<div class="flex grow items-center justify-end gap-2">
 			<button
@@ -319,12 +411,15 @@
 				onclick={() => (pendingBulkDelete = deletable.map((row) => row.vmcp))}
 				disabled={deletable.length === 0}
 			>
-				<Trash2 class="size-4" /> Delete
+				<Trash2 class="size-4" />
+				{m.core_delete()}
 				{#if deletable.length > 0}
 					<span class="pill-primary">{deletable.length}</span>
 				{/if}
 			</button>
-			<button class="btn btn-secondary text-sm font-normal" onclick={exitSelecting}>Cancel</button>
+			<button class="btn btn-secondary text-sm font-normal" onclick={exitSelecting}
+				>{m.common_cancel()}</button
+			>
 		</div>
 	</div>
 {/if}
@@ -337,16 +432,18 @@
 	oncancel={() => (pendingBulkDelete = undefined)}
 	msg=""
 	loading={bulkDeleting}
-	title="Confirm Delete"
+	title={m.vmcps_deployments_confirm_delete()}
 >
 	{#snippet note()}
-		Are you sure you want to delete
 		{#if pendingBulkDelete?.length === 1}
-			"<b>{pendingBulkDelete[0].displayName ?? 'this vMCP'}</b>"?
+			{m.vmcps_delete_confirm_prefix()}<b
+				>{pendingBulkDelete[0].displayName ?? m.vmcps_deployments_this_vmcp()}</b
+			>{m.vmcps_delete_confirm_suffix()}
 		{:else}
-			<b>{pendingBulkDelete?.length ?? 0} vMCPs</b>?
+			{m.vmcps_bulk_delete_confirm_prefix()}<b
+				>{m.vmcps_count_vmcps({ count: pendingBulkDelete?.length ?? 0 })}</b
+			>{m.vmcps_bulk_delete_confirm_suffix()}
 		{/if}
-		This cannot be undone.
 	{/snippet}
 </Confirm>
 
@@ -355,21 +452,106 @@
 		<Table
 			bind:this={tableRef}
 			data={items}
+			filterData={filterRows}
+			manualSorting={Boolean(onSort)}
 			fields={['displayName', 'owner', 'status', 'serverNames']}
 			headers={[
-				{ title: 'Name', property: 'displayName' },
-				{ title: 'Servers', property: 'serverNames' },
-				{ title: 'Created by', property: 'owner' }
+				{ title: m.core_name(), property: 'displayName' },
+				{ title: m.vmcps_servers(), property: 'serverNames' },
+				{ title: m.core_col_created_by(), property: 'owner' },
+				{ title: m.core_status(), property: 'status' }
 			]}
-			noDataMessage="No vMCPs available."
+			columnMaxWidths={{
+				displayName: 300
+			}}
+			noDataMessage={m.vmcps_no_vmcps_available_period()}
 			noAutoHideFields={['displayName']}
 			validateSelect={profile.current.isAdmin?.() ? undefined : canSelectRow}
-			disabledSelectMessage="You can only delete vMCPs you created."
+			disabledSelectMessage={m.vmcps_only_delete_own()}
 			remeasureKey={JSON.stringify(overflowHiddenById)}
 			setRowClasses={() => 'group'}
 			onClickRow={(row) => handleSelect(row.vmcp)}
 			classes={{
 				root: 'rounded-none rounded-b-md shadow-none'
+			}}
+			filterable={['status', 'serverNames', 'owner']}
+			filterValue={(property, row) => {
+				if (property === 'serverNames') return row.componentIds;
+				if (property === 'owner') return row.ownerId;
+				return undefined;
+			}}
+			displayValue={(property, value) =>
+				property === 'serverNames'
+					? serverFilterLabel(String(value ?? ''))
+					: property === 'owner'
+						? getUserDisplayName(usersMap, String(value ?? ''))
+						: property === 'status'
+							? (VMCP_STATUS_FILTER_OPTIONS.find((option) => option.id === value)?.label ??
+								String(value ?? ''))
+							: String(value ?? '')}
+			sortable={['displayName', 'serverNames']}
+			sortValue={(property, row) =>
+				property === 'serverNames' ? (row.vmcp.components?.length ?? 0) : undefined}
+			initSort={initSort && {
+				...initSort,
+				property:
+					initSort.property === 'name'
+						? 'displayName'
+						: initSort.property === 'componentServers'
+							? 'serverNames'
+							: initSort.property
+			}}
+			filters={filters
+				? Object.fromEntries(
+						[
+							['serverNames', parseSelectedFilterIds(filters.componentFilterBy)],
+							['owner', parseSelectedFilterIds(filters.creatorFilterBy)],
+							['status', parseSelectedFilterIds(filters.statusFilterBy)]
+						].filter(([, values]) => values.length > 0)
+					)
+				: undefined}
+			onSort={(property, direction) => {
+				let urlPropertyParam: VMcpSortBy | undefined;
+				switch (property) {
+					case 'displayName':
+						urlPropertyParam = 'name';
+						break;
+					case 'serverNames':
+						urlPropertyParam = 'componentServers';
+						break;
+					default:
+						urlPropertyParam = undefined;
+						break;
+				}
+
+				if (urlPropertyParam) {
+					if (onSort) onSort(urlPropertyParam, direction);
+					else setSortUrlParams(urlPropertyParam, direction);
+				}
+			}}
+			onFilter={(property, values) => {
+				if (onFilterChange) {
+					if (property === 'serverNames') onFilterChange('componentFilterBy', values);
+					else if (property === 'owner') onFilterChange('creatorFilterBy', values);
+					else if (property === 'status') onFilterChange('statusFilterBy', values);
+					return;
+				}
+				if (property === 'serverNames') {
+					setUrlParamAndUpdateUrl(page.url, 'components', values.join(','));
+				} else if (property === 'owner') {
+					setUrlParamAndUpdateUrl(page.url, 'creator', values.join(','));
+				} else {
+					setUrlParamAndUpdateUrl(page.url, property, values.join(','));
+				}
+			}}
+			onClearAllFilters={() => {
+				if (onFilterChange) {
+					onFilterChange('statusFilterBy', []);
+					onFilterChange('componentFilterBy', []);
+					onFilterChange('creatorFilterBy', []);
+					return;
+				}
+				clearUrlParams(['creator', 'status', 'components']);
 			}}
 		>
 			{#snippet onRenderColumn(property, row)}
@@ -409,7 +591,7 @@
 						onUpdated={onUpdate}
 						openSelectInstance={vmcpActions?.openSelectInstance}
 						openUpdateConfirm={vmcpActions?.openUpdateConfirm}
-						openEditInstanceConfiguration={vmcpActions?.openEditInstanceConfiguration}
+						openEditInstanceConfiguration={editInstanceConfiguration}
 					/>
 				{:else}
 					{row[property as keyof typeof row]}
@@ -430,11 +612,11 @@
 								disabled={connectDisabled(ctx.canConnect)}
 								aria-disabled={connectDisabled(ctx.canConnect)}
 							>
-								Connect
+								{m.vmcps_connect()}
 							</button>
 						</div>
 						<IconButton
-							tooltip={{ text: 'Test vMCP' }}
+							tooltip={{ text: m.vmcps_test_vmcp() }}
 							onclick={(e) => {
 								e.stopPropagation();
 								handleTest(row.vmcp);
@@ -449,13 +631,13 @@
 						<DotDotDot
 							class="hover:dark:bg-base-100/50"
 							classes={{ menu: 'min-w-48' }}
-							ariaLabel={`Actions for ${ctx.name}`}
+							ariaLabel={m.vmcps_deployments_actions_for_named({ name: ctx.name })}
 						>
 							{#snippet icon()}
 								<Ellipsis class="size-4" />
 							{/snippet}
 
-							{#snippet children({ toggle })}
+							{#snippet children({ toggle, open })}
 								{#if responsive.isMobile}
 									<button
 										class="menu-button"
@@ -467,7 +649,8 @@
 											toggle(false);
 										}}
 									>
-										<Plug class="size-4" /> Connect
+										<Plug class="size-4" />
+										{m.vmcps_connect()}
 									</button>
 									<button
 										class="menu-button"
@@ -478,19 +661,22 @@
 											handleTest(row.vmcp, toggle);
 										}}
 									>
-										<MessageCircle class="size-4" /> Test vMCP
+										<MessageCircle class="size-4" />
+										{m.vmcps_test_vmcp()}
 									</button>
 								{/if}
 								{#if ctx.hasActions}
 									<VMcpMenuActions
 										vmcp={row.vmcp}
 										{toggle}
+										menuOpen={open}
+										openReauthenticate={vmcpActions?.openReauthenticate}
 										onDelete={() => onDelete?.(row.vmcp)}
 										onUpdated={onUpdate}
 										openSelectInstance={vmcpActions?.openSelectInstance}
 										openDiff={vmcpActions?.openDiff}
 										openUpdateConfirm={vmcpActions?.openUpdateConfirm}
-										openEditInstanceConfiguration={vmcpActions?.openEditInstanceConfiguration}
+										openEditInstanceConfiguration={editInstanceConfiguration}
 									/>
 								{/if}
 							{/snippet}
@@ -509,7 +695,8 @@
 						onclick={() => (pendingBulkDelete = deletable.map((row) => row.vmcp))}
 						disabled={deletable.length === 0}
 					>
-						<Trash2 class="size-4" /> Delete
+						<Trash2 class="size-4" />
+						{m.core_delete()}
 						{#if deletable.length > 0}
 							<span class="pill-primary">{deletable.length}</span>
 						{/if}
@@ -524,8 +711,8 @@
 	<VMcpCard
 		vmcp={card.vmcp}
 		selectAriaLabel={isSelectMode
-			? `Select ${card.displayName}`
-			: `Open ${card.displayName || 'Untitled vMCP'}`}
+			? m.vmcps_select_named({ name: card.displayName })
+			: m.vmcps_open_named({ name: card.displayName || m.vmcps_untitled_vmcp() })}
 		selected={Boolean(selected[card.id])}
 		selecting={isSelectMode}
 		onSelect={() => {
@@ -536,17 +723,15 @@
 			if (!canSelectRow(card)) return;
 			toggleSelected(card);
 		}}
-		onConnect={(options) =>
-			onConnect
-				? onConnect(card.vmcp, options)
-				: vmcpActions?.openConnect(card.vmcp, undefined, options)}
+		onConnect={(options) => connectHandler(card.vmcp, options)}
+		openReauthenticate={vmcpActions?.openReauthenticate}
 		onDelete={() => onDelete?.(card.vmcp)}
 		{onUpdate}
 		openSelectInstance={vmcpActions?.openSelectInstance}
 		openDiff={vmcpActions?.openDiff}
 		openUpdateConfirm={vmcpActions?.openUpdateConfirm}
-		openEditInstanceConfiguration={vmcpActions?.openEditInstanceConfiguration}
-		class="h-full text-base-content border-base-300 dark:border-base-400 bg-base-100 dark:bg-base-300 group @container cursor-pointer gap-3 rounded-lg border p-3 shadow-xs transition-[transform,box-shadow,border-color] duration-150 hover:border-primary hover:shadow-md"
+		openEditInstanceConfiguration={editInstanceConfiguration}
+		class="h-full text-base-content border-base-300 dark:border-base-400 bg-base-100 dark:bg-base-300 group @container cursor-pointer gap-3 rounded-lg border p-3 shadow-xs transition-[transform,box-shadow,border-color] duration-150 hover:border-primary dark:hover:border-primary hover:shadow-md"
 		owner={getVMcpCreator(card.vmcp, usersMap)}
 	>
 		{#snippet icon()}
@@ -578,10 +763,10 @@
 	{@const overflowed = hiddenCount > 0 ? card.componentServers.slice(-hiddenCount) : []}
 	{#if card.componentServers.length === 0}
 		{#if variant === 'table'}
-			<span class="text-muted-content text-xs italic">No servers</span>
+			<span class="text-muted-content text-xs italic">{m.vmcps_no_servers()}</span>
 		{:else}
 			<p class="text-muted-content py-2 text-center text-xs italic">
-				No servers yet. Open this vMCP in the designer to add some.
+				{m.vmcps_no_servers_yet_open_designer()}
 			</p>
 		{/if}
 	{:else}
@@ -603,7 +788,7 @@
 				<div
 					data-more
 					hidden={hiddenCount <= 0}
-					aria-label={hiddenCount > 0 ? `${hiddenCount} more servers` : undefined}
+					aria-label={hiddenCount > 0 ? m.vmcps_n_more_servers({ count: hiddenCount }) : undefined}
 					class="pointer-events-auto relative z-10 border-base-400 text-muted-content flex shrink-0 items-center justify-center rounded-md border border-dashed px-1.5 py-1 font-mono text-xs whitespace-nowrap"
 					use:tooltip={hiddenCount > 0
 						? {

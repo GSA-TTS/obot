@@ -10,7 +10,6 @@ import (
 
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/alias"
-	"github.com/obot-platform/obot/pkg/hostedagentmodels"
 	llmtypes "github.com/obot-platform/obot/pkg/llm"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	"github.com/obot-platform/obot/pkg/system"
@@ -123,7 +122,7 @@ func ResolveDefaultModel(ctx context.Context, client kclient.Client, helper Mode
 		return ResolvedModel{}, modelResolutionError(ModelResolutionErrorInaccessible, "user does not have access to default llm model %q", model.Name)
 	}
 
-	proxyPath, ok := hostedagentmodels.ProxyPath(manifest.ModelProvider)
+	proxyPath, ok := proxyPath(manifest.ModelProvider)
 	if !ok {
 		return ResolvedModel{}, modelResolutionError(ModelResolutionErrorInvalid, "default llm model provider %q has no LLM proxy route", manifest.ModelProvider)
 	}
@@ -148,9 +147,6 @@ func defaultDialect(manifest types.ModelManifest) llmtypes.Dialect {
 	if manifest.Dialect != "" {
 		return llmtypes.Dialect(manifest.Dialect)
 	}
-	if manifest.ModelProvider == system.AnthropicModelProvider {
-		return llmtypes.DialectAnthropicMessages
-	}
 	return llmtypes.DialectOpenAIResponses
 }
 
@@ -165,4 +161,14 @@ func apiPathForDialect(dialect llmtypes.Dialect) (string, error) {
 	default:
 		return "", fmt.Errorf("default llm model uses unsupported dialect %q", dialect)
 	}
+}
+
+// proxyPath returns the LLM proxy route for a model's provider, relative to /api/llm-proxy.
+// Every model is served by the LLM gateway, whose route is the proxy's root: the API path
+// (/v1/...) follows /api/llm-proxy directly.
+func proxyPath(provider string) (string, bool) {
+	if provider == system.LLMGatewayModelProvider {
+		return "", true
+	}
+	return "", false
 }

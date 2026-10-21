@@ -2,32 +2,63 @@
 	import ResponsiveDialog from '$lib/components/ResponsiveDialog.svelte';
 	import Search from '$lib/components/Search.svelte';
 	import Select from '$lib/components/Select.svelte';
-	import { VMCP_SORT_OPTIONS, VMCP_STATUS_FILTER_OPTIONS } from '$lib/services/vmcps/constants';
+	import { m } from '$lib/i18n';
+	import {
+		VMCP_SORT_DIRECTION_OPTIONS,
+		VMCP_SORT_FIELD_OPTIONS,
+		VMCP_STATUS_FILTER_OPTIONS
+	} from '$lib/services/vmcps/constants';
 	import type { VMcpFilterOption, VMcpListSettings } from '$lib/services/vmcps/types';
 	import { parseSelectedFilterIds } from '$lib/services/vmcps/utils';
+	import { profile } from '$lib/stores';
 	import { Funnel, LayoutGrid, X, Table } from '@lucide/svelte';
 	import type { Snippet } from 'svelte';
 	import { twMerge } from 'tailwind-merge';
 
 	const BUTTON_ID = 'vmcp-settings-button';
 	const SORT_LABEL_ID = 'vmcp-sort-by-label';
+	const CREATOR_FILTER_LABEL_ID = 'vmcp-filter-by-creator-label';
 	const STATUS_FILTER_LABEL_ID = 'vmcp-filter-by-status-label';
 	const SERVER_FILTER_LABEL_ID = 'vmcp-filter-by-server-label';
-	const selectClasses = 'min-h-8 py-1 text-sm bg-base-200 dark:bg-base-100 shadow-inner!';
+	const selectClasses = 'text-sm';
 
 	interface Props {
 		filters: VMcpListSettings;
 		onChange: (property: keyof VMcpListSettings, values: string[]) => void;
 		componentFilterOptions?: VMcpFilterOption[];
+		creatorFilterOptions?: VMcpFilterOption[];
 		actions?: Snippet;
 	}
 
-	let { filters, onChange, componentFilterOptions = [], actions }: Props = $props();
+	let {
+		filters,
+		onChange,
+		componentFilterOptions = [],
+		creatorFilterOptions = [],
+		actions
+	}: Props = $props();
 	let dialog = $state<ReturnType<typeof ResponsiveDialog>>();
 	let componentDraft = $state<string | number | undefined>('');
 	let statusDraft = $state<string | number | undefined>('');
+	let creatorDraft = $state<string | number | undefined>('');
+	let isAdmin = $derived(Boolean(profile.current.isAdmin?.()));
+
+	type MultiFilter = 'statusFilterBy' | 'componentFilterBy' | 'creatorFilterBy';
 
 	let activeFilterPills = $derived([
+		...(!isAdmin && filters.showMyVMcpsOnly
+			? [
+					{
+						id: 'showMyVMcpsOnly',
+						label: m.vmcps_show_my_vmcps_only(),
+						property: 'showMyVMcpsOnly' as const
+					}
+				]
+			: []),
+		...pillsFor(creatorFilterOptions, filters.creatorFilterBy).map((item) => ({
+			...item,
+			property: 'creatorFilterBy' as const
+		})),
 		...pillsFor(VMCP_STATUS_FILTER_OPTIONS, filters.statusFilterBy).map((item) => ({
 			...item,
 			property: 'statusFilterBy' as const
@@ -37,6 +68,12 @@
 			property: 'componentFilterBy' as const
 		}))
 	]);
+
+	function selectedFilter(property: MultiFilter) {
+		if (property === 'statusFilterBy') return filters.statusFilterBy;
+		if (property === 'creatorFilterBy') return filters.creatorFilterBy;
+		return filters.componentFilterBy;
+	}
 
 	function addFilter(selected: string, id: string) {
 		const ids = parseSelectedFilterIds(selected);
@@ -67,11 +104,12 @@
 		<Search
 			value={filters.query}
 			onChange={(value) => onChange('query', value ? [value] : [])}
-			placeholder="Search vMCPs..."
+			placeholder={m.vmcps_search_vmcps()}
 			class="dark:bg-base-200 dark:border-base-400 bg-base-100 border border-transparent shadow-sm"
 		/>
 		<button class="btn btn-neutral h-12.5" id={BUTTON_ID} onclick={() => dialog?.open()}>
-			<Funnel class="size-4" /> Filters
+			<Funnel class="size-4" />
+			{m.core_filters_title()}
 		</button>
 	</div>
 	{#if activeFilterPills.length > 0}
@@ -82,19 +120,17 @@
 					<button
 						type="button"
 						class="btn btn-square btn-ghost size-4 min-h-4 text-muted-content hover:text-base-content"
-						aria-label="Remove {item.label}"
-						onclick={() =>
+						aria-label={m.vmcps_remove_named({ name: item.label })}
+						onclick={() => {
+							if (item.property === 'showMyVMcpsOnly') {
+								onChange('showMyVMcpsOnly', []);
+								return;
+							}
 							onChange(
 								item.property,
-								parseSelectedFilterIds(
-									removeFilter(
-										item.property === 'statusFilterBy'
-											? filters.statusFilterBy
-											: filters.componentFilterBy,
-										String(item.id)
-									)
-								)
-							)}
+								parseSelectedFilterIds(removeFilter(selectedFilter(item.property), String(item.id)))
+							);
+						}}
 					>
 						<X class="size-3" />
 					</button>
@@ -115,61 +151,106 @@
 			class={twMerge('btn', filters.variant === 'grid' ? 'btn-active' : undefined)}
 			onclick={() => onChange('variant', ['grid'])}
 		>
-			<LayoutGrid class="size-4" /> Grid View
+			<LayoutGrid class="size-4" />
+			{m.vmcps_grid_view()}
 		</button>
 		<button
 			class={twMerge('btn', filters.variant === 'table' ? 'btn-active' : undefined)}
 			onclick={() => onChange('variant', ['table'])}
 		>
-			<Table class="size-4" /> Table View
+			<Table class="size-4" />
+			{m.vmcps_table_view()}
 		</button>
 	</div>
 </div>
 
-<ResponsiveDialog bind:this={dialog} title="vMCPs Settings" class="md:w-md">
+<ResponsiveDialog bind:this={dialog} title={m.vmcps_settings()} class="md:w-md">
 	<div class="flex flex-col gap-2">
-		<label class="flex items-center gap-1.5 w-fit text-sm">
-			<input
-				type="checkbox"
-				class="checkbox checkbox-xs rounded-sm"
-				checked={filters.showMyVMcpsOnly}
-				onchange={(event) =>
-					onChange(
-						'showMyVMcpsOnly',
-						(event.currentTarget as HTMLInputElement).checked ? ['true'] : []
-					)}
-			/>
-			Show my vMCPs only
-		</label>
+		{#if !isAdmin}
+			<label class="flex items-center gap-1.5 w-fit text-sm">
+				<input
+					type="checkbox"
+					class="checkbox checkbox-xs rounded-sm"
+					checked={filters.showMyVMcpsOnly}
+					onchange={(event) =>
+						onChange(
+							'showMyVMcpsOnly',
+							(event.currentTarget as HTMLInputElement).checked ? ['true'] : []
+						)}
+				/>
+				{m.vmcps_show_my_vmcps_only()}
+			</label>
+		{/if}
 
 		<label id={SORT_LABEL_ID} for="vmcp-sort-by" class="divider my-2 text-xs uppercase">
-			Sort By
+			{m.vmcps_sort_by_heading()}
 		</label>
-		<div class="flex gap-4 items-center">
+		<div class="flex gap-2 flex-col">
 			<Select
 				id="vmcp-sort-by"
-				options={VMCP_SORT_OPTIONS}
+				options={VMCP_SORT_FIELD_OPTIONS}
 				selected={filters.sortBy}
-				placeholder="Sort by"
+				placeholder={m.vmcps_sort_by()}
 				ariaLabelledby={SORT_LABEL_ID}
 				class={selectClasses}
-				classes={{ root: 'grow', option: 'text-sm' }}
+				classes={{ option: 'text-sm' }}
 				onSelect={(option) => onChange('sortBy', [String(option.id)])}
 			/>
+			<Select
+				id="vmcp-sort-direction"
+				options={VMCP_SORT_DIRECTION_OPTIONS}
+				selected={filters.sortDirection}
+				placeholder={m.vmcps_sort_direction()}
+				class={selectClasses}
+				classes={{ option: 'text-sm' }}
+				onSelect={(option) => onChange('sortDirection', [option.id === 'desc' ? 'desc' : 'asc'])}
+			/>
 		</div>
+
+		{#if isAdmin}
+			<label
+				id={CREATOR_FILTER_LABEL_ID}
+				for="vmcp-filter-by-creator"
+				class="divider my-2 text-xs uppercase"
+			>
+				{m.vmcps_filter_by_creator_heading()}
+			</label>
+			<Select
+				id="vmcp-filter-by-creator"
+				options={unusedOptions(creatorFilterOptions, filters.creatorFilterBy)}
+				bind:selected={creatorDraft}
+				searchInDropdown
+				placeholder={m.vmcps_filter_by_creator()}
+				searchPlaceholder={m.vmcps_search_creators()}
+				ariaLabelledby={CREATOR_FILTER_LABEL_ID}
+				class={selectClasses}
+				classes={{ root: 'grow', option: 'text-sm' }}
+				onSelect={(option) => {
+					onChange(
+						'creatorFilterBy',
+						parseSelectedFilterIds(addFilter(filters.creatorFilterBy, String(option.id)))
+					);
+					creatorDraft = '';
+				}}
+			/>
+			{@render dialogFilterPills(
+				pillsFor(creatorFilterOptions, filters.creatorFilterBy),
+				'creatorFilterBy'
+			)}
+		{/if}
 
 		<label
 			id={STATUS_FILTER_LABEL_ID}
 			for="vmcp-filter-by-status"
 			class="divider my-2 text-xs uppercase"
 		>
-			Filter By Status
+			{m.vmcps_filter_by_status_heading()}
 		</label>
 		<Select
 			id="vmcp-filter-by-status"
 			options={unusedOptions(VMCP_STATUS_FILTER_OPTIONS, filters.statusFilterBy)}
 			bind:selected={statusDraft}
-			placeholder="Filter by status"
+			placeholder={m.vmcps_filter_by_status()}
 			ariaLabelledby={STATUS_FILTER_LABEL_ID}
 			class={selectClasses}
 			classes={{ root: 'grow', option: 'text-sm' }}
@@ -191,15 +272,15 @@
 			for="vmcp-filter-by-server"
 			class="divider my-2 text-xs uppercase"
 		>
-			Filter By MCP Servers
+			{m.vmcps_filter_by_mcp_servers_heading()}
 		</label>
 		<Select
 			id="vmcp-filter-by-server"
 			options={unusedOptions(componentFilterOptions, filters.componentFilterBy)}
 			bind:selected={componentDraft}
 			searchInDropdown
-			placeholder="Filter by MCP server"
-			searchPlaceholder="Search MCP servers..."
+			placeholder={m.vmcps_filter_by_mcp_server()}
+			searchPlaceholder={m.vmcps_search_mcp_servers()}
 			ariaLabelledby={SERVER_FILTER_LABEL_ID}
 			class={selectClasses}
 			classes={{ root: 'grow', option: 'text-sm' }}
@@ -218,10 +299,7 @@
 	</div>
 </ResponsiveDialog>
 
-{#snippet dialogFilterPills(
-	items: VMcpFilterOption[],
-	property: 'statusFilterBy' | 'componentFilterBy'
-)}
+{#snippet dialogFilterPills(items: VMcpFilterOption[], property: MultiFilter)}
 	{#if items.length > 0}
 		<ul class="mt-2 flex flex-wrap gap-1">
 			{#each items as item (item.id)}
@@ -230,18 +308,11 @@
 					<button
 						type="button"
 						class="btn btn-square btn-ghost size-4 min-h-4 text-muted-content hover:text-base-content"
-						aria-label="Remove {item.label}"
+						aria-label={m.vmcps_remove_named({ name: item.label })}
 						onclick={() =>
 							onChange(
 								property,
-								parseSelectedFilterIds(
-									removeFilter(
-										property === 'statusFilterBy'
-											? filters.statusFilterBy
-											: filters.componentFilterBy,
-										String(item.id)
-									)
-								)
+								parseSelectedFilterIds(removeFilter(selectedFilter(property), String(item.id)))
 							)}
 					>
 						<X class="size-3" />

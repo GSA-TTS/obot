@@ -26,6 +26,7 @@ const (
 func TestListOrphanedVMCPsReturnsVMCPsAwaitingAdoption(t *testing.T) {
 	email := orphanedVMCPForTest(orphanedTestSourceURL, "email", "Email", new(false))
 	email.Spec.Manifest.Description = "Send email"
+	email.Spec.Manifest.ToolSearch = true
 	email.Spec.Manifest.Components = []types.VMCPComponent{
 		{
 			ID:                      "default-gmail",
@@ -48,7 +49,6 @@ func TestListOrphanedVMCPsReturnsVMCPsAwaitingAdoption(t *testing.T) {
 			Name:                    "Search",
 			MCPCatalogID:            system.DefaultCatalog,
 			MCPServerCatalogEntryID: "default-search",
-			AllowedTools:            []string{"find"},
 		},
 	}
 	email.Spec.Manifest.Profiles = []types.VMCPProfile{{
@@ -98,6 +98,7 @@ func TestListOrphanedVMCPsReturnsVMCPsAwaitingAdoption(t *testing.T) {
 entryKey: email
 displayName: Email
 description: Send email
+toolSearch: true
 components:
   - id: default-gmail
     name: Gmail
@@ -112,8 +113,6 @@ components:
   - id: default-search
     name: Search
     mcpServerCatalogEntryKey: github.com/example/shared::search
-    allowedTools:
-      - find
 profiles:
   - name: everyone
     subjects:
@@ -136,6 +135,7 @@ profiles:
 	manifest, err := mcpcatalog.DecodeVMCPManifest([]byte(item.YAML))
 	require.NoError(t, err)
 	require.Equal(t, email.Name, mcpcatalog.VMCPName(system.DefaultCatalog, orphanedTestSourceURL, header.EntryKey, manifest.DisplayName))
+	require.True(t, manifest.ToolSearch)
 	require.Equal(t, email.Spec.Manifest.Profiles, manifest.Profiles)
 	require.Len(t, manifest.Components, 2)
 	require.Equal(t, "default-gmail", manifest.Components[0].ID)
@@ -144,7 +144,6 @@ profiles:
 	require.Equal(t, email.Spec.Manifest.Components[0].ToolOverrides, manifest.Components[0].ToolOverrides)
 	require.Equal(t, "default-search", manifest.Components[1].ID)
 	require.Equal(t, "github.com/example/shared::search", manifest.Components[1].MCPServerCatalogEntryID)
-	require.Equal(t, []string{"find"}, manifest.Components[1].AllowedTools)
 }
 
 func TestListOrphanedVMCPsKeepsEmptyProfiles(t *testing.T) {

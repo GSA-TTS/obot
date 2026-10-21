@@ -1,10 +1,15 @@
+---
+displayed_sidebar: sidebar
+title: "Azure AKS"
+---
+
 # Azure AKS
 
 Deploying Obot to Azure Kubernetes Service follows the standard Helm workflow. As a prerequisite, you'll need the following resources set up in your Azure environment:
 
 * Azure subscription
 * Virtual Network with subnets
-* Azure Database for PostgreSQL running PostgreSQL 17+
+* Azure Database for PostgreSQL running PostgreSQL 17+. Obot also uses a second database on the same server, `<db name>_llm_gateway`, for the LLM gateway. Give Obot's database user `CREATEDB`, create it first with `CREATE DATABASE <db name>_llm_gateway OWNER <db user>;`, or set `OBOT_SERVER_LLM_GATEWAY_POSTGRES_DSN`.
 * Network Security Groups configured to allow connectivity between your AKS cluster and PostgreSQL instance
 * Private Azure Storage Account with Blob Storage container for workspace data
 * (Optional) Azure Key Vault key for encrypting sensitive information
@@ -111,7 +116,7 @@ secret:
   # Optional: generated automatically when omitted from the chart-managed Secret
   OBOT_BOOTSTRAP_TOKEN: "<bootstrap password>"
 
-  # Optionally configure model providers
+  # Optional: configures the LLM gateway's OpenAI provider at startup
   OPENAI_API_KEY: "<your openai api key>"
 
 # Non-sensitive configuration
@@ -129,9 +134,6 @@ config:
   OBOT_SERVER_AUTH_ADMIN_EMAILS: "<comma separated list of admin emails>"
   OBOT_SERVER_AUTH_OWNER_EMAILS: "<comma separated list of owner emails>"
 
-mcpServerDefaults:
-  storageClassName: azure-disk # replace with the name of your StorageClass
-  nanobotWorkspaceSize: 1Gi # Some disk types have a minimum size, read the documentation for the storage type you select.
 ```
 
 With the default configuration on AKS, this will set up ingress to expose Obot through an Application Gateway or NGINX Ingress Controller. Make sure you have the appropriate ingress controller installed in your cluster. You should also consider adding TLS termination to your ingress for secure HTTPS access.

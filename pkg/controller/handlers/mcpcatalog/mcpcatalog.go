@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/obot-platform/nah/pkg/apply"
 	"github.com/obot-platform/nah/pkg/name"
 	"github.com/obot-platform/nah/pkg/router"
+	"github.com/obot-platform/nah/pkg/untriggered"
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/accesscontrolrule"
 	gclient "github.com/obot-platform/obot/pkg/gateway/client"
@@ -23,9 +25,12 @@ import (
 	"github.com/obot-platform/obot/pkg/gitcredential"
 	"github.com/obot-platform/obot/pkg/mcp"
 	catalogvalidation "github.com/obot-platform/obot/pkg/mcpcatalog"
+	"github.com/obot-platform/obot/pkg/openapi"
 	"github.com/obot-platform/obot/pkg/safehttp"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
+	"github.com/obot-platform/obot/pkg/subjectgroups"
 	"github.com/obot-platform/obot/pkg/system"
+	"github.com/obot-platform/obot/pkg/version"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -46,9 +51,18 @@ const (
 	// These are used to force catalog sync on startup, used for times when changes are made to
 	// catalogs, and they must be synced on the next start.
 	forceSyncStartupAnnotation = "obot.ai/force-sync-startup"
-	// Bump this any time this functionality is needed.
-	startupSyncGeneration = "1"
 )
+
+var (
+	// startupSyncGeneration forces a catalog sync on startup when it changes. It includes the Obot
+	// version so that entries gated by minObotVersion and maxObotVersion are re-evaluated on upgrade.
+	// Bump the leading generation any time a sync is needed for other reasons.
+	startupSyncGeneration = "1/" + version.Tag
+)
+
+type openAPIImporter interface {
+	Import(context.Context, types.OpenAPIRuntimeConfig) (*openapi.Result, error)
+}
 
 type Handler struct {
 	maxRepoSizeMB             int
@@ -60,6 +74,7 @@ type Handler struct {
 	remoteURLValidationConfig mcp.ValidationOptions
 	mcpBackend                string
 	mcpSessionManager         *mcp.SessionManager
+	openAPIImporter           openAPIImporter
 }
 
 // userInfo is a wrapper around kuser.Info that includes the user's role.
@@ -74,24 +89,20 @@ type discardResponse struct{}
 
 func New(defaultCatalogPath, defaultSystemCatalogPath string, gatewayClient *gclient.Client, accessControlRuleHelper *accesscontrolrule.Helper, mcpSessionManager *mcp.SessionManager, maxRepoSizeMB int) *Handler {
 	remoteURLValidationConfig := mcpSessionManager.RemoteMCPURLValidationConfig()
-	validationOptions := mcp.ValidationOptions{
-		RemoteMCPURLValidationConfig: remoteURLValidationConfig,
-	}
+	validationOptions := mcpSessionManager.ValidationOptions()
+	safeHTTPOptions := remoteURLValidationConfig.SafeHTTPOptions()
 
 	return &Handler{
-		maxRepoSizeMB:            maxRepoSizeMB,
-		defaultCatalogPath:       defaultCatalogPath,
-		defaultSystemCatalogPath: defaultSystemCatalogPath,
-		gatewayClient:            gatewayClient,
-		httpClient: safehttp.NewClient(safehttp.Options{
-			BlockLoopback:  !remoteURLValidationConfig.AllowLocalhostMCP,
-			BlockPrivateIP: !remoteURLValidationConfig.AllowPrivateIPMCP,
-			BlockLinkLocal: !remoteURLValidationConfig.AllowLinkLocalMCP,
-		}),
+		maxRepoSizeMB:             maxRepoSizeMB,
+		defaultCatalogPath:        defaultCatalogPath,
+		defaultSystemCatalogPath:  defaultSystemCatalogPath,
+		gatewayClient:             gatewayClient,
+		httpClient:                safehttp.NewClient(safeHTTPOptions),
 		accessControlRuleHelper:   accessControlRuleHelper,
 		remoteURLValidationConfig: validationOptions,
 		mcpBackend:                mcpSessionManager.MCPRuntimeBackend(),
 		mcpSessionManager:         mcpSessionManager,
+		openAPIImporter:           openapi.NewImporter(safeHTTPOptions, validationOptions.DevMode),
 	}
 }
 
@@ -137,6 +148,7 @@ func (h *Handler) Sync(req router.Request, resp router.Response) error {
 	}()
 
 	toAdd := make([]kclient.Object, 0)
+	versionSkippedRefs := make(map[string]struct{})
 	mcpCatalog.Status.SyncErrors = make(map[string]string)
 
 	for _, sourceURL := range mcpCatalog.Spec.SourceURLs {
@@ -150,7 +162,8 @@ func (h *Handler) Sync(req router.Request, resp router.Response) error {
 			mcpCatalog.Status.SyncErrors[sourceURL] = err.Error()
 			continue
 		}
-		objs, err := h.readMCPCatalog(req.Ctx, mcpCatalog.Name, sourceURL, token, validationOptions)
+		objs, skippedRefs, err := h.readMCPCatalog(req.Ctx, mcpCatalog.Name, sourceURL, token, validationOptions)
+		maps.Copy(versionSkippedRefs, skippedRefs)
 		if err != nil {
 			slog.Warn("Catalog source is incomplete; skipping invalid entries and retaining missing entries", "source", sourceURL, "error", err)
 			mcpCatalog.Status.SyncErrors[sourceURL] = err.Error()
@@ -176,7 +189,7 @@ func (h *Handler) Sync(req router.Request, resp router.Response) error {
 	for sourceURL, errMsg := range staticConfigurationErrors {
 		addSyncError(mcpCatalog.Status.SyncErrors, sourceURL, errMsg)
 	}
-	toAdd, vmcpErrors, err := h.prepareCatalogVMCPs(req.Ctx, req.Client, mcpCatalog, toAdd)
+	toAdd, retainedVMCPs, vmcpErrors, err := h.prepareCatalogVMCPs(req.Ctx, req.Client, mcpCatalog, toAdd, versionSkippedRefs)
 	if err != nil {
 		return err
 	}
@@ -225,7 +238,7 @@ func (h *Handler) Sync(req router.Request, resp router.Response) error {
 	if err := reconcileRemovedEntries(req.Ctx, req.Client, mcpCatalog, toAdd); err != nil {
 		return err
 	}
-	if err := reconcileRemovedVMCPs(req.Ctx, req.Client, mcpCatalog, toAdd); err != nil {
+	if err := reconcileRemovedVMCPs(req.Ctx, req.Client, mcpCatalog, toAdd, retainedVMCPs); err != nil {
 		return err
 	}
 
@@ -528,6 +541,13 @@ func (h *Handler) readSystemMCPCatalog(ctx context.Context, catalogName, sourceU
 	systemObjs := make([]kclient.Object, 0, len(entries))
 	errs := []error{err}
 	for _, item := range entries {
+		if inRange, err := inObotVersionRange(item, "system catalog entry"); err != nil {
+			errs = append(errs, err)
+			continue
+		} else if !inRange {
+			continue
+		}
+
 		if err := catalogvalidation.ValidateConfigurationFields(item); err != nil {
 			errs = append(errs, err)
 			continue
@@ -571,7 +591,9 @@ func (h *Handler) readSystemMCPCatalog(ctx context.Context, catalogName, sourceU
 	return systemObjs, errors.Join(errs...)
 }
 
-func (h *Handler) readMCPCatalog(ctx context.Context, catalogName, sourceURL, token string, options ...mcp.ValidationOptions) ([]kclient.Object, error) {
+// readMCPCatalog returns the catalog entries and vMCPs read from a source, and the source references
+// of entries skipped because the running Obot version is outside their supported range.
+func (h *Handler) readMCPCatalog(ctx context.Context, catalogName, sourceURL, token string, options ...mcp.ValidationOptions) ([]kclient.Object, map[string]struct{}, error) {
 	validationOptions := h.remoteURLValidationConfig
 	if len(options) > 0 {
 		validationOptions = options[0]
@@ -582,6 +604,7 @@ func (h *Handler) readMCPCatalog(ctx context.Context, catalogName, sourceURL, to
 	errs := []error{err}
 	uniqueEntryKeys := make(map[string]struct{})
 	uniqueVMCPKeys := make(map[string]struct{})
+	versionSkippedRefs := make(map[string]struct{})
 	for _, item := range items {
 		var header struct {
 			Type     string `json:"type"`
@@ -626,6 +649,19 @@ func (h *Handler) readMCPCatalog(ctx context.Context, catalogName, sourceURL, to
 				},
 			})
 
+			continue
+		}
+
+		// Check the range before the item type so that items of types introduced by newer Obot
+		// versions are skipped rather than reported as unsupported. vMCPs do not support bounds,
+		// and DecodeVMCPManifest rejects them.
+		if inRange, err := inObotVersionRange(item, "catalog entry"); err != nil {
+			errs = append(errs, err)
+			continue
+		} else if !inRange {
+			if header.EntryKey != "" {
+				versionSkippedRefs[sourceRef(mcp.SourceIDForURL(sourceURL), header.EntryKey)] = struct{}{}
+			}
 			continue
 		}
 
@@ -680,6 +716,29 @@ func (h *Handler) readMCPCatalog(ctx context.Context, catalogName, sourceURL, to
 		}
 
 		catalogvalidation.NormalizeManifest(&entry)
+		if entry.Runtime == types.RuntimeOpenAPI {
+			if entry.OpenAPIConfig == nil {
+				errs = append(errs, fmt.Errorf("catalog entry %s: openAPIConfig is required", entry.Name))
+				continue
+			}
+			entry.OpenAPIConfig.Source.URL = strings.TrimSpace(entry.OpenAPIConfig.Source.URL)
+			entry.OpenAPIConfig.BaseURL = strings.TrimSpace(entry.OpenAPIConfig.BaseURL)
+			if err := openapi.ValidateInput(*entry.OpenAPIConfig); err != nil {
+				errs = append(errs, fmt.Errorf("catalog entry %s: %w", entry.Name, err))
+				continue
+			}
+			// Always import the source, even when Git and info.version are unchanged.
+			// Never forward catalog credentials to the schema URL. Failed imports
+			// leave the last good entry untouched.
+			result, err := h.openAPIImporter.Import(ctx, *entry.OpenAPIConfig)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("failed to import OpenAPI schema for catalog entry %s: %w", entry.Name, err))
+				continue
+			}
+			// Preview destination status is advisory. ValidateManifest below
+			// rejects invalid destinations before the entry can be applied.
+			entry.OpenAPIConfig.Schema = &types.OpenAPISchema{Raw: result.Schema}
+		}
 		if err := catalogvalidation.ValidateManifest(ctx, entry, catalogvalidation.ValidationOptions{
 			MCP:        validationOptions,
 			MCPBackend: h.mcpBackend,
@@ -693,7 +752,22 @@ func (h *Handler) readMCPCatalog(ctx context.Context, catalogName, sourceURL, to
 		objs = append(objs, &catalogEntry)
 	}
 
-	return objs, errors.Join(errs...)
+	return objs, versionSkippedRefs, errors.Join(errs...)
+}
+
+// inObotVersionRange reports whether a catalog item applies to the running Obot version. Only the
+// version bounds are decoded, so items for other Obot versions are excluded before validation that
+// depends on this version's runtimes and configuration fields.
+func inObotVersionRange(item json.RawMessage, kind string) (bool, error) {
+	bounds, err := catalogvalidation.DecodeObotVersionBounds(item)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s: %w", strings.TrimSpace(kind+" "+bounds.Name), err)
+	}
+	if !bounds.InCurrentRange() {
+		slog.Info("Skipping "+kind+" outside supported Obot version range", "entry", bounds.Name, "minObotVersion", bounds.MinObotVersion, "maxObotVersion", bounds.MaxObotVersion, "obotVersion", version.Tag)
+		return false, nil
+	}
+	return true, nil
 }
 
 func readCatalogManifests[T any](ctx context.Context, httpClient *http.Client, sourceURL, token string, maxRepoSizeMB int) ([]T, error) {
@@ -937,6 +1011,14 @@ func (h *Handler) DeleteUnauthorizedMCPServersForCatalog(req router.Request, _ r
 			}
 
 			if !hasAccess && server.Spec.CompositeName == "" {
+				// The rule helper reads an index fed by a watch, which can lag behind a rule
+				// created moments ago. Confirm against the stored rules before deleting, so a
+				// server created right after its rule isn't deleted when another rule changes.
+				if granted, err := storedRulesGrantCatalogEntry(req, user, server.Spec.MCPServerCatalogEntryName, entry.Spec.MCPCatalogName); err != nil {
+					return fmt.Errorf("failed to confirm access for user %s to catalog entry %s: %w", server.Spec.UserID, server.Spec.MCPServerCatalogEntryName, err)
+				} else if granted {
+					continue
+				}
 				slog.Info("Deleting MCP server because it is no longer authorized to exist", "server", server.Name)
 				if err := req.Delete(&server); err != nil {
 					return fmt.Errorf("failed to delete MCP server %s: %w", server.Name, err)
@@ -946,6 +1028,51 @@ func (h *Handler) DeleteUnauthorizedMCPServersForCatalog(req router.Request, _ r
 	}
 
 	return nil
+}
+
+// storedRulesGrantCatalogEntry reports whether an access control rule read from storage, not
+// from the rule helper's index, lets user use a catalog entry in a catalog.
+func storedRulesGrantCatalogEntry(req router.Request, user kuser.Info, entryName, catalogID string) (bool, error) {
+	var rules v1.AccessControlRuleList
+	if err := req.List(untriggered.UncachedList(&rules), &kclient.ListOptions{
+		Namespace:     req.Object.GetNamespace(),
+		FieldSelector: fields.OneTermEqualSelector("spec.mcpCatalogID", catalogID),
+	}); err != nil {
+		return false, err
+	}
+	// Subjects match as they do in accesscontrolrule.Helper: groups against the auth
+	// provider's groups, Obot groups against Obot's.
+	groups, obotGroups := subjectgroups.Sets(user)
+	for _, rule := range rules.Items {
+		if !rule.DeletionTimestamp.IsZero() || rule.Spec.MCPCatalogID != catalogID {
+			continue
+		}
+		coversEntry := slices.ContainsFunc(rule.Spec.Manifest.Resources, func(r types.Resource) bool {
+			return r.Type == types.ResourceTypeSelector && r.ID == "*" ||
+				r.Type == types.ResourceTypeMCPServerCatalogEntry && r.ID == entryName
+		})
+		if !coversEntry {
+			continue
+		}
+		if slices.ContainsFunc(rule.Spec.Manifest.Subjects, func(s types.Subject) bool {
+			switch s.Type {
+			case types.SubjectTypeUser:
+				return s.ID == user.GetUID()
+			case types.SubjectTypeGroup:
+				_, ok := groups[s.ID]
+				return ok
+			case types.SubjectTypeObotGroup:
+				_, ok := obotGroups[s.ID]
+				return ok
+			case types.SubjectTypeSelector:
+				return s.ID == "*"
+			}
+			return false
+		}) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // DeleteUnauthorizedMCPServersForWorkspace is a handler that deletes MCP servers that are no longer authorized to exist

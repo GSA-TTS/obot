@@ -1,6 +1,10 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import TabLayout from '$lib/components/TabLayout.svelte';
 	import Devices from '$lib/components/admin/devices/Devices.svelte';
+	import EnforcementDecisionsContent from '$lib/components/admin/enforcement/EnforcementDecisionsContent.svelte';
+	import VirtualPageRoot from '$lib/components/ui/virtual-page/virtual-page-viewport.svelte';
+	import { m } from '$lib/i18n';
 	import { profile } from '$lib/stores';
 	import Configuration from './Configuration.svelte';
 	import DeviceClients from './DeviceClients.svelte';
@@ -8,8 +12,10 @@
 	import DeviceSkills from './DeviceSkills.svelte';
 	import OverviewView from './OverviewView.svelte';
 	import { untrack } from 'svelte';
+	import type { Component } from 'svelte';
 
 	let { data } = $props();
+	let isLogsView = $derived(page.url.searchParams.get('view') === 'enforcement-events');
 
 	const defaultView = untrack(() =>
 		profile.current.hasAdminAccess?.()
@@ -23,47 +29,51 @@
 		...(profile.current.hasAdminAccess?.()
 			? [
 					{
-						label: 'Overview',
+						label: m.inventory_enforcement_overview_tab(),
 						value: 'overview',
 						content: overview,
-						tooltip:
-							'View an overall summary of scans sent through Obot Sentry over a given time period.'
+						tooltip: m.inventory_enforcement_overview_tab_tooltip()
 					},
 					{
-						label: 'Configuration',
+						label: m.inventory_enforcement_configuration_tab(),
 						value: 'configuration',
 						content: configuration,
-						tooltip:
-							"Discover shadow AI and enforce policies for unmanaged MCP servers. Set up or manage Obot Sentry on your organization's devices."
+						tooltip: m.inventory_enforcement_configuration_tab_tooltip()
 					}
 				]
 			: []),
 		{
-			label: 'Devices',
+			label: m.inventory_enforcement_devices_tab(),
 			value: 'devices',
 			content: devices,
-			tooltip:
-				'View results for an individual device, from their most recent scan to historical ones.'
+			tooltip: m.inventory_enforcement_devices_tab_tooltip()
 		},
 		...(profile.current.hasAdminAccess?.()
 			? [
 					{
-						label: 'Device Clients',
+						label: m.inventory_enforcement_device_clients_tab(),
 						value: 'device-clients',
 						content: deviceClients,
-						tooltip: 'Browse AI clients discovered across your enrolled devices.'
+						tooltip: m.inventory_enforcement_device_clients_tab_tooltip()
 					},
 					{
-						label: 'Device MCP Servers',
+						label: m.inventory_enforcement_device_mcp_servers_tab(),
 						value: 'device-mcp-servers',
 						content: deviceMcpServers,
-						tooltip: 'Browse MCP servers discovered across your enrolled devices.'
+						tooltip: m.inventory_enforcement_device_mcp_servers_tab_tooltip()
 					},
 					{
-						label: 'Device Skills',
+						label: m.inventory_enforcement_device_skills_tab(),
 						value: 'device-skills',
 						content: deviceSkills,
-						tooltip: 'Browse skills discovered across your enrolled devices.'
+						tooltip: m.inventory_enforcement_device_skills_tab_tooltip()
+					},
+					{
+						label: m.inventory_enforcement_enforcement_events_tab(),
+						value: 'enforcement-events',
+						content: enforcementEvents,
+						tooltip: m.inventory_enforcement_enforcement_events_tab_tooltip(),
+						beta: true
 					}
 				]
 			: [])
@@ -71,10 +81,21 @@
 </script>
 
 <svelte:head>
-	<title>Obot | Inventory</title>
+	<title>{m.inventory_enforcement_page_title()}</title>
 </svelte:head>
 
-<TabLayout title="Inventory" {defaultView} classes={{ childrenContainer: 'max-w-none' }} {views} />
+<TabLayout
+	title={m.nav_inventory()}
+	{defaultView}
+	classes={{ childrenContainer: 'max-w-none' }}
+	{views}
+	main={isLogsView
+		? {
+				component: VirtualPageRoot as unknown as Component,
+				props: { class: '', as: 'main', itemHeight: 56, overscan: 5 }
+			}
+		: undefined}
+/>
 
 {#snippet overview()}
 	<OverviewView stats={data.stats} range={data.range} />
@@ -104,4 +125,10 @@
 
 {#snippet deviceSkills()}
 	<DeviceSkills />
+{/snippet}
+
+{#snippet enforcementEvents()}
+	<div class="flex min-h-full flex-col gap-6">
+		<EnforcementDecisionsContent />
+	</div>
 {/snippet}

@@ -9,7 +9,6 @@ import (
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/accesscontrolrule"
 	"github.com/obot-platform/obot/pkg/gateway/client"
-	"github.com/obot-platform/obot/pkg/hostedagentaccessrule"
 	"github.com/obot-platform/obot/pkg/skillaccessrule"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apiserver/pkg/authentication/user"
@@ -19,6 +18,10 @@ import (
 const (
 	MetricsGroup         = "metrics"
 	UnauthenticatedGroup = "unauthenticated"
+
+	// scimPathPrefix begins the path of the SCIM endpoint, which serves the SCIM connection. It must match the SCIM
+	// handler's path prefix.
+	scimPathPrefix = "/scim/v2/"
 
 	// anyGroup is an internal group that allows access to any group
 	anyGroup = "*"
@@ -33,14 +36,16 @@ var (
 	tunnelPeerResources = newPathMatcher("GET /tunnel/peer")
 
 	adminAndOwnerRules = []string{
+		"/api/claude-organizations/",
+		"/api/claude-environments",
+		"/api/claude-environments/",
+		"POST /api/openapi-import",
 		"/api/model-proxy",
 		"/api/model-proxy/",
 		"/api/mcp-tunnels",
 		"/api/mcp-tunnels/",
 		"/api/mcp-catalogs",
 		"/api/mcp-catalogs/",
-		"/api/model-info-source",
-		"/api/model-info-source/",
 		"GET /api/mcp-server-binding-secrets",
 		"/api/mcp-servers",
 		"/api/mcp-servers/",
@@ -60,6 +65,8 @@ var (
 		"/api/system-mcp-catalogs/",
 		"GET /api/mcp-audit-logs",
 		"GET /api/mcp-audit-logs/",
+		"GET /api/egress-audit-logs",
+		"GET /api/egress-audit-logs/",
 		"GET /api/llm-audit-logs",
 		"GET /api/llm-audit-logs/",
 		"GET /api/llm-audit-logs/filter-options/",
@@ -75,20 +82,19 @@ var (
 		"POST /api/auth-providers/{id}/configure",
 		"POST /api/auth-providers/{id}/deconfigure",
 		"POST /api/auth-providers/{id}/reveal",
+		"GET /api/auth-providers/{id}/residual-group-data",
+		"GET /api/scim-connections",
+		"GET /api/scim-connections/",
 		"/api/local-auth/users",
 		"/api/local-auth/users/",
 		"/api/model-providers",
 		"/api/model-providers/",
+		"/api/llm-gateway/",
 		"GET /api/bookstrap",
 		"/api/models",
 		"/api/models/",
 		"/api/model-access-policies",
 		"/api/model-access-policies/",
-		"/api/message-policies",
-		"/api/message-policies/",
-		"/api/message-policy-violations",
-		"/api/message-policy-violations/",
-		"GET /api/message-policy-violation-stats",
 		"DELETE /api/devices/scans/{scan_id}",
 		"/api/devices/scan-stats",
 		"/api/devices/mcp-servers/",
@@ -108,6 +114,7 @@ var (
 		"/api/default-model-aliases",
 		"/api/default-model-aliases/",
 		"/api/users",
+		"POST /api/users/{user_id}/enable",
 		"GET /api/groups",
 		"/api/group-role-assignments",
 		"/api/group-role-assignments/",
@@ -115,6 +122,7 @@ var (
 		"GET /api/active-users",
 		"GET /api/token-usage",
 		"GET /api/total-token-usage",
+		"GET /api/token-usage-stats",
 		"GET /api/tokens",
 		"DELETE /api/tokens/{id}",
 		"/api/oauth-apps",
@@ -139,19 +147,6 @@ var (
 		"/api/skill-repositories/",
 		"/api/skill-access-rules",
 		"/api/skill-access-rules/",
-		"/api/agent-catalogs",
-		"/api/agent-catalogs/",
-		"/api/harnesses",
-		"/api/harnesses/",
-		"/api/hosted-agents",
-		"/api/hosted-agents/",
-		"/api/hosted-agent-access-rules",
-		"/api/hosted-agent-access-rules/",
-		"/api/hosted-agent-pools",
-		"/api/hosted-agent-pools/",
-		"/api/hosted-agent-pool-defaults",
-		"/api/hosted-agent-pool-assignments",
-		"/api/hosted-agent-pool-assignments/",
 		"GET /api/eula",
 		"PUT /api/eula",
 		"/api/product-telemetry-consent",
@@ -165,28 +160,34 @@ var (
 		"GET /api/admin-api-keys",
 		"GET /api/admin-api-keys/{id}",
 		"DELETE /api/admin-api-keys/{id}",
-
-		"/api/projects",
-		"/api/projects/",
-		"GET /api/nanobot-agents",
+		"POST /api/claude-sessions/{session_id}/suspend",
 	}
 	ownerRules = []string{
 		"POST /api/auth-providers/{id}/stage",
 		"DELETE /api/auth-providers/{id}/stage",
 		"POST /api/auth-providers/{id}/verify",
 		"POST /api/auth-providers/{id}/activate",
+		"POST /api/scim-connections",
+		"POST /api/scim-connections/{id}/enforce",
+		"POST /api/scim-connections/{id}/delete-unreferenced-groups",
+		"POST /api/scim-connections/{id}/rotate-token",
+		"POST /api/scim-connections/{id}/revoke-current-token",
+		"POST /api/scim-connections/{id}/revoke-previous-token",
 	}
 
 	staticRules = map[string][]string{
 		types.GroupAdmin: adminAndOwnerRules,
 		types.GroupOwner: append(slices.Clone(adminAndOwnerRules), ownerRules...),
 		types.GroupAuditor: {
+			"GET /api/llm-gateway/",
 			"GET /api/model-proxy",
 			"GET /api/model-proxy/usage",
 			"GET /api/admin-api-keys",
 			"GET /api/admin-api-keys/{id}",
 			"GET /api/mcp-audit-logs",
 			"GET /api/mcp-audit-logs/",
+			"GET /api/egress-audit-logs",
+			"GET /api/egress-audit-logs/",
 			"GET /api/llm-audit-logs",
 			"GET /api/llm-audit-logs/",
 			"GET /api/llm-audit-logs/filter-options/",
@@ -207,8 +208,6 @@ var (
 			"GET /api/mcp-servers/",
 			"GET /api/model-access-policies",
 			"GET /api/model-access-policies/",
-			"GET /api/message-policies",
-			"GET /api/message-policies/",
 			"GET /api/user-default-role-settings",
 			"GET /api/k8s-settings",
 			"GET /api/image-pull-secrets/capability",
@@ -217,6 +216,8 @@ var (
 			"GET /api/git-credentials",
 			"GET /api/git-credentials/",
 			"POST /api/auth-providers/{id}/reveal",
+			"GET /api/scim-connections",
+			"GET /api/scim-connections/",
 			"GET /api/local-auth/users",
 			"GET /api/local-auth/users/",
 			"GET /api/workspaces/",
@@ -234,17 +235,6 @@ var (
 			"GET /api/skill-repositories/",
 			"GET /api/skill-access-rules",
 			"GET /api/skill-access-rules/",
-			"GET /api/agent-catalogs",
-			"GET /api/agent-catalogs/",
-			"GET /api/harnesses",
-			"GET /api/harnesses/",
-			"GET /api/hosted-agents",
-			"GET /api/hosted-agents/",
-			"GET /api/hosted-agent-access-rules",
-			"GET /api/hosted-agent-access-rules/",
-			"GET /api/message-policy-violations",
-			"GET /api/message-policy-violations/",
-			"GET /api/message-policy-violation-stats",
 			"GET /api/enforcement-decisions",
 			"GET /api/enforcement-decisions/",
 			"GET /api/devices/scan-stats",
@@ -259,9 +249,13 @@ var (
 			"GET /api/mdm/assets",
 			"GET /api/token-usage",
 			"GET /api/total-token-usage",
-			"GET /api/nanobot-agents",
+			"GET /api/token-usage-stats",
 		},
 		anyGroup: {
+			"POST /api/claude-runners/spawn",
+			"POST /api/claude-runners/{instance}/credentials",
+			"POST /api/claude-runners/{instance}/finished",
+			"POST /api/claude-runners/{instance}/status",
 			// Allow access to the oauth2 endpoints
 			"/oauth2/",
 
@@ -298,6 +292,8 @@ var (
 			"POST /oauth/token",
 			"GET  /oauth/jwks.json",
 			"GET  /oauth/client-metadata.json",
+			// Pending UI login state is a short-lived, opaque capability.
+			"GET  /oauth/mcp/login/{state}",
 
 			// Allow any user to read stored images.
 			// This allows the UI to display custom images to unauthenticated users.
@@ -309,7 +305,15 @@ var (
 		},
 
 		types.GroupAPI: {
+			"GET /api/claude-sessions",
+			"GET /api/claude-sessions/{session_id}",
+			"DELETE /api/claude-sessions/{session_id}",
+			"GET /api/claude-environments",
+			"PUT /api/claude-environments/{environment}/agent",
+			"DELETE /api/claude-environments/{environment}/agent",
 			"POST /api/token-request/verify",
+			// Whether Claude subscriptions may be used, for the gateway's setup instructions.
+			"GET /api/llm-gateway/settings",
 			"POST /api/local-agent-audit-logs",
 			"GET /api/models",
 			"GET /api/model-providers",
@@ -330,10 +334,6 @@ var (
 			"GET /api/mcp-audit-logs/{mcp_id}",
 			"GET /api/mcp-stats",
 			"GET /api/mcp-stats/{mcp_id}",
-
-			// Allow basic users to create and list projects
-			"POST /api/projects",
-			"GET /api/projects",
 
 			// API key management for user's own keys
 			"POST /api/api-keys",
@@ -381,13 +381,6 @@ var (
 			"GET /api/skills",
 		},
 
-		types.GroupPublishedArtifacts: {
-			// Published artifacts — any authenticated user can publish and search.
-			// Artifact-specific access is enforced by resource authorization.
-			"POST   /api/published-artifacts",
-			"GET    /api/published-artifacts",
-		},
-
 		types.GroupLLM: {
 			"/api/llm-proxy/",
 		},
@@ -414,6 +407,7 @@ var (
 
 		MetricsGroup: {
 			"/debug/metrics",
+			"GET /api/llm-gateway/metrics",
 		},
 	}
 
@@ -430,15 +424,14 @@ var (
 )
 
 type Authorizer struct {
-	rules             []rule
-	cache             kclient.Client
-	uncached          kclient.Client
-	gatewayClient     *client.Client
-	apiResources      map[string]*pathMatcher
-	acrHelper         *accesscontrolrule.Helper
-	skillHelper       *skillaccessrule.Helper
-	hostedAgentHelper *hostedagentaccessrule.Helper
-	registryNoAuth    bool
+	rules          []rule
+	cache          kclient.Client
+	uncached       kclient.Client
+	gatewayClient  *client.Client
+	apiResources   map[string]*pathMatcher
+	acrHelper      *accesscontrolrule.Helper
+	skillHelper    *skillaccessrule.Helper
+	registryNoAuth bool
 }
 
 type rule struct {
@@ -449,26 +442,36 @@ type rule struct {
 // fake is a fake handler that does fake things
 type fake struct{}
 
-func NewAuthorizer(gatewayClient *client.Client, cache, uncached kclient.Client, devMode bool, acrHelper *accesscontrolrule.Helper, skillHelper *skillaccessrule.Helper, hostedAgentHelper *hostedagentaccessrule.Helper, registryNoAuth bool) *Authorizer {
+func NewAuthorizer(gatewayClient *client.Client, cache, uncached kclient.Client, devMode bool, acrHelper *accesscontrolrule.Helper, skillHelper *skillaccessrule.Helper, registryNoAuth bool) *Authorizer {
 	apiBasedResources := make(map[string]*pathMatcher, len(apiResources))
 	for group, resources := range apiResources {
 		apiBasedResources[group] = newPathMatcher(resources...)
 	}
 
 	return &Authorizer{
-		rules:             defaultRules(devMode, registryNoAuth),
-		cache:             cache,
-		uncached:          uncached,
-		gatewayClient:     gatewayClient,
-		apiResources:      apiBasedResources,
-		acrHelper:         acrHelper,
-		skillHelper:       skillHelper,
-		hostedAgentHelper: hostedAgentHelper,
-		registryNoAuth:    registryNoAuth,
+		rules:          defaultRules(devMode, registryNoAuth),
+		cache:          cache,
+		uncached:       uncached,
+		gatewayClient:  gatewayClient,
+		apiResources:   apiBasedResources,
+		acrHelper:      acrHelper,
+		skillHelper:    skillHelper,
+		registryNoAuth: registryNoAuth,
 	}
 }
 
 func (a *Authorizer) Authorize(req *http.Request, userInfo user.Info) bool {
+	// The SCIM endpoint serves only a SCIM connection's principal, and that principal nothing else. There is at most
+	// one connection, so the path does not name it.
+	isSCIM := req.URL.Path == strings.TrimSuffix(scimPathPrefix, "/") || strings.HasPrefix(req.URL.Path, scimPathPrefix)
+	if slices.Contains(userInfo.GetGroups(), types.GroupSCIM) {
+		return isSCIM && userInfo.GetUID() != ""
+	}
+
+	if isSCIM {
+		return false
+	}
+
 	// Tunnel credentials are deliberately non-user principals. Keep this check
 	// ahead of anyGroup and UI authorization so the credential cannot inherit
 	// baseline routes intended for ordinary users.
@@ -504,24 +507,7 @@ func (a *Authorizer) Authorize(req *http.Request, userInfo user.Info) bool {
 		}
 	}
 
-	return a.authorizeAPIResources(req, user) || a.allowAgentConnectSignIn(req, user) || a.checkOAuthClient(req) || a.checkUI(req, user)
-}
-
-// allowAgentConnectSignIn lets an unauthenticated request reach the
-// agent-connect handler so a browser is sent to sign in rather than shown a
-// bare 401.
-//
-// This grants no access. The handler redirects as its first action, before
-// reading any instance, so the response is identical whether or not the
-// instance exists and nothing is proxied. It deliberately does not use the
-// static-rule path, which returns authorized without evaluating resources and
-// would therefore let any caller reach any sandbox.
-//
-// Authenticated callers never take this branch: they are matched against
-// apiResources and narrowed to the instance's owner by checkHostedAgentInstance.
-func (a *Authorizer) allowAgentConnectSignIn(req *http.Request, user User) bool {
-	return slices.Contains(user.GetGroups(), UnauthenticatedGroup) &&
-		strings.HasPrefix(req.URL.Path, "/agent-connect/")
+	return a.authorizeAPIResources(req, user) || a.checkOAuthClient(req) || a.checkUI(req, user)
 }
 
 func (a *Authorizer) get(ctx context.Context, key kclient.ObjectKey, obj kclient.Object) error {

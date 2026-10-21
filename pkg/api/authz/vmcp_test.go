@@ -545,6 +545,32 @@ func TestVMCPActionRouteAuthorization(t *testing.T) {
 			userID: "other",
 		},
 		{
+			name:    "profile-matched shared VMCP can delete one component's OAuth",
+			method:  http.MethodDelete,
+			path:    "/api/vmcps/" + shared.Name + "/components/component-a/oauth",
+			userID:  "allowed",
+			allowed: true,
+		},
+		{
+			name:   "profile-unmatched shared VMCP cannot delete one component's OAuth",
+			method: http.MethodDelete,
+			path:   "/api/vmcps/" + shared.Name + "/components/component-a/oauth",
+			userID: "other",
+		},
+		{
+			name:    "profile-matched shared VMCP can read its OAuth status",
+			method:  http.MethodGet,
+			path:    "/api/vmcps/" + shared.Name + "/oauth-status",
+			userID:  "allowed",
+			allowed: true,
+		},
+		{
+			name:   "profile-unmatched shared VMCP cannot read its OAuth status",
+			method: http.MethodGet,
+			path:   "/api/vmcps/" + shared.Name + "/oauth-status",
+			userID: "other",
+		},
+		{
 			name:    "personal VMCP owner is readable through VMCP route",
 			method:  http.MethodGet,
 			path:    "/api/vmcps/" + personal.Name,
@@ -741,7 +767,7 @@ func TestVMCPComponentOAuthAuthorizationChecksParentConnection(t *testing.T) {
 			WithIndex(&v1.VMCPInstance{}, "spec.manifest.vmcpID", func(obj kclient.Object) []string {
 				return []string{obj.(*v1.VMCPInstance).Spec.Manifest.VMCPID}
 			}).Build()
-		return NewAuthorizer(nil, storage, storage, false, nil, nil, nil, false)
+		return NewAuthorizer(nil, storage, storage, false, nil, nil, false)
 	}
 	newObjects := func(singleUser bool) (*v1.VMCP, *v1.VMCPInstance, *v1.MCPServer) {
 		vmcp := &v1.VMCP{
@@ -822,7 +848,7 @@ func TestVMCPComponentOAuthAuthorizationChecksParentConnection(t *testing.T) {
 
 func newVMCPTestAuthorizer(objects ...kclient.Object) *Authorizer {
 	storage := clientfake.NewClientBuilder().WithScheme(storagescheme.Scheme).WithObjects(objects...).Build()
-	return NewAuthorizer(nil, storage, storage, false, nil, nil, nil, false)
+	return NewAuthorizer(nil, storage, storage, false, nil, nil, false)
 }
 
 func objectMetaForAuthzTest(name string) metav1.ObjectMeta {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/obot-platform/obot/pkg/gateway/types"
 	"gorm.io/gorm"
@@ -95,6 +96,55 @@ func (c *Client) RevealCredential(ctx context.Context, contexts []string, name s
 	return credential, CredentialNotFoundError{Contexts: contexts, Name: name}
 }
 
+// RevealAuthProviderCredential is RevealCredential for the credential of the auth provider namespace/name, and also
+// returns the adapter type of the provider's SCIM connection, or "" when it has none. It reads both in one query, as
+// it runs for every request that checks whether the provider is configured.
+func (c *Client) RevealAuthProviderCredential(ctx context.Context, contexts []string, namespace, name string) (types.Credential, string, error) {
+	if len(contexts) == 0 {
+		return types.Credential{}, "", CredentialNotFoundError{Contexts: contexts, Name: name}
+	}
+
+	type credentialRow struct {
+		types.Credential
+		SCIMAdapterType *string
+	}
+	var rows []credentialRow
+	if err := c.db.WithContext(ctx).Model(new(types.Credential)).
+		Select("credentials.*, (SELECT adapter_type FROM scim_connections WHERE auth_provider_namespace = ? AND auth_provider_name = ?) AS scim_adapter_type", namespace, name).
+		Where("context IN ? AND name = ?", contexts, name).
+		Scan(&rows).Error; err != nil {
+		return types.Credential{}, "", fmt.Errorf("failed to read the credential of auth provider %s/%s: %w", namespace, name, err)
+	}
+
+	// The first context that has the credential wins, as in RevealCredential.
+	for _, credentialContext := range contexts {
+		i := slices.IndexFunc(rows, func(row credentialRow) bool {
+			return row.Context == credentialContext
+		})
+		if i < 0 {
+			continue
+		}
+
+		credential := rows[i].Credential
+		if err := c.decryptCredential(ctx, &credential); err != nil {
+			return types.Credential{}, "", fmt.Errorf("failed to decrypt credential: %w", err)
+		}
+		var adapterType string
+		if rows[i].SCIMAdapterType != nil {
+			adapterType = *rows[i].SCIMAdapterType
+		}
+		return credential, adapterType, nil
+	}
+
+	return types.Credential{}, "", CredentialNotFoundError{Contexts: contexts, Name: name}
+}
+
+// HasCredential reports whether a credential with name exists in any of contexts. It does not decrypt the credential,
+// so it answers even when the credential could not be decrypted.
+func (c *Client) HasCredential(ctx context.Context, contexts []string, name string) (bool, error) {
+	return hasCredentialTx(c.db.WithContext(ctx), contexts, name)
+}
+
 // UpsertCredential creates or replaces a credential identified by context+name.
 func (c *Client) UpsertCredential(ctx context.Context, credential types.Credential) error {
 	if credential.Context == "" || credential.Name == "" {
@@ -112,6 +162,28 @@ func (c *Client) UpsertCredential(ctx context.Context, credential types.Credenti
 		Columns:   []clause.Column{{Name: "context"}, {Name: "name"}},
 		DoUpdates: clause.AssignmentColumns([]string{"secrets", "encrypted"}),
 	}).Create(&credential).Error
+}
+
+// EnsureCredential stores credential unless one with the same context and name already
+// exists, and returns the stored credential. Concurrent callers all get the same one.
+func (c *Client) EnsureCredential(ctx context.Context, credential types.Credential) (types.Credential, error) {
+	if credential.Context == "" || credential.Name == "" {
+		return types.Credential{}, fmt.Errorf("credential context and name are required")
+	}
+	if credential.Secrets == nil {
+		credential.Secrets = map[string]string{}
+	}
+	credential.Encrypted = false
+	if err := c.encryptCredential(ctx, &credential); err != nil {
+		return types.Credential{}, fmt.Errorf("failed to encrypt credential: %w", err)
+	}
+	if err := c.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "context"}, {Name: "name"}},
+		DoNothing: true,
+	}).Create(&credential).Error; err != nil {
+		return types.Credential{}, err
+	}
+	return c.RevealCredential(ctx, []string{credential.Context}, credential.Name)
 }
 
 // DeleteCredential deletes a credential if it exists and returns whether a credential was deleted.
@@ -197,4 +269,16 @@ func blankCredentialSecrets(secrets map[string]string) map[string]string {
 		blank[key] = ""
 	}
 	return blank
+}
+
+func hasCredentialTx(tx *gorm.DB, contexts []string, name string) (bool, error) {
+	if len(contexts) == 0 {
+		return false, nil
+	}
+
+	var count int64
+	if err := tx.Model(new(types.Credential)).Where("context IN ? AND name = ?", contexts, name).Count(&count).Error; err != nil {
+		return false, fmt.Errorf("failed to check for credential %s: %w", name, err)
+	}
+	return count > 0, nil
 }

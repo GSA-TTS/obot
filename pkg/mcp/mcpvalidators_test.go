@@ -1346,6 +1346,57 @@ func TestValidateEgressDomains(t *testing.T) {
 	}
 }
 
+func TestValidateOpenAPIEgress(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		config  types.OpenAPIRuntimeConfig
+		wantErr string
+	}{
+		{
+			name: "allowed domain",
+			config: types.OpenAPIRuntimeConfig{
+				EgressDomains: []string{"api.example.com"},
+			},
+		},
+		{
+			name: "invalid domain",
+			config: types.OpenAPIRuntimeConfig{
+				EgressDomains: []string{"https://api.example.com"},
+			},
+			wantErr: "must not include a protocol",
+		},
+		{
+			name: "deny all conflicts with domains",
+			config: types.OpenAPIRuntimeConfig{
+				EgressDomains: []string{"api.example.com"},
+				DenyAllEgress: new(true),
+			},
+			wantErr: "denyAllEgress cannot be true",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.config.BaseURL = "https://93.184.216.34"
+			tt.config.Source = types.OpenAPISource{Content: storedOpenAPISchema}
+			tt.config.Schema = testOpenAPISchema(storedOpenAPISchema)
+			serverErr := ValidateServerManifest(t.Context(), types.MCPServerManifest{
+				Runtime:       types.RuntimeOpenAPI,
+				OpenAPIConfig: &tt.config,
+			}, false, ValidationOptions{})
+			catalogErr := ValidateCatalogEntryManifest(t.Context(), types.MCPServerCatalogEntryManifest{
+				Runtime:       types.RuntimeOpenAPI,
+				OpenAPIConfig: &tt.config,
+			}, false, ValidationOptions{})
+			for _, err := range []error{serverErr, catalogErr} {
+				if tt.wantErr == "" {
+					require.NoError(t, err)
+				} else {
+					require.ErrorContains(t, err, tt.wantErr)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateManifestStartupTimeoutNonNegative(t *testing.T) {
 	t.Run("server manifest rejects negative startup timeout", func(t *testing.T) {
 		err := ValidateServerManifest(t.Context(), types.MCPServerManifest{
@@ -1802,53 +1853,6 @@ func TestValidateSecretBindingsCatalogEntryAdminManaged(t *testing.T) {
 	}
 }
 
-func TestValidateSecretBindingsCatalogEntryRejectsAdminAdded(t *testing.T) {
-	binding := &types.MCPSecretBinding{Name: "my-secret", Key: "token", AdminAdded: true}
-
-	tests := []struct {
-		name     string
-		manifest types.MCPServerCatalogEntryManifest
-		wantErr  string
-	}{
-		{
-			name: "env config adminAdded rejected",
-			manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeNPX,
-				Config: []types.MCPConfig{
-					{
-						Key:           "TOKEN",
-						Usage:         types.Env,
-						SecretBinding: binding,
-					},
-				},
-			},
-			wantErr: "secretBinding.adminAdded is not valid for catalog entry",
-		},
-		{
-			name: "header config adminAdded rejected",
-			manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeRemote,
-				Config: []types.MCPConfig{
-					{
-						Key:           "Authorization",
-						Usage:         types.Header,
-						SecretBinding: binding,
-					},
-				},
-			},
-			wantErr: "secretBinding.adminAdded is not valid for catalog entry",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateSecretBindingsCatalogEntry(tt.manifest, true, false, "kubernetes")
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tt.wantErr)
-		})
-	}
-}
-
 func TestValidateTemplateReferences_CatalogEntry(t *testing.T) {
 	required := types.MCPConfig{Key: "TAG", Usage: types.Interpolated, Required: true}
 	optional := types.MCPConfig{Key: "TAG", Usage: types.Interpolated, Required: false}
@@ -1966,4 +1970,48 @@ func TestValidateCatalogEntryManifestCatalogSyncedRejectsTunnelName(t *testing.T
 		Field:   "remoteConfig.tunnelName",
 		Message: "cannot be set on catalog-synced entries",
 	}, ValidateCatalogEntryManifest(t.Context(), manifest, true, ValidationOptions{}))
+}
+
+func TestValidateObotVersionRange(t *testing.T) {
+	tests := []struct {
+		name          string
+		minVersion    string
+		maxVersion    string
+		catalogSynced bool
+		wantErr       string
+	}{
+		{
+			name:          "unset on admin-created entry",
+			catalogSynced: false,
+		},
+		{
+			name:          "set on catalog-synced entry",
+			minVersion:    "v0.20.0",
+			maxVersion:    "v0.21.0",
+			catalogSynced: true,
+		},
+		{
+			name:          "set on admin-created entry",
+			minVersion:    "v0.20.0",
+			catalogSynced: false,
+			wantErr:       "only supported for catalog-synced entries",
+		},
+		{
+			name:          "invalid on catalog-synced entry",
+			maxVersion:    "v0.21",
+			catalogSynced: true,
+			wantErr:       "invalid maxObotVersion",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateObotVersionRange(tt.minVersion, tt.maxVersion, tt.catalogSynced)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
 }

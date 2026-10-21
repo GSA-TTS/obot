@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '$lib/i18n';
 	import { darkMode } from '$lib/stores';
 	import { autoUpdate, computePosition, flip, offset } from '@floating-ui/dom';
 	import { arc, pie, type PieArcDatum } from 'd3';
@@ -82,6 +83,9 @@
 	const size = $derived(Math.min(Math.max(clientWidth, 1), Math.max(clientHeight, 1), 320));
 	const outerRadius = $derived(Math.max(0, size / 2 - 2));
 	const innerRadius = $derived(outerRadius * donutRatio);
+
+	const SLICE_GAP = 2;
+	const SLICE_CORNER_RADIUS = 3;
 
 	/** Slightly enlarges the hovered wedge radially (outer radius multiplier at full hover). */
 	const HOVER_OUTER_RADIUS_SCALE = 1.025;
@@ -262,7 +266,13 @@
 	): SliceBundle {
 		if (outerRadius <= 0 || total <= 0) return { arcs: [], separators: [] };
 		const snapshot = $state.snapshot(data);
-		const layout = pieGenerator(snapshot);
+		const visibleSlices = snapshot.filter((d) => Number(d.value) > 0).length;
+		// A ~2px surface gap separates slices (grouped donuts use radial separators instead).
+		const padAngle =
+			useGroupSeparators || visibleSlices < 2
+				? 0
+				: SLICE_GAP / Math.sqrt(innerRadius ** 2 + outerRadius ** 2);
+		const layout = pieGenerator.padAngle(padAngle)(snapshot);
 		const n = layout.length;
 
 		const dUnit = HOVER_OUTER_RADIUS_SCALE - 1;
@@ -288,7 +298,7 @@
 			const arcGen = arc<PieArcDatum<DonutDatum>>()
 				.innerRadius(innerRadius)
 				.outerRadius(sliceOuter)
-				.cornerRadius(useGroupSeparators ? 0 : 0.5);
+				.cornerRadius(useGroupSeparators ? 0 : SLICE_CORNER_RADIUS);
 			const scaled: PieArcDatum<DonutDatum> = {
 				...d,
 				endAngle: d.startAngle + (d.endAngle - d.startAngle) * p
@@ -355,7 +365,7 @@
 							{/if}
 						</div>
 						<div class="text-muted-content mb-2 border-b pb-2">
-							{currentItem.percentOfTotal.toFixed(1)}% of total
+							{m.core_percent_of_total({ percent: currentItem.percentOfTotal.toFixed(1) })}
 						</div>
 					</div>
 					<div class="text-base-content text-2xl font-bold">{formatValue(currentItem.value)}</div>
@@ -364,7 +374,7 @@
 		{/if}
 
 		{#if total <= 0}
-			<p class="text-muted-content font-light text-sm">No data</p>
+			<p class="text-muted-content font-light text-sm">{m.core_no_data()}</p>
 		{:else}
 			<svg
 				class="max-h-full max-w-full overflow-visible"
@@ -372,7 +382,7 @@
 				height={size}
 				viewBox="{-viewBoxHalf} {-viewBoxHalf} {viewBoxHalf * 2} {viewBoxHalf * 2}"
 				role="img"
-				aria-label="Donut chart"
+				aria-label={m.core_donut_chart()}
 			>
 				<g>
 					{#each donut.arcs as slice, i (i)}
@@ -382,8 +392,8 @@
 							d={slice.path}
 							fill={slice.color}
 							class={twMerge(
-								'cursor-pointer stroke-1',
-								useGroupSeparators ? '' : 'stroke-base-100 dark:stroke-base-200'
+								'cursor-pointer transition-opacity duration-150',
+								currentItem && currentItem.label !== slice.label && 'opacity-60'
 							)}
 							onpointerenter={(e) => {
 								cancelHoverSliceClear();

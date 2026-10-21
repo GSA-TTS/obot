@@ -306,11 +306,11 @@ func TestTempServerAndConfigIgnoresAuditLogsWithoutChangingNormalTraffic(t *test
 		"temp",
 		"temp",
 		"catalog",
-		nil,
+		nil, false,
 	)
 	require.NoError(t, err)
 	assert.Empty(t, missingFields)
-	assert.Equal(t, "false", normalConfig.AuditLogMetadata[mcp.AuditLogIgnore])
+	assert.NotContains(t, normalConfig.AuditLogMetadata, mcp.AuditLogIgnore)
 }
 
 func TestVMCPComponentToolPreviewConfigMissingResourcesAreSafe(t *testing.T) {

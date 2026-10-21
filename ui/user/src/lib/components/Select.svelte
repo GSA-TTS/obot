@@ -1,4 +1,6 @@
 <script module lang="ts">
+	import { m } from '$lib/i18n';
+
 	export interface SelectProps<T> {
 		id?: string;
 		disabled?: boolean;
@@ -34,7 +36,10 @@
 	}
 </script>
 
-<script lang="ts" generics="T extends { id: string | number; label: string; disabled?: boolean }">
+<script
+	lang="ts"
+	generics="T extends { id: string | number; label: string; disabled?: boolean; searchText?: string }"
+>
 	import { parseMultiValue, serializeMultiValue } from '$lib/multiValue';
 	import { ChevronDown, X, Check, SearchIcon } from '@lucide/svelte';
 	import { tick, type Snippet } from 'svelte';
@@ -70,7 +75,6 @@
 		ariaDescribedby,
 		invalid
 	}: SelectProps<T> = $props();
-
 	const selectedValues = $derived.by(() => {
 		if (multiple) {
 			if (typeof selected === 'string') {
@@ -96,8 +100,14 @@
 	let input = $state<HTMLInputElement>();
 	let optionHighlightIndex = $state(-1);
 
+	// An option matches the query by its label, or by searchText: other names it is known by,
+	// such as a model's ID when its label is a display name.
 	let availableOptions = $derived(
-		options.filter((option) => option.label.toLowerCase().includes(query?.toLowerCase() ?? ''))
+		options.filter((option) =>
+			[option.label, option.searchText ?? ''].some((text) =>
+				text.toLowerCase().includes(query?.toLowerCase() ?? '')
+			)
+		)
 	);
 
 	let selectedOptions = $derived(
@@ -119,7 +129,11 @@
 		if (n === 2) {
 			return `${labels[0]}, ${labels[1]}`;
 		}
-		return `${labels[0]}, ${labels[1]}, and ${n - 2} more`;
+		return m.core_select_summary_more({
+			first: labels[0],
+			second: labels[1],
+			count: n - 2
+		});
 	});
 
 	let buttonReadOnlySummaryTitle = $derived(selectedOptions.map((o) => o.label).join(', '));
@@ -179,7 +193,7 @@
 			aria-controls={`${id}-popover`}
 			aria-invalid={invalid || undefined}
 			class={twMerge(
-				'dark:bg-base-200 text-md bg-base-100 flex min-h-10 w-full grow cursor-pointer resize-none items-center gap-2 rounded-lg px-2 py-2 text-left shadow-sm',
+				'select-form text-md flex min-h-10 w-full grow cursor-pointer resize-none items-center gap-2 rounded-lg px-2 py-2 text-left',
 				disabled && 'pointer-events-none cursor-default opacity-50',
 				multiple && 'flex-wrap',
 				invalid && 'border border-error bg-error/20 ring-error ring-1',
@@ -328,7 +342,7 @@
 			</div>
 		{/if}
 		{#if availableOptions.length === 0}
-			<div class="text-muted-content px-4 py-2 font-light">No options available</div>
+			<div class="text-muted-content px-4 py-2 font-light">{m.core_no_options_available()}</div>
 		{:else}
 			{#each availableOptions as option, index (option.id)}
 				{@const isSelected = selectedValues.some((d) => d === option.id)}
@@ -376,7 +390,7 @@
 		}}
 		type="button"
 	>
-		{clearAllLabel || 'Clear All'}
+		{clearAllLabel || m.core_clear_all()}
 	</button>
 {/snippet}
 

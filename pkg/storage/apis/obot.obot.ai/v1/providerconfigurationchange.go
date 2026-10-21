@@ -5,9 +5,12 @@ import (
 )
 
 const (
-	ProviderTypeAuth                 ProviderType         = "auth"
-	ProviderTypeModel                ProviderType         = "model"
-	ProviderTypeLicense              ProviderType         = "license"
+	ProviderTypeAuth    ProviderType = "auth"
+	ProviderTypeModel   ProviderType = "model"
+	ProviderTypeLicense ProviderType = "license"
+	// ProviderTypeLLMGateway is the embedded LLM gateway's configuration (providers, keys,
+	// routing rules, settings), which every replica reloads when it changes.
+	ProviderTypeLLMGateway           ProviderType         = "llm-gateway"
 	ProviderDesiredStateConfigured   ProviderDesiredState = "configured"
 	ProviderDesiredStateDeconfigured ProviderDesiredState = "deconfigured"
 	// ProviderDesiredStateSwitched replaces the configured auth provider with another in one
@@ -19,6 +22,11 @@ const (
 	// ProviderDesiredStateUnstaged discards a staged replacement, leaving the configured provider
 	// untouched. It shares the switch's serialization so a discard cannot interleave with one.
 	ProviderDesiredStateUnstaged ProviderDesiredState = "unstaged"
+	// ProviderDesiredStateMigrated moves the configured auth provider to SCIM: it creates the SCIM
+	// connection that permanently replaces the provider's login-time directory synchronization. It
+	// goes through a change so that it cannot interleave with a switch, or with the auth provider
+	// cleanup a switch creates.
+	ProviderDesiredStateMigrated ProviderDesiredState = "migrated"
 )
 
 type ProviderType string
@@ -54,6 +62,9 @@ type ProviderConfigurationChangeStatus struct {
 	// Error describes a terminal rejection. The remaining reconciliation only
 	// removes the staged credential and this task.
 	Error string `json:"error,omitempty"`
+	// ErrorCode is the HTTP status that the API answers a terminal rejection
+	// with. It is 400 when unset.
+	ErrorCode int `json:"errorCode,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

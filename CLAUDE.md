@@ -20,6 +20,12 @@ Obot is an open source AI governance platform with the following features:
 
 ## Common Commands
 
+### Agent Sandbox Constraints
+
+- Do not run memory-intensive Go tests or broad Go test suites in the agent sandbox; the sandbox does not have enough memory to run them reliably. Instead, provide the exact Go test command for the user to run in their local terminal and ask for the output when it is needed to continue.
+- The agent sandbox does not have Cloud Foundry CLI access. Do not run `cf` commands in the sandbox; provide the exact commands for the user to run in their authenticated local terminal.
+- Sandbox-safe checks such as formatting, conflict-marker searches, and `git diff --check` may still be run by the agent.
+
 ### Development
 ```bash
 make dev              # Run full dev environment (Go server + SvelteKit UI) with hot reload
@@ -57,6 +63,9 @@ pnpm run ci           # Run format, lint, and check
 pnpm run test         # Run UI integration tests
 ```
 
+### UI Internationalization (in ui/user/)
+The UI uses Paraglide JS. Each feature area has a catalog in `messages/<area>/{en,ja,ko,zh-CN}.json` (the shell uses `messages/{locale}.json`), and keys are prefixed with the area name. Add new user-facing strings to `en.json` and every other locale file of the area, then render them with `import { m } from '$lib/i18n'` and `m.some_key()`. Messages compile into `src/lib/paraglide` (generated, git-ignored). Run `pnpm run i18n:compile` to regenerate them outside the dev server.
+
 ### Documentation (in docs/)
 ```bash
 make serve-docs       # Start local docs server
@@ -67,6 +76,12 @@ make serve-docs       # Start local docs server
 - Design significant or architecturally important changes first in the [Obot Design Proposals repository](https://github.com/obot-platform/obot-design-proposals). A merged ODP is the signal that implementation may proceed.
 - When an implementation introduces a meaningful architectural decision, include an ADR in the implementation pull request and follow the [`adr/README.md`](adr/README.md) guidance. The ADR records the decision that shipped and links to its related issues and ODP when applicable.
 - If implementation differs materially from the accepted ODP, resolve the change through a follow-up ODP rather than documenting the surprise only in the ADR.
+
+## Pull Requests and Issues
+
+- Never push a branch to `obot-platform/obot` or open a pull request from a branch there. Push the branch to the author's own fork (for example, `github.com/<user>/obot`) and open the pull request from it (`gh pr create --repo obot-platform/obot --head <user>:<branch>`).
+- When a pull request addresses an issue, reference the issue in the PR description (for example, "Addresses #123").
+- Never use a GitHub closing keyword (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved`) followed by an issue reference in PR descriptions or commit messages. Issues are not closed on merge: they move to the Testing column of the project board, and QA verifies them before they are closed.
 
 ## Architecture
 

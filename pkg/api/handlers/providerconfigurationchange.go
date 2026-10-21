@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -9,10 +10,10 @@ import (
 	"time"
 	"uuid"
 
-	"github.com/obot-platform/nah/pkg/name"
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/api"
 	gatewaytypes "github.com/obot-platform/obot/pkg/gateway/types"
+	"github.com/obot-platform/obot/pkg/i18n"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	"github.com/obot-platform/obot/pkg/system"
 	"github.com/obot-platform/obot/pkg/wait"
@@ -22,10 +23,6 @@ import (
 const (
 	providerConfigurationChangeTimeout = 2 * time.Minute
 )
-
-func modelProviderConfigurationChangeName(providerName string) string {
-	return name.SafeConcatName(system.ProviderChangePrefix, providerName)
-}
 
 func stageProviderCredential(req api.Context, secrets map[string]string) (string, error) {
 	stagedName := strings.ReplaceAll(uuid.NewV4().String(), "-", "")
@@ -53,7 +50,7 @@ func submitProviderConfigurationChange(req api.Context, change *v1.ProviderConfi
 			}
 		}
 		if apierrors.IsAlreadyExists(err) {
-			return errors.Join(types.NewErrHTTP(http.StatusConflict, "another provider configuration change is already in progress"), cleanupErr)
+			return errors.Join(types.NewErrHTTP(http.StatusConflict, apiMessage(req, "provider_change_in_progress")), cleanupErr)
 		}
 		return errors.Join(fmt.Errorf("create provider configuration change: %w", err), cleanupErr)
 	}
@@ -74,7 +71,11 @@ func waitForProviderConfigurationChange(req api.Context, change *v1.ProviderConf
 	}
 
 	if settled.Status.Error != "" {
-		return types.NewErrBadRequest("%s", settled.Status.Error)
+		return types.NewErrHTTP(
+			cmp.Or(settled.Status.ErrorCode, http.StatusBadRequest),
+			apiMessage(req, "provider_change_failed", "detail",
+				i18n.Resolve(providerResponseLocale(req), settled.Status.Error)),
+		)
 	}
 	return nil
 }

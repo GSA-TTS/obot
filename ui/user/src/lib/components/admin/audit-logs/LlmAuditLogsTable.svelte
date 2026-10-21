@@ -5,11 +5,18 @@
 		formatAuditLogCredentialLabel,
 		getAuditLogAPIKeyMaskedKey
 	} from '$lib/auditlogs';
+	import { formatTokenUsageUSD } from '$lib/components/admin/token-usage/tokenUsageTimeline';
 	import { VirtualPageTable } from '$lib/components/ui';
+	import { m } from '$lib/i18n';
 	import { type LLMAuditLog } from '$lib/services';
 	import { formatAuditLogTableTimestamp } from '$lib/time';
 	import { throttle } from '$lib/utils';
-	import { GripVertical, ShieldAlert } from '@lucide/svelte';
+	import {
+		guardrailOutcomeLabel,
+		guardrailOutcomes as getGuardrailOutcomes
+	} from './LlmAuditLogGuardrails.svelte';
+	import { servedBy, wasRouted } from './LlmAuditLogRouting.svelte';
+	import { GitFork, GripVertical, ShieldX } from '@lucide/svelte';
 	import { tick } from 'svelte';
 	import { twMerge } from 'tailwind-merge';
 
@@ -157,21 +164,69 @@
 	</td>
 {/snippet}
 
-{#snippet timestampCell(timestamp: string, messagePolicyTriggered: boolean)}
+{#snippet timestampCell(timestamp: string, log: LLMAuditLog)}
+	{@const guardrailOutcomes = getGuardrailOutcomes(log.guardrailFindings)}
 	<td class="text-sm whitespace-nowrap">
 		<div class="box-content flex h-full px-6">
 			<div class="flex min-w-0 flex-1 items-center gap-2 py-4">
 				<span class="truncate">{timestamp}</span>
-				{#if messagePolicyTriggered}
+				{#if guardrailOutcomes.length}
+					{@const label = m.audit_usage_audit_logs_model_guardrails_acted({
+						outcomes: guardrailOutcomes.map(guardrailOutcomeLabel).join(', ')
+					})}
 					<span
-						class="text-warning inline-flex shrink-0"
-						aria-label="Message policy triggered"
-						use:tooltip={{
-							text: 'An input message policy violation modified this request'
-						}}
+						class={twMerge(
+							'inline-flex shrink-0',
+							guardrailOutcomes[0] === 'blocked' || guardrailOutcomes[0] === 'error'
+								? 'text-error'
+								: guardrailOutcomes[0] === 'redacted'
+									? 'text-warning'
+									: 'text-muted-content'
+						)}
+						role="img"
+						aria-label={label}
+						use:tooltip={{ text: label }}
 					>
-						<ShieldAlert class="size-4" />
+						<ShieldX class="size-4" />
 					</span>
+				{/if}
+			</div>
+			{@render tdResizeHandler()}
+		</div>
+	</td>
+{/snippet}
+
+{#snippet modelCell(log: LLMAuditLog)}
+	{@const routed = wasRouted(log)}
+	<td class="text-sm whitespace-nowrap">
+		<div class="box-content flex h-full px-6">
+			<div class="flex min-w-0 flex-1 flex-col justify-center py-2 leading-tight">
+				<div class="flex min-w-0 items-center gap-1.5">
+					<span class="truncate">{log.targetModel}</span>
+					{#if routed}
+						{@const label = m.audit_usage_audit_logs_model_routed_tooltip({
+							requested: log.targetModel,
+							served: servedBy(log)
+						})}
+						<span
+							class="text-primary inline-flex shrink-0"
+							role="img"
+							aria-label={label}
+							use:tooltip={{ text: label }}
+						>
+							<GitFork class="size-3.5" />
+						</span>
+					{/if}
+				</div>
+				{#if routed || log.fallback}
+					<div class="text-muted-content mt-1 truncate text-xs">
+						{routed ? `→ ${servedBy(log)}` : ''}
+						{#if log.fallback}
+							<span class="bg-warning/15 text-warning ml-1 rounded-full px-1.5 py-0.5 text-[10px]">
+								{m.audit_usage_audit_logs_model_fallback()}
+							</span>
+						{/if}
+					</div>
 				{/if}
 			</div>
 			{@render tdResizeHandler()}
@@ -188,17 +243,36 @@
 			{#snippet header()}
 				<thead>
 					<tr bind:this={headerRowElement}>
-						{@render th('Timestamp', { class: 'w-[28ch]', minWidth: '28ch' })}
-						{@render th('Actor', { class: 'w-[28ch]', minWidth: '24ch' })}
-						{@render th('Provider', { class: 'w-[18ch]', minWidth: '18ch' })}
-						{@render th('Model', { class: 'w-[28ch]', minWidth: '28ch' })}
-						{@render th('Status', { class: 'w-[16ch]', minWidth: '16ch' })}
-						{@render th('Input', { class: 'w-[18ch]', minWidth: '18ch' })}
-						{@render th('Output', { class: 'w-[18ch]', minWidth: '18ch' })}
-						{@render th('User Agent', { class: 'w-[28ch]', minWidth: '28ch' })}
-						{@render th('Session', { class: 'w-[28ch]', minWidth: '28ch' })}
-						{@render th('Duration (ms)', { class: 'w-[22ch]', minWidth: '18ch' })}
-						{@render th('IP Address', { class: 'w-[22ch]', minWidth: '22ch' })}
+						{@render th(m.core_col_timestamp(), { class: 'w-[28ch]', minWidth: '28ch' })}
+						{@render th(m.audit_usage_audit_logs_actor(), { class: 'w-[28ch]', minWidth: '24ch' })}
+						{@render th(m.core_col_provider(), {
+							class: 'w-[18ch]',
+							minWidth: '18ch'
+						})}
+						{@render th(m.audit_usage_audit_logs_model(), { class: 'w-[28ch]', minWidth: '28ch' })}
+						{@render th(m.core_status(), { class: 'w-[16ch]', minWidth: '16ch' })}
+						{@render th(m.core_col_input(), { class: 'w-[18ch]', minWidth: '18ch' })}
+						{@render th(m.core_col_output(), { class: 'w-[18ch]', minWidth: '18ch' })}
+						{@render th(m.audit_usage_audit_logs_model_col_spend(), {
+							class: 'w-[16ch]',
+							minWidth: '14ch'
+						})}
+						{@render th(m.audit_usage_audit_logs_user_agent(), {
+							class: 'w-[28ch]',
+							minWidth: '28ch'
+						})}
+						{@render th(m.audit_usage_audit_logs_model_col_session(), {
+							class: 'w-[28ch]',
+							minWidth: '28ch'
+						})}
+						{@render th(m.audit_usage_audit_logs_duration_ms(), {
+							class: 'w-[22ch]',
+							minWidth: '18ch'
+						})}
+						{@render th(m.audit_usage_audit_logs_model_col_ip_address(), {
+							class: 'w-[22ch]',
+							minWidth: '22ch'
+						})}
 					</tr>
 				</thead>
 			{/snippet}
@@ -222,16 +296,14 @@
 						)}
 						onclick={() => onSelectRow?.(d)}
 					>
-						{@render timestampCell(
-							formatAuditLogTableTimestamp(d.createdAt),
-							d.messagePolicyTriggered
-						)}
+						{@render timestampCell(formatAuditLogTableTimestamp(d.createdAt), d)}
 						{@render twoLine(apiKeyLabel || actor, apiKey ? actor : undefined)}
-						{@render td(d.modelProvider)}
-						{@render td(d.targetModel)}
+						{@render td(d.servedProvider || d.modelProvider)}
+						{@render modelCell(d)}
 						{@render td(d.responseStatus || '')}
 						{@render td(formatNumber(d.inputTokens))}
 						{@render td(formatNumber(d.outputTokens))}
+						{@render td(d.spend ? formatTokenUsageUSD(d.spend) : '')}
 						{@render td(d.userAgent)}
 						{@render td(d.clientSessionID)}
 						{@render td(formatDuration(d.duration))}

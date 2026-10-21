@@ -1,17 +1,46 @@
 import { page as appPage } from '$app/state';
-import type { MessagePolicy } from '$lib/services';
+import { CATALOG_SERVER_FIELD_IDS } from '$lib/constants';
+import { Group } from '$lib/services';
 import { mcpServersAndEntries } from '$lib/stores';
-import { preparePageData } from '../../tests/helpers/pageData';
-import { createDeploymentsPageFixtures, getVersionResponse } from '../../tests/mocks/data';
+import { createMockProfile, preparePageData } from '../../tests/helpers/pageData';
+import { createDeploymentsPageFixtures } from '../../tests/mocks/data';
 import { worker } from '../../tests/mocks/worker';
 import type { PageData } from './$types';
 import McpServersPage from './+page.svelte';
 import { http, HttpResponse } from 'msw';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import { page } from 'vitest/browser';
 
+vi.mock('$app/state', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$app/state')>();
+	const { createAppState } = await import('../../tests/helpers/navigation.svelte');
+	return createAppState(actual);
+});
+
+vi.mock('$app/navigation', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$app/navigation')>();
+	const { applyTestGoto } = await import('../../tests/helpers/navigation.svelte');
+	return {
+		...actual,
+		goto: (url: string | URL) => applyTestGoto(url)
+	};
+});
+
+vi.mock('$lib/url', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/url')>();
+	const { applyTestGoto } = await import('../../tests/helpers/navigation.svelte');
+	return {
+		...actual,
+		goto: (url: string | URL) => applyTestGoto(url)
+	};
+});
+
 const fixtures = createDeploymentsPageFixtures();
+
+// The page loads the default catalog in onMount only after other requests resolve. Tests wait for it so that the
+// request doesn't escape the mocks after the test ends.
+let defaultCatalogRequests = 0;
 
 function resetMcpServersAndEntriesStore() {
 	mcpServersAndEntries.current = {
@@ -27,14 +56,15 @@ function resetMcpServersAndEntriesStore() {
 
 function mockDeploymentsApis() {
 	worker.use(
-		http.get('/api/mcp-catalogs/default', () =>
-			HttpResponse.json({
+		http.get('/api/mcp-catalogs/default', () => {
+			defaultCatalogRequests++;
+			return HttpResponse.json({
 				id: 'default',
 				displayName: 'Default',
 				sourceURLs: [],
 				allowedUserIDs: []
-			})
-		),
+			});
+		}),
 		http.get('/api/mcp-catalogs/default/servers', () =>
 			HttpResponse.json({ items: fixtures.servers })
 		),
@@ -55,39 +85,35 @@ function mockDeploymentsApis() {
 
 async function renderMcpServersPage({
 	view = 'deployments',
-	messagePolicies = [],
-	messagePoliciesEnabled = false
+	groups = [Group.ADMIN]
 }: {
 	view?: string;
-	messagePolicies?: MessagePolicy[];
-	messagePoliciesEnabled?: boolean;
+	groups?: string[];
 } = {}) {
 	appPage.url.searchParams.set('view', view);
 	localStorage.setItem('seenSplashDialog', new Date().toISOString());
 	mockDeploymentsApis();
 	const data = await preparePageData<PageData>({
+		profile: createMockProfile(groups),
 		workspaceId: undefined,
 		gitCredentials: [],
 		filters: [],
 		systemCatalogEntries: [],
 		mcpTunnels: [],
 		tunnelConnections: undefined,
-		accessControlRules: [],
-		messagePolicies,
-		...(messagePoliciesEnabled
-			? { version: { ...getVersionResponse, messagePoliciesEnabled: true } }
-			: {})
+		accessControlRules: []
 	});
-	return render(McpServersPage, { data });
+	defaultCatalogRequests = 0;
+	const result = render(McpServersPage, { data });
+	if (data.profile.hasAdminAccess?.())
+		await expect.poll(() => defaultCatalogRequests).toBeGreaterThan(0);
+	return result;
 }
 
 async function waitForServersLoaded() {
 	await expect
 		.element(
-			page
-				.getByRole('row')
-				.filter({ hasText: fixtures.serverSingleNeedsUpdate.manifest.name! })
-				.first()
+			page.getByRole('row').filter({ hasText: fixtures.serverSingle.manifest.name! }).first()
 		)
 		.toBeVisible();
 }
@@ -130,9 +156,120 @@ async function expectMenuActions(
 
 afterEach(() => {
 	appPage.url.searchParams.delete('view');
+	appPage.url.searchParams.delete('new');
+});
+
+it('imports OpenAPI from the type picker before opening configuration', async () => {
+	resetMcpServersAndEntriesStore();
+	worker.use(
+		http.post('/api/openapi-import', () =>
+			HttpResponse.json({
+				baseURL: '',
+				destinationValidation: { valid: false, error: 'no usable server URL; configure baseURL' },
+				suggestedHeaders: [],
+				suggestedMetadata: { name: 'Imported API' }
+			})
+		)
+	);
+	await renderMcpServersPage({ view: 'servers' });
+	await page.getByRole('button', { name: 'Add MCP Server' }).click();
+	await page.getByRole('button', { name: /OpenAPI/ }).click();
+	await expect.element(page.getByRole('heading', { name: 'Import OpenAPI schema' })).toBeVisible();
+	await expect.element(page.getByCSS(`#${CATALOG_SERVER_FIELD_IDS.name}`)).not.toBeInTheDocument();
+	expect(appPage.url.searchParams.get('new')).not.toBe('openapi');
+	await page.getByLabelText('Schema URL', { exact: true }).fill('https://example.com/schema.json');
+	await page.getByRole('button', { name: 'Import', exact: true }).click();
+	await expect
+		.element(page.getByCSS(`#${CATALOG_SERVER_FIELD_IDS.name}`))
+		.toHaveValue('Imported API');
+	await expect
+		.element(page.getByLabelText('API request base URL', { exact: false }))
+		.toBeRequired();
+	await expect.element(page.getByCSS('#runtime-selector')).not.toBeInTheDocument();
+	expect(appPage.url.searchParams.get('new')).toBe('openapi');
 });
 
 describe('MCP Servers Page', () => {
+	describe('filters tab', () => {
+		beforeEach(() => {
+			resetMcpServersAndEntriesStore();
+			worker.use(
+				http.get('/api/llm-gateway/guardrails', () =>
+					HttpResponse.json({ items: [{ id: 'gp1secrets', name: 'Secrets', type: 'secrets' }] })
+				),
+				http.get('/api/llm-gateway/guardrails/providers', () => HttpResponse.json({ items: [] })),
+				http.get('/api/llm-gateway/guardrail-policies', () => HttpResponse.json({ items: [] })),
+				http.get('/api/mcp-webhook-validations', () =>
+					HttpResponse.json({
+						items: [
+							{
+								id: 'f1',
+								name: 'No secrets',
+								guardrail: { guardrailIDs: ['gp1secrets'], action: 'redact' }
+							}
+						]
+					})
+				)
+			);
+		});
+
+		afterEach(() => {
+			appPage.url.searchParams.delete('new');
+		});
+
+		it('offers Create From Guardrail in the Add New Filter menu', async () => {
+			await renderMcpServersPage({ view: 'filters' });
+
+			await page.getByRole('button', { name: 'Add New Filter' }).click();
+
+			await expect
+				.element(page.getByRole('button', { name: 'Create Custom', exact: true }))
+				.toBeVisible();
+			await expect
+				.element(page.getByRole('button', { name: 'Create From Built-in', exact: true }))
+				.toBeVisible();
+			await expect
+				.element(page.getByRole('button', { name: 'Create From Guardrail', exact: true }))
+				.toBeEnabled();
+		});
+
+		it('has no Guardrails tab; guardrails are managed under LLM Gateway', async () => {
+			await renderMcpServersPage({ view: 'filters' });
+
+			await expect
+				.element(page.getByRole('button', { name: 'Filters', exact: true }))
+				.toBeVisible();
+			await expect
+				.element(page.getByRole('button', { name: 'Guardrails', exact: true }))
+				.not.toBeInTheDocument();
+		});
+
+		it('opens the guardrail filter form for new=guardrail', async () => {
+			appPage.url.searchParams.set('new', 'guardrail');
+			await renderMcpServersPage({ view: 'filters' });
+
+			// The layout title repeats the heading.
+			await expect
+				.element(page.getByRole('heading', { name: 'Create Guardrail Filter' }).last())
+				.toBeVisible();
+			await expect.element(page.getByRole('checkbox', { name: /Secrets/ })).toBeVisible();
+			await expect.element(page.getByLabelText('Webhook URL')).not.toBeInTheDocument();
+		});
+
+		it('opens the custom filter form for other new values', async () => {
+			appPage.url.searchParams.set('new', 'true');
+			await renderMcpServersPage({ view: 'filters' });
+
+			await expect
+				.element(page.getByRole('heading', { name: 'Create Filter', exact: true }).last())
+				.toBeVisible();
+			await expect.element(page.getByLabelText('Webhook URL')).toBeVisible();
+			await expect
+				.element(page.getByRole('heading', { name: 'Create Guardrail Filter' }))
+				.not.toBeInTheDocument();
+		});
+	});
+
 	describe('deployments tab', () => {
 		beforeEach(async () => {
 			resetMcpServersAndEntriesStore();
@@ -141,33 +278,10 @@ describe('MCP Servers Page', () => {
 		});
 
 		describe('ellipsis menu actions', () => {
-			it('renders and sanitizes a catalog upgrade note in single confirmation', async () => {
-				await openRowActions(fixtures.serverSingleNeedsUpdate.manifest.name!);
-				await page.getByRole('button', { name: 'Update Server', exact: true }).click();
-
-				await expect.element(page.getByRole('heading', { name: 'Before upgrading' })).toBeVisible();
-				const upgradeDialog = page.getByRole('dialog').filter({ hasText: 'Before upgrading' });
-				await expect
-					.element(upgradeDialog.getByCSS('strong').filter({ hasText: 'safe mode' }))
-					.toBeVisible();
-				await expect.element(upgradeDialog.getByCSS('ul')).toHaveStyle('list-style-type: disc');
-				await expect.element(upgradeDialog.getByCSS('ol')).toHaveStyle('list-style-type: decimal');
-				await expect
-					.element(upgradeDialog.getByRole('link', { name: 'Unsafe link' }))
-					.toHaveAttribute('href', '');
-				await expect.element(upgradeDialog.getByCSS('script')).not.toBeInTheDocument();
-			});
-
-			it('single-user npx with needsUpdate shows update, diff, edit, restart, delete', async () => {
-				await expectMenuActions(fixtures.serverSingleNeedsUpdate.manifest.name!, {
+			it('single-user npx shows edit, restart, delete', async () => {
+				await expectMenuActions(fixtures.serverSingle.manifest.name!, {
 					links: ['View Catalog Entry'],
-					present: [
-						'Edit Configuration',
-						'Update Server',
-						'View Diff',
-						'Restart Server',
-						'Delete Server'
-					],
+					present: ['Edit Configuration', 'Restart Server', 'Delete Server'],
 					absent: ['Update Scheduling Config']
 				});
 			});
@@ -180,8 +294,7 @@ describe('MCP Servers Page', () => {
 						'Update Scheduling Config',
 						'Restart Server',
 						'Delete Server'
-					],
-					absent: ['Update Server', 'View Diff']
+					]
 				});
 			});
 
@@ -189,7 +302,7 @@ describe('MCP Servers Page', () => {
 				await expectMenuActions(fixtures.serverMulti.manifest.name!, {
 					links: ['View Catalog Entry'],
 					present: ['Edit Configuration', 'Restart Server', 'Delete Server'],
-					absent: ['Update Server', 'View Diff', 'Update Scheduling Config']
+					absent: ['Update Scheduling Config']
 				});
 			});
 
@@ -197,13 +310,7 @@ describe('MCP Servers Page', () => {
 				await expectMenuActions(fixtures.serverRemote.manifest.name!, {
 					links: ['View Catalog Entry'],
 					present: ['Delete Server'],
-					absent: [
-						'Edit Configuration',
-						'Restart Server',
-						'Update Server',
-						'View Diff',
-						'Update Scheduling Config'
-					]
+					absent: ['Edit Configuration', 'Restart Server', 'Update Scheduling Config']
 				});
 			});
 
@@ -211,43 +318,22 @@ describe('MCP Servers Page', () => {
 				await expectMenuActions(fixtures.serverNoCatalogEntry.manifest.name!, {
 					links: ['View Server'],
 					present: ['Edit Configuration', 'Restart Server', 'Delete Server'],
-					absent: ['View Catalog Entry', 'Update Server', 'View Diff', 'Update Scheduling Config']
+					absent: ['View Catalog Entry', 'Update Scheduling Config']
 				});
 			});
 		});
 
 		describe('multi-select action pills', () => {
-			it('deduplicates catalog upgrade notes and omits empty notes in bulk confirmation', async () => {
-				await page.getByRole('columnheader').first().getByRole('button').click({ force: true });
-				const actionsBar = page.getByText(/of 7 selected/).locator('..');
-
-				await actionsBar.getByRole('button', { name: /^Upgrade/ }).click();
-
-				await expect
-					.element(page.getByRole('heading', { name: 'Before upgrading' }))
-					.toHaveLength(1);
-				await expect.element(page.getByText('Entry Single Update', { exact: true })).toBeVisible();
-				await expect
-					.element(page.getByText('Entry Empty Upgrade Note', { exact: true }))
-					.not.toBeInTheDocument();
-			});
-
-			it('shows restart, upgrade, k8s upgrade, and delete counts for selected rows', async () => {
+			it('shows restart, k8s upgrade, and delete counts for selected rows', async () => {
 				await page.getByRole('columnheader').first().getByRole('button').click({ force: true });
 
-				await expect.element(page.getByText(/of 7 selected/)).toBeVisible();
+				await expect.element(page.getByText(/of 5 selected/)).toBeVisible();
 
-				const actionsBar = page.getByText(/of 7 selected/).locator('..');
+				const actionsBar = page.getByText(/of 5 selected/).locator('..');
 
 				await expect
 					.element(
-						actionsBar.getByRole('button', { name: /^Restart/ }).getByText('6', { exact: true })
-					)
-					.toBeVisible();
-
-				await expect
-					.element(
-						actionsBar.getByRole('button', { name: /^Upgrade/ }).getByText('3', { exact: true })
+						actionsBar.getByRole('button', { name: /^Restart/ }).getByText('4', { exact: true })
 					)
 					.toBeVisible();
 
@@ -261,7 +347,7 @@ describe('MCP Servers Page', () => {
 
 				await expect
 					.element(
-						actionsBar.getByRole('button', { name: /^Delete/ }).getByText('7', { exact: true })
+						actionsBar.getByRole('button', { name: /^Delete/ }).getByText('5', { exact: true })
 					)
 					.toBeVisible();
 			});
@@ -269,51 +355,29 @@ describe('MCP Servers Page', () => {
 	});
 });
 
-describe('message policies tab', () => {
-	const toolPolicy: MessagePolicy = {
-		id: 'tool-policy',
-		displayName: 'Block shell tools',
-		definition: 'Do not allow shell tools',
-		direction: 'tool-calls',
-		created: '2026-01-01T00:00:00Z',
-		subjects: []
-	};
-	const userPolicy: MessagePolicy = {
-		id: 'user-policy',
-		displayName: 'Block travel booking',
-		definition: 'Do not allow travel booking',
-		direction: 'user-message',
-		created: '2026-01-01T00:00:00Z',
-		subjects: []
-	};
+it.each([
+	{ role: 'power user', groups: [Group.POWERUSER] },
+	{ role: 'power user plus', groups: [Group.POWERUSER_PLUS, Group.POWERUSER] },
+	{ role: 'auditor', groups: [Group.AUDITOR] },
+	{ role: 'basic user', groups: [] }
+])('does not open the direct OpenAPI creation URL for $role', async ({ groups }) => {
+	resetMcpServersAndEntriesStore();
+	appPage.url.searchParams.set('new', 'openapi');
+	await renderMcpServersPage({ view: 'entries', groups });
+	await expect
+		.element(page.getByRole('heading', { name: 'Import OpenAPI schema' }))
+		.not.toBeInTheDocument();
+	await expect
+		.element(page.getByRole('button', { name: 'Import', exact: true }))
+		.not.toBeInTheDocument();
+	await expect.element(page.getByCSS(`#${CATALOG_SERVER_FIELD_IDS.name}`)).not.toBeInTheDocument();
+});
 
-	afterEach(() => {
-		appPage.url.searchParams.delete('view');
-		appPage.url.searchParams.delete('new');
-	});
-
-	it('shows tool-call policies and hides user-message policies', async () => {
-		resetMcpServersAndEntriesStore();
-		await renderMcpServersPage({
-			view: 'ai-judge-policies',
-			messagePoliciesEnabled: true,
-			messagePolicies: [toolPolicy, userPolicy]
-		});
-
-		await expect.element(page.getByRole('button', { name: 'AI Judge Policies' })).toBeVisible();
-		await expect.element(page.getByRole('row', { name: /Block shell tools/ })).toBeVisible();
-		await expect
-			.element(page.getByRole('row', { name: /Block travel booking/ }))
-			.not.toBeInTheDocument();
-		await expect.element(page.getByRole('button', { name: 'Add AI Judge Policy' })).toBeVisible();
-	});
-
-	it('hides the tab when message policies are disabled', async () => {
-		resetMcpServersAndEntriesStore();
-		await renderMcpServersPage({ view: 'deployments' });
-
-		await expect
-			.element(page.getByRole('button', { name: 'AI Judge Policies' }))
-			.not.toBeInTheDocument();
-	});
+it('allows an owner to import OpenAPI from the type picker', async () => {
+	resetMcpServersAndEntriesStore();
+	await renderMcpServersPage({ view: 'servers', groups: [Group.OWNER, Group.ADMIN] });
+	await page.getByRole('button', { name: 'Add MCP Server' }).click();
+	await page.getByRole('button', { name: /OpenAPI/ }).click();
+	await expect.element(page.getByRole('heading', { name: 'Import OpenAPI schema' })).toBeVisible();
+	expect(appPage.url.searchParams.get('new')).not.toBe('openapi');
 });

@@ -82,6 +82,118 @@ func TestResolveTargetModel(t *testing.T) {
 	}
 }
 
+func TestResolveUpstreamModelName(t *testing.T) {
+	const provider = "llm-gateway-model-provider"
+	older := withCreated(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	newer := withCreated(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	models := []*v1.Model{
+		newModel("m-openai-gpt-4o-mini", provider, "openai/gpt-4o-mini", true, older),
+		// Imported after the OpenAI provider, so it is the newest model with this ID.
+		newModel("m-azure-gpt-4o-mini", provider, "azure/gpt-4o-mini", true, newer),
+		newModel("m-anthropic-sonnet-4-5", provider, "anthropic/claude-sonnet-4-5-20250929", true, older),
+		newModel("m-anthropic-opus-4", provider, "anthropic/claude-opus-4-20250514", true, older),
+		newModel("m-anthropic-opus-4-1", provider, "anthropic/claude-opus-4-1-20250805", true, older),
+		newModel("m-anthropic-haiku-old", provider, "anthropic/claude-haiku-4-5-20250101", true, older),
+		newModel("m-anthropic-haiku", provider, "anthropic/claude-haiku-4-5-20251001", true, older),
+		newModel("m-azure-sonnet-4-5", provider, "azure/claude-sonnet-4-5", true, newer),
+		newModel("m-anthropic-opus-4-5", provider, "anthropic/claude-opus-4-5", true, older),
+		newModel("m-anthropic-opus-4-5-dated", provider, "anthropic/claude-opus-4-5-20251101", true, newer),
+		newModel("m-custom-llama", provider, "custom/llama-3", true, older),
+		newModel("m-other-llama", provider, "other/llama-3", true, newer),
+		newModel("m-anthropic-inactive", provider, "anthropic/claude-inactive-20250101", false, older),
+	}
+	h := newModelHelper(t, models)
+
+	tests := []struct {
+		name         string
+		reference    string
+		usable       func(*v1.Model) bool
+		wantName     string
+		wantNotFound bool
+	}{
+		{
+			name:      "bare ID prefers the provider that made the model",
+			reference: "gpt-4o-mini",
+			wantName:  "m-openai-gpt-4o-mini",
+		},
+		{
+			name:      "bare ID prefers a model the caller may use",
+			reference: "gpt-4o-mini",
+			usable:    func(m *v1.Model) bool { return m.Name == "m-azure-gpt-4o-mini" },
+			wantName:  "m-azure-gpt-4o-mini",
+		},
+		{
+			name:      "bare ID of hosted models picks the most recently created",
+			reference: "llama-3",
+			wantName:  "m-other-llama",
+		},
+		{
+			name:      "undated alias resolves to the latest dated version",
+			reference: "claude-haiku-4-5",
+			wantName:  "m-anthropic-haiku",
+		},
+		{
+			name:      "undated alias with its provider",
+			reference: "anthropic/claude-haiku-4-5",
+			wantName:  "m-anthropic-haiku",
+		},
+		{
+			name:      "the maker's dated version wins over a host's exact ID",
+			reference: "claude-sonnet-4-5",
+			wantName:  "m-anthropic-sonnet-4-5",
+		},
+		{
+			name:      "a host's exact ID when the caller may only use it",
+			reference: "claude-sonnet-4-5",
+			usable:    func(m *v1.Model) bool { return m.Name == "m-azure-sonnet-4-5" },
+			wantName:  "m-azure-sonnet-4-5",
+		},
+		{
+			name:      "an exact ID's provider must match a qualified name",
+			reference: "anthropic/claude-sonnet-4-5",
+			wantName:  "m-anthropic-sonnet-4-5",
+		},
+		{
+			name:      "an exact ID wins over a dated version",
+			reference: "claude-opus-4-5",
+			wantName:  "m-anthropic-opus-4-5",
+		},
+		{
+			name:      "an alias doesn't match a longer model name",
+			reference: "claude-opus-4",
+			wantName:  "m-anthropic-opus-4",
+		},
+		{
+			name:         "a qualified name only matches its provider",
+			reference:    "openai/claude-haiku-4-5",
+			wantNotFound: true,
+		},
+		{
+			name:         "a prefix that isn't followed by a date doesn't match",
+			reference:    "claude",
+			wantNotFound: true,
+		},
+		{
+			name:         "inactive models don't match",
+			reference:    "claude-inactive",
+			wantNotFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := h.ResolveUpstreamModelName(provider, tt.reference, tt.usable)
+			if tt.wantNotFound {
+				require.True(t, apierrors.IsNotFound(err), "expected NotFound, got %v (%v)", err, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantName, got.Name)
+		})
+	}
+}
+
 func TestGetUserAllowedTargetModels(t *testing.T) {
 	const (
 		provider = "openai-model-provider"
@@ -385,70 +497,4 @@ func newModel(name, provider, targetModel string, active bool, opts ...modelOpt)
 		opt(m)
 	}
 	return m
-}
-
-// A hosted agent's model list has to describe the requests it can actually
-// make. Enumerating from the owner's policies instead reports a set the agent's
-// own calls do not obey -- an agent told it may use nothing while every request
-// succeeds -- and a client that picks its model by listing then refuses to run.
-func TestGetAgentAllowedTargetModels(t *testing.T) {
-	const provider = "anthropic-model-provider"
-
-	models := []*v1.Model{
-		newModel("m1-haiku", provider, "claude-haiku-4-5-20251001", true),
-		newModel("m1-opus", provider, "claude-opus-4-8", true),
-		newModel("m1-gpt", "openai-model-provider", "gpt-4o", true),
-	}
-
-	// The owner is granted nothing, so any result drawn from policy is empty.
-	// That is what makes these cases prove the agent is not evaluated that way.
-	restrictive := &v1.ModelAccessPolicy{
-		Name: "p-none", Namespace: "default",
-		Spec: v1.ModelAccessPolicySpec{Manifest: types2.ModelAccessPolicyManifest{
-			Subjects: []types2.Subject{{Type: types2.SubjectTypeUser, ID: "someone-else"}},
-			Models:   []types2.ModelResource{},
-		}},
-	}
-
-	tests := []struct {
-		name         string
-		modelIDs     []string
-		dialect      string
-		want         map[string]bool
-		wantAllowAll bool
-	}{
-		{
-			name:         "wildcard allows every model without enumerating",
-			modelIDs:     []string{"*"},
-			wantAllowAll: true,
-		},
-		{
-			name:     "configured models are reported for this provider",
-			modelIDs: []string{"m1-haiku"},
-			want:     map[string]bool{"claude-haiku-4-5-20251001": true},
-		},
-		{
-			name:     "a model on another provider is not reported here",
-			modelIDs: []string{"m1-gpt"},
-			want:     map[string]bool{},
-		},
-		{
-			// An agent authorized for nothing may use nothing. This must be an
-			// empty set, not the nil that means "skip filtering".
-			name:     "an agent with no models is allowed none",
-			modelIDs: nil,
-			want:     map[string]bool{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h := newModelHelper(t, models, restrictive)
-
-			got, allowAll, err := h.GetAgentAllowedTargetModels(tt.modelIDs, provider, tt.dialect)
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantAllowAll, allowAll)
-			assert.Equal(t, tt.want, got)
-		})
-	}
 }

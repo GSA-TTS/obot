@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { tooltip, type TooltipOptions } from '$lib/actions/tooltip.svelte';
+	import { m } from '$lib/i18n';
 	import type { Placement } from '@floating-ui/dom';
 	import { CircleHelpIcon, CircleQuestionMark } from '@lucide/svelte';
 	import type { Component, Snippet } from 'svelte';
@@ -21,6 +22,7 @@
 		disablePortal?: boolean;
 		variant?: 'default' | 'hint';
 		anchor?: HTMLElement;
+		offset?: { x?: number; y?: number };
 	}
 
 	let {
@@ -36,7 +38,8 @@
 		onClick,
 		disablePortal = true,
 		variant = 'default',
-		anchor
+		anchor,
+		offset: positionOffset
 	}: Props = $props();
 
 	function getPopoverWidth() {
@@ -62,7 +65,8 @@
 			placement,
 			interactive,
 			anchor,
-			offset: variant === 'hint' ? 10 : undefined
+			offset: variant === 'hint' ? 10 : undefined,
+			positionOffset
 		};
 		if (children) {
 			return { ...base, snippet: children };
@@ -72,7 +76,7 @@
 		return { ...base, text: t };
 	});
 
-	const accessibleName = $derived(ariaLabel?.trim() || text?.trim() || 'More information');
+	const accessibleName = $derived(ariaLabel?.trim() || text?.trim() || m.core_more_information());
 </script>
 
 {#if tooltipOpts}

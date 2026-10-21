@@ -165,7 +165,7 @@ export type AuditLogDetails = {
 	network?: { clientIP?: string };
 	client?: { name?: string; version?: string; userAgent?: string };
 	agent?: {
-		provider?: 'claude_code' | 'codex' | 'vscode' | 'cursor' | string;
+		provider?: 'claude_code' | 'codex' | 'vscode' | 'cursor' | 'kiro' | string;
 		version?: string;
 		cliName?: string;
 		cliVersion?: string;
@@ -354,6 +354,103 @@ export interface BootstrapStatus {
 	setupEnabled: boolean;
 }
 
+// Claude
+export type ClaudeConfig = {
+	enabled: boolean;
+	environments?: ClaudeEnvironment[];
+	mappings?: ClaudeOrganizationAccount[];
+	defaultWorkerImage?: string;
+	defaultRunnerImage?: string;
+};
+export type ClaudeEnvironment = {
+	mcpServerIDs?: string[] | null;
+	egressSecrets?: EgressSecret[];
+	id: string;
+	displayName: string;
+	organizationID: string;
+	environmentID: string;
+	profiles: EnvironmentProfile[];
+	runtime: ClaudeRuntime;
+	claudeTagUserID?: string;
+	claudeTagEnabled: boolean;
+};
+export type ClaudeEnvironmentPayload = Omit<
+	ClaudeEnvironment,
+	'environmentID' | 'organizationID'
+> & {
+	environmentID?: string;
+	environmentKey?: string;
+	organizationID?: string;
+};
+export type ClaudeOrganizationAccount = {
+	organizationID: string;
+	account: string;
+	uuid: string;
+	displayName: string;
+	email: string;
+	userID: string;
+};
+export type ClaudeResources = {
+	actorCPU?: string;
+	actorMemory?: string;
+	idleTimeoutMinutes?: number;
+	sessionRetentionDays?: number;
+};
+export type ClaudeRuntime = {
+	managedSettings?: Record<string, unknown>;
+	image: string;
+	workerImage: string;
+	allowAllEgress?: boolean;
+	egressHosts: string[];
+	worker: {
+		workerReplicas: number;
+		cpuLimit: string;
+		memoryLimit: string;
+	};
+	resources: ClaudeResources;
+};
+export type ClaudeSession = {
+	metadata: {
+		deletionTimestamp?: string;
+		name: string;
+	};
+	spec: {
+		claudeAccount: string;
+		claudeDone?: boolean;
+		claudeEnvironment: string;
+		claudeFinishedAt?: string;
+		claudeRepositories?: { revision?: string; url: string }[] | null;
+		claudeSession: string;
+		displayName: string;
+		slackChannelName?: string;
+		slackLink?: string;
+		slackSenderHandle?: string;
+		slackSenderName?: string;
+		suspended?: boolean;
+		userID: string;
+	};
+	status: {
+		error?: string;
+		state?: string;
+	};
+};
+export type EgressSecret = {
+	id: string;
+	hostname: string;
+	header: string;
+	value?: string;
+};
+export type EnvironmentProfile = {
+	allowClaudeMCP?: boolean;
+	egressSecrets?: EgressSecret[];
+	name: string;
+	subjects: AccessControlRuleSubject[];
+	mcpServerIDs: string[] | null;
+	egressHosts?: string[];
+	allowAllEgress?: boolean;
+	resources: ClaudeResources;
+};
+
 // Device code
 
 export interface DeviceCodeVerificationResponse {
@@ -510,7 +607,6 @@ export interface MCPCatalogServer {
 	id: string;
 	alias?: string;
 	userID: string;
-	connectURL?: string;
 	configured: boolean;
 	catalogEntryID: string;
 	missingRequiredEnvVars: string[];
@@ -525,7 +621,6 @@ export interface MCPCatalogServer {
 	manifest: MCPServer;
 	oauthMetadata?: OAuthMetadata;
 	serverUserType: 'singleUser' | 'multiUser';
-	needsUpdate?: boolean;
 	needsK8sUpdate?: boolean;
 	needsURL?: boolean;
 	toolPreviewsLastGenerated?: string;
@@ -561,7 +656,6 @@ export interface MCPServerInstance {
 	userID: string;
 	mcpServerID?: string;
 	mcpCatalogID?: string;
-	connectURL?: string;
 }
 
 // Virtual MCPs
@@ -572,6 +666,7 @@ export interface VMCPConfigurationPolicy {
 	key: string;
 	policy?: VMCPConfigurationPolicyType;
 	value?: string;
+	secretBinding?: MCPSecretBinding;
 }
 
 export interface VMCPComponentCatalogEntrySnapshot {
@@ -580,7 +675,6 @@ export interface VMCPComponentCatalogEntrySnapshot {
 }
 
 export interface VMCPComponent {
-	allowedTools?: string[];
 	catalogEntry: VMCPComponentCatalogEntrySnapshot;
 	configuration?: VMCPConfigurationPolicy[];
 	forceSingleUser?: boolean;
@@ -616,6 +710,7 @@ export interface VMCPManifest {
 	displayName: string;
 	icon?: string;
 	profiles?: VMCPProfile[];
+	toolSearch?: boolean;
 }
 
 export interface VMCPStatus {
@@ -624,6 +719,8 @@ export interface VMCPStatus {
 }
 
 export interface VMCPComponentStatus {
+	/** An outdated snapshot that migrated connections retain while the component itself is current. */
+	connectionSnapshot?: VMCPComponentCatalogEntrySnapshot;
 	error?: string;
 	name: string;
 	ready?: boolean;
@@ -632,6 +729,7 @@ export interface VMCPComponentStatus {
 }
 
 export interface VMCP extends VMCPManifest {
+	localhostCallbackPaths?: string[];
 	created: string;
 	creatorUserID?: string;
 	deleted?: string;
@@ -663,6 +761,8 @@ export interface VMCPInstanceStatus {
 	configured?: boolean;
 	missingRequiredConfiguration?: string[];
 	userConfigurationHash?: string;
+	/** Present once the controller has written configuration status. */
+	configurationCheckHash?: string;
 }
 
 export interface VMCPInstance extends VMCPInstanceManifest {
@@ -682,7 +782,18 @@ export interface VMCPInstanceList {
 
 // MCP runtime
 
-export type Runtime = 'npx' | 'uvx' | 'containerized' | 'remote' | 'vmcp';
+export type Runtime = 'npx' | 'uvx' | 'containerized' | 'remote' | 'vmcp' | 'openapi';
+
+export interface OpenAPISource {
+	url?: string;
+	content?: string;
+}
+export interface OpenAPIRuntimeConfig {
+	source: OpenAPISource;
+	baseURL?: string;
+	egressDomains?: string[];
+	denyAllEgress?: boolean;
+}
 export interface MCPConfigurationOption {
 	name: string;
 	value: string;
@@ -707,7 +818,6 @@ export interface MCPSubField {
 export interface MCPSecretBinding {
 	name: string;
 	key: string;
-	adminAdded?: boolean;
 }
 export interface MCPAllowedSecretBindingTarget {
 	name: string;
@@ -748,6 +858,8 @@ export interface MCPResourceRequirements {
 	limits?: MCPResourceRequests;
 }
 export interface RemoteRuntimeConfig {
+	localhostCallbackEnabled?: boolean;
+	localhostCallbackPath?: string;
 	fixedURL?: string;
 	hostname?: string;
 	isTemplate?: boolean;
@@ -756,6 +868,8 @@ export interface RemoteRuntimeConfig {
 	urlTemplate?: string;
 }
 export interface RemoteCatalogConfig {
+	localhostCallbackEnabled?: boolean;
+	localhostCallbackPath?: string;
 	fixedURL?: string;
 	hostname?: string;
 	tunnelName?: string;
@@ -809,6 +923,7 @@ export interface MCPServer {
 	uvxConfig?: UVXRuntimeConfig;
 	npxConfig?: NPXRuntimeConfig;
 	containerizedConfig?: ContainerizedRuntimeConfig;
+	openAPIConfig?: OpenAPIRuntimeConfig;
 	remoteConfig?: RemoteRuntimeConfig;
 	resources?: MCPResourceRequirements;
 }
@@ -883,9 +998,6 @@ export interface ModelProvider {
 	dialect?: string;
 	type: 'modelprovider';
 }
-export interface ModelProviderList {
-	items: ModelProvider[];
-}
 export interface Model {
 	id: string;
 	active: boolean;
@@ -918,6 +1030,7 @@ export interface DefaultModelAlias {
 // Organization
 
 export interface OrgUser {
+	internal?: boolean;
 	created: string;
 	username: string;
 	email: string;
@@ -933,7 +1046,16 @@ export interface OrgUser {
 	deletedAt?: string;
 	originalEmail?: string;
 	originalUsername?: string;
+	/** Lifecycle status. A disabled user keeps their account and data but cannot sign in or use credentials. */
+	status?: OrgUserStatus;
+	disabledAt?: string;
+	disabledReason?: OrgUserDisabledReason;
+	/** What controls the user's status: Obot, or an identity provider through SCIM. */
+	managementSource?: OrgUserManagementSource;
 }
+export type OrgUserStatus = 'active' | 'disabled' | 'deleted';
+export type OrgUserDisabledReason = 'scim_inactive' | 'scim_unprovisioned';
+export type OrgUserManagementSource = 'obot' | 'scim';
 export interface OrgGroup {
 	id: string;
 	name: string;
@@ -975,8 +1097,9 @@ export interface Profile {
 	isAdminReadonly?: () => boolean;
 	isOwner?: () => boolean;
 	isBootstrapUser?: () => boolean;
-	canImpersonate?: () => boolean;
 	unauthorized?: boolean;
+	/** The server refused the session because the account is not active. */
+	accountInactive?: boolean;
 	username: string;
 	currentAuthProvider?: string;
 	expired?: boolean;
@@ -1058,9 +1181,7 @@ export interface Version {
 	engine?: 'docker' | 'kubernetes' | 'local' | 'cloudfoundry';
 	mcpNetworkPolicyEnabled?: boolean;
 	mcpDefaultDenyAllEgress?: boolean;
-	messagePoliciesEnabled?: boolean;
-	agentsEnabled?: boolean;
-	hostedAgentsEnabled?: boolean;
+	claudeEnvironmentsEnabled?: boolean;
 	hideK8sDetails?: boolean;
 	disableLegacyChat?: boolean;
 }
@@ -1074,5 +1195,28 @@ export type Workspace = {
 	role: number;
 	type: string;
 };
-export type LaunchType = 'hosted' | 'remote';
+export type LaunchType = 'hosted' | 'remote' | 'openapi';
 export type LaunchServerType = LaunchType | 'multi';
+
+export interface Skill {
+	id: string;
+	created?: string;
+	deleted?: string | null;
+	type: string;
+	name?: string;
+	description?: string;
+	displayName?: string;
+	license?: string;
+	compatibility?: string;
+	allowedTools?: string;
+	metadata?: Record<string, unknown>;
+	repoID?: string;
+	repoURL?: string;
+	repoRef?: string;
+	commitSHA?: string;
+	relativePath?: string;
+	installHash?: string;
+	valid?: boolean;
+	validationError?: string;
+	lastIndexedAt?: string;
+}

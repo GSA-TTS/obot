@@ -1,6 +1,9 @@
 <script lang="ts">
+	import { page } from '$app/state';
+	import { m } from '$lib/i18n';
 	import Loading from '$lib/icons/Loading.svelte';
 	import type { MCPServerOAuthCredentialStatus } from '$lib/services/admin/types';
+	import { goto } from '$lib/url';
 	import Confirm from '../Confirm.svelte';
 	import ResponsiveDialog from '../ResponsiveDialog.svelte';
 	import SensitiveInput from '../SensitiveInput.svelte';
@@ -32,6 +35,8 @@
 	let error = $state<string>();
 	let showDeleteConfirm = $state(false);
 	let showRequired = $state(false);
+	let showReturnConfirm = $state(false);
+	let returnPath = $state<string>();
 
 	let form = $state({
 		clientID: '',
@@ -67,7 +72,7 @@
 
 		// Credentials cannot be updated once configured - must delete and recreate
 		if (oauthStatus?.configured) {
-			error = 'Credentials already configured. Clear credentials first to change them.';
+			error = m.mcps_oauth_static_oauth_already_configured();
 			return;
 		}
 
@@ -84,11 +89,56 @@
 				clientSecret: form.clientSecret.trim()
 			});
 			dialog?.close();
+			offerReturnToPreviousPage();
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to save OAuth credentials';
+			error = err instanceof Error ? err.message : m.mcps_oauth_static_oauth_save_failed();
 		} finally {
 			loading = false;
 		}
+	}
+
+	function safeReturnPath(value: string | null) {
+		if (!value) return;
+		let url: URL;
+		try {
+			url = new URL(value, page.url.origin);
+		} catch {
+			return;
+		}
+		if (url.origin !== page.url.origin) {
+			return;
+		}
+		return `${url.pathname}${url.search}${url.hash}`;
+	}
+
+	function offerReturnToPreviousPage() {
+		const destination = safeReturnPath(page.url.searchParams.get('oauth-redirect'));
+		if (!destination) return;
+		const currentURL = new URL(page.url);
+		currentURL.searchParams.delete('oauth-redirect');
+		goto(currentURL, { replaceState: true, noScroll: true, keepFocus: true });
+		returnPath = destination;
+		showReturnConfirm = true;
+	}
+
+	function returnPrompt(path: string) {
+		const url = new URL(path, page.url.origin);
+		if (url.searchParams.has('modify-tools')) {
+			return m.mcps_oauth_static_oauth_return_tools();
+		}
+		if (url.searchParams.has('inspector')) {
+			return m.mcps_oauth_static_oauth_return_inspector();
+		}
+		if (url.searchParams.has('connect')) {
+			return m.mcps_oauth_static_oauth_return_connect();
+		}
+		return m.mcps_oauth_static_oauth_return_default();
+	}
+
+	function confirmReturn() {
+		const destination = returnPath;
+		showReturnConfirm = false;
+		if (destination) goto(destination);
 	}
 
 	async function handleDelete() {
@@ -99,7 +149,7 @@
 			showDeleteConfirm = false;
 			dialog?.close();
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to delete OAuth credentials';
+			error = err instanceof Error ? err.message : m.mcps_oauth_static_oauth_delete_failed();
 		} finally {
 			loading = false;
 		}
@@ -120,7 +170,7 @@
 	bind:this={dialog}
 	{onOpen}
 	{onClose}
-	title="Configure Static OAuth"
+	title={m.mcps_oauth_static_oauth_title()}
 	classes={{ header: 'p-4 pb-0', content: 'p-0' }}
 >
 	<form
@@ -141,19 +191,19 @@
 
 		{#if oauthStatus?.configured}
 			<p class="text-muted-content text-sm font-light">
-				OAuth credentials are configured. To change the client ID or secret, clear the credentials
-				and re-enter all values.
+				{m.mcps_oauth_static_oauth_configured_description()}
 			</p>
 		{:else}
 			<p class="text-muted-content text-sm font-light">
-				This remote MCP server requires OAuth configuration. Provide the client ID and, for a
-				confidential client, its client secret.
+				{m.mcps_oauth_static_oauth_required_description()}
 			</p>
 		{/if}
 
 		<div class="flex flex-col gap-4">
 			<div class="flex flex-col gap-1">
-				<label for="clientID" class:text-error={showRequired && !form.clientID}> Client ID </label>
+				<label for="clientID" class:text-error={showRequired && !form.clientID}>
+					{m.mcps_oauth_static_oauth_client_id()}
+				</label>
 				<input
 					type="text"
 					id="clientID"
@@ -168,7 +218,7 @@
 			</div>
 
 			<div class="flex flex-col gap-1">
-				<label for="clientSecret">Client Secret (optional)</label>
+				<label for="clientSecret">{m.mcps_oauth_static_oauth_client_secret_optional()}</label>
 				<SensitiveInput
 					name="clientSecret"
 					bind:value={form.clientSecret}
@@ -192,7 +242,7 @@
 				disabled={loading}
 			>
 				<Trash2 class="size-4" />
-				Clear Credentials
+				{m.mcps_oauth_static_oauth_clear_credentials()}
 			</button>
 		{:else}
 			<div></div>
@@ -202,17 +252,17 @@
 			<div class="flex gap-2">
 				{#if showSkip}
 					<button type="button" class="btn btn-secondary" onclick={handleSkip} disabled={loading}>
-						Skip
+						{m.mcps_skip()}
 					</button>
 				{/if}
 				<button type="button" class="btn btn-secondary" onclick={handleCancel} disabled={loading}>
-					Cancel
+					{m.common_cancel()}
 				</button>
 				<button type="button" class="btn btn-primary" onclick={handleSave} disabled={loading}>
 					{#if loading}
 						<Loading class="size-4" />
 					{:else}
-						Save
+						{m.core_save()}
 					{/if}
 				</button>
 			</div>
@@ -222,11 +272,23 @@
 
 <Confirm
 	show={showDeleteConfirm}
-	msg="Are you sure you want to clear the OAuth credentials? Users will not be able to connect to this server until new credentials are configured."
+	msg={m.mcps_oauth_static_oauth_clear_confirm()}
 	onsuccess={handleDelete}
 	oncancel={() => {
 		showDeleteConfirm = false;
 		dialog?.open();
 	}}
 	{loading}
+/>
+
+<Confirm
+	title={m.mcps_oauth_static_oauth_return_title()}
+	msg={returnPath ? returnPrompt(returnPath) : m.mcps_oauth_static_oauth_return_fallback()}
+	note={m.mcps_oauth_static_oauth_return_note()}
+	show={showReturnConfirm}
+	onsuccess={confirmReturn}
+	oncancel={() => (showReturnConfirm = false)}
+	submitText={m.mcps_oauth_static_oauth_return_go_back()}
+	cancelText={m.mcps_skip()}
+	type="info"
 />

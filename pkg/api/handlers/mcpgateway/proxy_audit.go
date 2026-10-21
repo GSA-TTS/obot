@@ -108,8 +108,21 @@ func newProxyAudit(req *http.Request, metadata map[string]string, collector prox
 		}
 
 		req.Body = io.NopCloser(bytes.NewReader(body))
-		entry.RequestBody = jsonBody(body)
-		kind = populateMCPMessageFields(&entry, body)
+		// Generic tool discovery can fail before hooks decode the request. Decode
+		// audit metadata here so those local errors retain request/response correlation.
+		auditBody := body
+		if strings.EqualFold(strings.TrimSpace(req.Header.Get("Content-Encoding")), "gzip") {
+			decoded, _, decodeErr := decodeMCPHookBody(io.NopCloser(bytes.NewReader(body)), "gzip")
+			if decodeErr == nil {
+				decodedBody, readErr := readMCPHookBody(decoded)
+				closeErr := decoded.Close()
+				if readErr == nil && closeErr == nil {
+					auditBody = decodedBody
+				}
+			}
+		}
+		entry.RequestBody = jsonBody(auditBody)
+		kind = populateMCPMessageFields(&entry, auditBody)
 	}
 
 	audit := &proxyAudit{
@@ -676,7 +689,7 @@ func sanitizedMCPHeaders(headers http.Header) http.Header {
 	result := make(http.Header, len(headers))
 	for key, values := range headers {
 		switch http.CanonicalHeaderKey(key) {
-		case "Authorization", "Cookie", "Set-Cookie", "X-Api-Key", "X-Auth-Token", "Proxy-Authorization":
+		case "Authorization", "Cookie", "Set-Cookie", "X-Api-Key", "X-Auth-Token", "Proxy-Authorization", "X-Obot-Api-Key":
 			result[key] = []string{"[REDACTED]"}
 		default:
 			result[key] = slices.Clone(values)

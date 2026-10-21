@@ -1,5 +1,6 @@
 import { UNAUTHORIZED_PATHS } from '$lib/constants';
 import { createHttpError } from '$lib/errors';
+import { getLocale } from '$lib/i18n';
 import { profile } from '$lib/stores';
 import errors from '$lib/stores/errors.svelte';
 
@@ -24,6 +25,14 @@ function getAuthHeaders(): Record<string, string> {
 		return { Authorization: `Bearer ${apiToken}` };
 	}
 	return {};
+}
+
+function getRequestHeaders(extra?: Record<string, string>): Record<string, string> {
+	return {
+		...getAuthHeaders(),
+		'Accept-Language': getLocale() || 'en',
+		...extra
+	};
 }
 
 interface GetOptions {
@@ -72,13 +81,12 @@ export async function doGet(path: string, opts?: GetOptions): Promise<unknown> {
 export async function doGetForResponse(path: string, opts?: GetOptions): Promise<Response> {
 	const f = opts?.fetch || fetch;
 	const resp = await f(baseURL + path, {
-		headers: {
-			...getAuthHeaders(),
+		headers: getRequestHeaders({
 			// Pass the browser timezone as a request header.
 			// This is consumed during authentication to set the user's default timezone in Obot.
 			// The timezone is plumbed down to tools at runtime as an environment variable.
 			'x-obot-user-timezone': Intl.DateTimeFormat().resolvedOptions().timeZone
-		},
+		}),
 		signal: opts?.signal
 	});
 
@@ -119,7 +127,7 @@ export async function doDelete(
 	const f = opts?.fetch || fetch;
 	const resp = await f(baseURL + path, {
 		method: 'DELETE',
-		headers: getAuthHeaders(),
+		headers: getRequestHeaders(),
 		...(opts?.keepalive ? { keepalive: true } : { signal: opts?.signal })
 	});
 
@@ -175,6 +183,7 @@ export async function doWithBody(
 		fetch?: typeof fetch;
 		headers?: Record<string, string>;
 		signal?: AbortSignal;
+		responseHandler?: ResponseHandler;
 	}
 ): Promise<unknown> {
 	let headers: Record<string, string> | undefined;
@@ -199,7 +208,7 @@ export async function doWithBody(
 		const f = opts?.fetch || fetch;
 		const resp = await f(baseURL + path, {
 			method,
-			headers: { ...getAuthHeaders(), ...headers, ...opts?.headers },
+			headers: getRequestHeaders({ ...headers, ...opts?.headers }),
 			body,
 			signal: opts?.signal
 		});
@@ -207,7 +216,7 @@ export async function doWithBody(
 		if (!resp.ok && resp.status === 401) {
 			handle401Redirect();
 		}
-		return handleResponse(resp, path, opts);
+		return opts?.responseHandler?.(resp, path, opts) ?? handleResponse(resp, path, opts);
 	} catch (e) {
 		if (opts?.errorHandler) {
 			opts.errorHandler(e);
