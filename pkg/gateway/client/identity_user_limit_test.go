@@ -179,11 +179,189 @@ func TestEnsureIdentityWithRoleAllowsVerifiedIdentityForExistingUserAtLimit(t *t
 	if existing.ID != first.ID {
 		t.Fatalf("linked user ID = %d, want existing user ID %d", existing.ID, first.ID)
 	}
+
+	loginGovIdentity := &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		ProviderUsername:      "google-user",
+		ProviderUserID:        "login-gov-user",
+		Email:                 "same-user@example.com",
+	}
+	existing, err = c.EnsureIdentityWithRole(t.Context(), loginGovIdentity, "", apitypes.RoleBasic, limit)
+	if err != nil {
+		t.Fatalf("linking Login.gov identity with an existing username: %v", err)
+	}
+	if existing.ID != first.ID {
+		t.Fatalf("Login.gov linked user ID = %d, want existing user ID %d", existing.ID, first.ID)
+	}
+	if got := countIdentityUserLimitTestUsers(t, c, true); got != 1 {
+		t.Fatalf("users counted toward limit = %d, want 1", got)
+	}
+	if got := countIdentityUserLimitTestIdentities(t, c); got != 3 {
+		t.Fatalf("identities = %d, want 3", got)
+	}
+}
+
+func TestEnsureIdentityWithRoleLinksVerifiedIdentityToUnverifiedUser(t *testing.T) {
+	c := newIdentityUserLimitTestClient(t)
+	limit := UserLimit{Unlimited: true}
+
+	first, err := c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      system.LocalAuthProvider,
+		ProviderUsername:      "local-owner",
+		ProviderUserID:        "same-user@example.com",
+		Email:                 "same-user@example.com",
+	}, "", apitypes.RoleOwner, limit)
+	if err != nil {
+		t.Fatalf("creating unverified Local auth user: %v", err)
+	}
+	if first.VerifiedEmail == nil || *first.VerifiedEmail {
+		t.Fatalf("Local auth verified email = %v, want false", first.VerifiedEmail)
+	}
+
+	linked, err := c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		ProviderUsername:      "same-user@example.com",
+		ProviderUserID:        "login-gov-user",
+		Email:                 "Same-User@Example.COM ",
+	}, "", apitypes.RoleBasic, limit)
+	if err != nil {
+		t.Fatalf("linking verified Login.gov identity to Local auth user: %v", err)
+	}
+	if linked.ID != first.ID {
+		t.Fatalf("Login.gov linked user ID = %d, want Local auth user ID %d", linked.ID, first.ID)
+	}
+	if linked.VerifiedEmail == nil || !*linked.VerifiedEmail {
+		t.Fatalf("linked user verified email = %v, want true", linked.VerifiedEmail)
+	}
+	if linked.Email != "same-user@example.com" {
+		t.Fatalf("linked user email = %q, want normalized email", linked.Email)
+	}
+	if linked.Username != "local-owner" {
+		t.Fatalf("linked user username = %q, want original Local auth username", linked.Username)
+	}
+	if !linked.Role.HasRole(apitypes.RoleOwner) {
+		t.Fatalf("linked user role = %v, want Owner preserved", linked.Role)
+	}
 	if got := countIdentityUserLimitTestUsers(t, c, true); got != 1 {
 		t.Fatalf("users counted toward limit = %d, want 1", got)
 	}
 	if got := countIdentityUserLimitTestIdentities(t, c); got != 2 {
 		t.Fatalf("identities = %d, want 2", got)
+	}
+}
+
+func TestEnsureIdentityWithRoleKeepsDistinctLoginGovUsersSeparate(t *testing.T) {
+	c := newIdentityUserLimitTestClient(t)
+	limit := UserLimit{Unlimited: true}
+
+	owner, err := c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		ProviderUsername:      "owner-subject",
+		ProviderUserID:        "owner-subject",
+		Email:                 "owner@example.com",
+	}, "", apitypes.RoleOwner, limit)
+	if err != nil {
+		t.Fatalf("creating Login.gov owner: %v", err)
+	}
+
+	member, err := c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		ProviderUsername:      "member-subject",
+		ProviderUserID:        "member-subject",
+		Email:                 "member@example.com",
+	}, "", apitypes.RoleUnknown, limit)
+	if err != nil {
+		t.Fatalf("creating second Login.gov user: %v", err)
+	}
+	if member.ID == owner.ID {
+		t.Fatalf("second Login.gov user inherited owner ID %d", owner.ID)
+	}
+	if member.Role.HasRole(apitypes.RoleOwner) {
+		t.Fatal("second Login.gov user inherited Owner role")
+	}
+	if got := countIdentityUserLimitTestUsers(t, c, true); got != 2 {
+		t.Fatalf("users counted toward limit = %d, want 2", got)
+	}
+}
+
+func TestEnsureIdentityWithRoleRejectsChangedEmailForSubject(t *testing.T) {
+	c := newIdentityUserLimitTestClient(t)
+	limit := UserLimit{Unlimited: true}
+	identity := &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		ProviderUsername:      "stable-subject",
+		ProviderUserID:        "stable-subject",
+		Email:                 "first@example.com",
+	}
+	first, err := c.EnsureIdentityWithRole(t.Context(), identity, "", apitypes.RoleOwner, limit)
+	if err != nil {
+		t.Fatalf("creating Login.gov identity: %v", err)
+	}
+
+	identity.Email = "second@example.com"
+	if _, err = c.EnsureIdentityWithRole(t.Context(), identity, "", apitypes.RoleUnknown, limit); err == nil {
+		t.Fatal("existing Login.gov subject accepted a changed email")
+	}
+	stored, err := c.UserByID(t.Context(), strconv.FormatUint(uint64(first.ID), 10))
+	if err != nil {
+		t.Fatalf("loading original user: %v", err)
+	}
+	if stored.Email != "first@example.com" || !stored.Role.HasRole(apitypes.RoleOwner) {
+		t.Fatalf("original user changed after rejected identity: email=%q role=%v", stored.Email, stored.Role)
+	}
+}
+
+func TestEnsureIdentityWithRoleRejectsIncompleteIdentity(t *testing.T) {
+	c := newIdentityUserLimitTestClient(t)
+	_, err := c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		Email:                 "user@example.com",
+	}, "", apitypes.RoleUnknown, UserLimit{Unlimited: true})
+	if err == nil {
+		t.Fatal("incomplete provider identity was accepted")
+	}
+	if got := countIdentityUserLimitTestUsers(t, c, true); got != 0 {
+		t.Fatalf("users counted toward limit = %d, want 0", got)
+	}
+}
+
+func TestEnsureIdentityWithRoleDoesNotLinkVerifiedIdentityByUsername(t *testing.T) {
+	c := newIdentityUserLimitTestClient(t)
+	limit := UserLimit{Unlimited: true}
+
+	first, err := c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "google-auth-provider",
+		ProviderUsername:      "shared-username",
+		ProviderUserID:        "google-user",
+		Email:                 "first-user@example.com",
+	}, "", apitypes.RoleBasic, limit)
+	if err != nil {
+		t.Fatalf("creating first verified identity: %v", err)
+	}
+
+	_, err = c.EnsureIdentityWithRole(t.Context(), &gatewaytypes.Identity{
+		AuthProviderNamespace: "default",
+		AuthProviderName:      "login-gov-auth-provider",
+		ProviderUsername:      first.Username,
+		ProviderUserID:        "login-gov-user",
+		Email:                 "second-user@example.com",
+	}, "", apitypes.RoleBasic, limit)
+	if err == nil {
+		t.Fatal("linking a verified identity with a different email succeeded, want unique username error")
+	}
+	if got := countIdentityUserLimitTestUsers(t, c, true); got != 1 {
+		t.Fatalf("users counted toward limit = %d, want 1", got)
+	}
+	if got := countIdentityUserLimitTestIdentities(t, c); got != 1 {
+		t.Fatalf("identities = %d, want 1; rejected identity was not rolled back", got)
 	}
 }
 

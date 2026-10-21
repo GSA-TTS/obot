@@ -352,12 +352,11 @@ func (p *Proxy) authenticateRequest(req *http.Request) (*authenticator.Response,
 		return nil, false, err
 	}
 
-	if stateResponse.StatusCode == http.StatusInternalServerError && (strings.Contains(string(body), "record not found") || strings.Contains(string(body), "session ticket cookie failed validation")) {
-		return nil, false, ErrInvalidSession
+	ss, err := decodeSerializableState(stateResponse.StatusCode, body)
+	if err != nil {
+		return nil, false, err
 	}
-
-	var ss serializableState
-	if err = json.Unmarshal(body, &ss); err != nil {
+	if err = validateSerializableState(&ss); err != nil {
 		return nil, false, err
 	}
 
@@ -391,6 +390,35 @@ func (p *Proxy) authenticateRequest(req *http.Request) (*authenticator.Response,
 	return &authenticator.Response{
 		User: u,
 	}, true, nil
+}
+
+func decodeSerializableState(statusCode int, body []byte) (serializableState, error) {
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden ||
+		(statusCode == http.StatusInternalServerError &&
+			(strings.Contains(string(body), "record not found") || strings.Contains(string(body), "session ticket cookie failed validation"))) {
+		return serializableState{}, ErrInvalidSession
+	}
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return serializableState{}, fmt.Errorf("auth provider state request returned status %d", statusCode)
+	}
+
+	var ss serializableState
+	if err := json.Unmarshal(body, &ss); err != nil {
+		return serializableState{}, errors.New("auth provider returned invalid state")
+	}
+	return ss, nil
+}
+
+func validateSerializableState(ss *serializableState) error {
+	ss.User = strings.TrimSpace(ss.User)
+	ss.Email = strings.ToLower(strings.TrimSpace(ss.Email))
+	if ss.User == "" {
+		return errors.New("auth provider returned an empty user ID")
+	}
+	if ss.Email == "" {
+		return errors.New("auth provider returned an empty email")
+	}
+	return nil
 }
 
 // Important: do not change the order of these checks.
