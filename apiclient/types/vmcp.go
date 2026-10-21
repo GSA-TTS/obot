@@ -15,8 +15,10 @@ const (
 
 // VMCP is a stable, optionally multi-component MCP endpoint definition.
 type VMCP struct {
-	Metadata                `json:",inline"`
-	VMCPManifest            `json:",inline"`
+	Metadata     `json:",inline"`
+	VMCPManifest `json:",inline"`
+	// LocalhostCallbackPaths contains the effective callback paths for the requesting user.
+	LocalhostCallbackPaths  []string   `json:"localhostCallbackPaths"`
 	LegacySlug              string     `json:"legacySlug,omitempty"`
 	SourceURL               string     `json:"sourceURL,omitempty"`
 	Adopted                 *bool      `json:"adopted,omitempty"`
@@ -31,6 +33,7 @@ type VMCPManifest struct {
 	DisplayName string          `json:"displayName"`
 	Description string          `json:"description,omitempty"`
 	Icon        string          `json:"icon,omitempty"`
+	ToolSearch  bool            `json:"toolSearch,omitempty"`
 	Components  []VMCPComponent `json:"components"`
 	Profiles    []VMCPProfile   `json:"profiles,omitempty"`
 }
@@ -50,7 +53,6 @@ type VMCPComponent struct {
 	Configuration           []VMCPConfigurationPolicy     `json:"configuration,omitempty"`
 	ForceSingleUser         bool                          `json:"forceSingleUser,omitempty"`
 	OAuthCredentialID       string                        `json:"oauthCredentialID,omitempty"`
-	AllowedTools            []string                      `json:"allowedTools,omitempty"`
 	ToolPrefix              string                        `json:"toolPrefix,omitempty"`
 	ToolOverrides           []ToolOverride                `json:"toolOverrides,omitempty"`
 }
@@ -199,6 +201,9 @@ type VMCPComponentStatus struct {
 	Error         string `json:"error,omitempty"`
 	SourceMissing bool   `json:"sourceMissing,omitempty"`
 	NeedsUpdate   bool   `json:"needsUpdate,omitempty"`
+	// ConnectionSnapshot is an outdated snapshot that migrated connections retain when the
+	// component itself is current. Updating the vMCP releases it.
+	ConnectionSnapshot *MCPServerCatalogEntrySnapshot `json:"connectionSnapshot,omitempty"`
 }
 
 type VMCPList List[VMCP]
@@ -285,9 +290,6 @@ func validateConfigurationSecretBinding(component VMCPComponent, policy VMCPConf
 	}
 	if binding.Name == "" || binding.Key == "" {
 		return fmt.Errorf("component %q configuration %q secretBinding requires both name and key", component.Name, policy.Key)
-	}
-	if binding.AdminAdded {
-		return fmt.Errorf("component %q configuration %q secretBinding.adminAdded is not valid for vMCP configuration", component.Name, policy.Key)
 	}
 	if !slices.ContainsFunc(component.CatalogEntry.Manifest.Config, func(config MCPConfig) bool { return config.Key == policy.Key }) {
 		return fmt.Errorf("component %q configuration %q secretBinding does not match a catalog entry configuration field", component.Name, policy.Key)

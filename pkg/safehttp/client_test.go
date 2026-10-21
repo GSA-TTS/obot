@@ -3,6 +3,7 @@ package safehttp
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -99,6 +100,27 @@ func TestClientBlocksLoopbackLiteralIP(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "blocked loopback IP") {
 		t.Fatalf("expected loopback error, got %v", err)
+	}
+}
+
+func TestClientBlocksUnspecifiedAddresses(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("request should have been blocked before reaching server")
+	}))
+	defer ts.Close()
+
+	serverURL, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, host := range []string{"0.0.0.0", "[::]", "[::ffff:0.0.0.0]"} {
+		t.Run(host, func(t *testing.T) {
+			_, err := NewClient(Options{BlockLoopback: true}).Get("http://" + host + ":" + serverURL.Port())
+			if err == nil || !strings.Contains(err.Error(), "blocked unspecified IP") {
+				t.Fatalf("expected unspecified IP to be blocked, got %v", err)
+			}
+		})
 	}
 }
 
@@ -480,5 +502,43 @@ func TestPortForURLDefaultsByScheme(t *testing.T) {
 				t.Errorf("PortForURL(%q) = %q, want %q", tt.raw, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestClientUsesLoopbackProxyForAllowedDestinations(t *testing.T) {
+	var proxied []string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied = append(proxied, r.URL.String())
+		_, _ = io.WriteString(w, "via proxy")
+	}))
+	defer proxy.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("http_proxy", "")
+	t.Setenv("https_proxy", "")
+	t.Setenv("no_proxy", "")
+
+	client := NewClient(Options{BlockLoopback: true, BlockPrivateIP: true, BlockLinkLocal: true, Timeout: 5 * time.Second})
+	// A public destination goes through the proxy, although the proxy is on a loopback
+	// address, and so does a host only the proxy may be able to resolve.
+	for _, u := range []string{"http://8.8.8.8/x", "http://only-the-proxy-knows.invalid/x"} {
+		resp, err := client.Get(u)
+		if err != nil {
+			t.Fatalf("GET %s through the proxy: %v", u, err)
+		}
+		_ = resp.Body.Close()
+	}
+	if len(proxied) != 2 {
+		t.Fatalf("expected both requests to reach the proxy, got %v", proxied)
+	}
+	// Blocked destinations are refused before they reach the proxy.
+	for _, u := range []string{"http://169.254.169.254/latest/meta-data", "http://10.0.0.1/", "http://[fd00:ec2::254]/"} {
+		if _, err := client.Get(u); err == nil || !strings.Contains(err.Error(), "blocked") {
+			t.Errorf("GET %s: expected it to be blocked, got %v", u, err)
+		}
+	}
+	if len(proxied) != 2 {
+		t.Fatalf("a blocked request reached the proxy: %v", proxied)
 	}
 }

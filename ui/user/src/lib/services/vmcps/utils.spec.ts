@@ -10,7 +10,10 @@ import {
 	buildVMcpComponentFilterOptions,
 	buildWirePath,
 	catalogConfigurationFields,
+	catalogEntryToVMCPComponent,
+	hasVMcpComponentConfiguration,
 	configurationForSnapshotUpdate,
+	configurationRetainingOmittedRequired,
 	configurationWithRevealedValues,
 	distanceToRect,
 	filterMcpServersByCategories,
@@ -23,6 +26,7 @@ import {
 	sortMcpServers,
 	sortVMcps,
 	vmcpComponentDiffServers,
+	vmcpComponentStatus,
 	vmcpConnectURL,
 	vmcpHasUserAllowedConfiguration,
 	vmcpInstanceNeedsUserConfiguration,
@@ -68,6 +72,55 @@ function pointsOf(path: string) {
 		return { x, y };
 	});
 }
+
+describe('hasVMcpComponentConfiguration', () => {
+	it('is false for a remote server with no editable fields', () => {
+		expect(
+			hasVMcpComponentConfiguration(
+				createMCPCatalogEntry({
+					id: 'entry-remote',
+					name: 'Remote',
+					runtime: 'remote',
+					manifest: { remoteConfig: { fixedURL: 'https://example.com/mcp' } }
+				})
+			)
+		).toBe(false);
+	});
+
+	it('is true when a remote server still has an editable field', () => {
+		expect(
+			hasVMcpComponentConfiguration(
+				createMCPCatalogEntry({
+					id: 'entry-remote',
+					name: 'Remote',
+					runtime: 'remote',
+					manifest: {
+						remoteConfig: { fixedURL: 'https://example.com/mcp' },
+						config: [
+							{
+								key: 'API_TOKEN',
+								name: 'API token',
+								description: 'Token',
+								required: true,
+								sensitive: true,
+								value: '',
+								usage: 'env'
+							}
+						]
+					}
+				})
+			)
+		).toBe(true);
+	});
+
+	it('is true for a hosted server even without configuration fields', () => {
+		expect(
+			hasVMcpComponentConfiguration(
+				createMCPCatalogEntry({ id: 'entry-npx', name: 'Package', runtime: 'npx' })
+			)
+		).toBe(true);
+	});
+});
 
 describe('catalogConfigurationFields', () => {
 	it('returns the catalog config list', () => {
@@ -201,22 +254,44 @@ describe('sortVMcps', () => {
 		[createMCPCatalogEntry({ id: 'entry-1', name: 'GitHub' })]
 	);
 
-	it('orders by name, ignoring case', () => {
-		expect(sortVMcps([zeta, alpha], 'name').map((vmcp) => vmcp.id)).toEqual(['vmcp-a', 'vmcp-z']);
+	it('orders by name ascending, ignoring case', () => {
+		expect(
+			sortVMcps([zeta, alpha], 'name', undefined, undefined, 'asc').map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-a', 'vmcp-z']);
 	});
 
-	it('orders by created date, newest first', () => {
-		expect(sortVMcps([zeta, alpha], 'created').map((vmcp) => vmcp.id)).toEqual([
-			'vmcp-a',
-			'vmcp-z'
-		]);
+	it('orders by name descending', () => {
+		expect(
+			sortVMcps([zeta, alpha], 'name', undefined, undefined, 'desc').map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-z', 'vmcp-a']);
 	});
 
-	it('orders by component server count, largest first', () => {
-		expect(sortVMcps([zeta, alpha], 'componentServers').map((vmcp) => vmcp.id)).toEqual([
-			'vmcp-a',
-			'vmcp-z'
-		]);
+	it('orders by created date, oldest first when ascending', () => {
+		expect(
+			sortVMcps([zeta, alpha], 'created', undefined, undefined, 'asc').map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-z', 'vmcp-a']);
+	});
+
+	it('orders by created date, newest first when descending', () => {
+		expect(
+			sortVMcps([zeta, alpha], 'created', undefined, undefined, 'desc').map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-a', 'vmcp-z']);
+	});
+
+	it('orders by component server count, fewest first when ascending', () => {
+		expect(
+			sortVMcps([zeta, alpha], 'componentServers', undefined, undefined, 'asc').map(
+				(vmcp) => vmcp.id
+			)
+		).toEqual(['vmcp-z', 'vmcp-a']);
+	});
+
+	it('orders by component server count, largest first when descending', () => {
+		expect(
+			sortVMcps([zeta, alpha], 'componentServers', undefined, undefined, 'desc').map(
+				(vmcp) => vmcp.id
+			)
+		).toEqual(['vmcp-a', 'vmcp-z']);
 	});
 });
 
@@ -247,6 +322,18 @@ describe('filterVMcps', () => {
 			}
 		]
 	]);
+
+	it('filters by creator', () => {
+		const alice = createVMCP({
+			id: 'vmcp-alice',
+			displayName: 'Alice vMCP',
+			creatorUserID: 'user-1'
+		});
+		const bob = createVMCP({ id: 'vmcp-bob', displayName: 'Bob vMCP', creatorUserID: 'user-2' });
+		expect(
+			filterVMcps([alice, bob], { creators: 'user-2' }, owners).map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-bob']);
+	});
 
 	it('finds shared vMCPs without a userID by display name', () => {
 		expect(
@@ -616,7 +703,9 @@ describe('vmcpOutdatedComponents', () => {
 			shortDescription: 'Short description',
 			description: 'Description',
 			icon: 'https://example.com/icon.png',
-			upgradeNote: 'Read before upgrading.'
+			upgradeNote: 'Read before upgrading.',
+			minObotVersion: 'v0.27.0',
+			maxObotVersion: 'v0.30.0'
 		};
 		const entry = createMCPCatalogEntry({ id: 'entry-1', name: 'GitHub', manifest: informational });
 		const vmcp = createVMCP({}, [entry]);
@@ -629,6 +718,8 @@ describe('vmcpOutdatedComponents', () => {
 				description: 'Updated description',
 				icon: 'https://example.com/updated.png',
 				upgradeNote: 'Updated upgrade note.',
+				minObotVersion: 'v0.28.0',
+				maxObotVersion: 'v0.31.0',
 				repoURL: 'https://github.com/example/updated',
 				toolPreview: [{ id: 'echo', name: 'echo', description: 'Echo input' }]
 			}
@@ -644,6 +735,43 @@ describe('vmcpOutdatedComponents', () => {
 		expect(updatedEntry.manifest.toolPreview).toHaveLength(1);
 		expect(updatedEntry.manifest.description).toBe('Updated description');
 		expect(vmcp.components![0].catalogEntry.manifest.icon).toBe(informational.icon);
+	});
+
+	it('diffs from the snapshot migrated connections retain for a current component', () => {
+		const entry = createMCPCatalogEntry({
+			id: 'entry-1',
+			name: 'GitHub',
+			manifest: { npxConfig: { package: '@example/github@2.0.0' } }
+		});
+		const connectionSnapshot = {
+			manifest: {
+				...entry.manifest,
+				npxConfig: { package: '@example/github@1.0.0' }
+			}
+		};
+		const vmcp = createVMCP(
+			{
+				status: {
+					components: [{ name: 'GitHub', needsUpdate: true, connectionSnapshot }]
+				}
+			},
+			[entry]
+		);
+
+		const component = vmcp.components![0];
+		const { fromServer, toServer } = vmcpComponentDiffServers(
+			component,
+			entry,
+			vmcpComponentStatus(vmcp, component)
+		);
+
+		expect(vmcpOutdatedComponents(vmcp)).toEqual([component]);
+		expect(fromServer?.manifest.npxConfig?.package).toBe('@example/github@1.0.0');
+		expect(toServer?.manifest.npxConfig?.package).toBe('@example/github@2.0.0');
+		expect(
+			vmcpComponentDiffServers(component, entry, { name: 'GitHub', needsUpdate: true }).fromServer
+				?.manifest.npxConfig?.package
+		).toBe('@example/github@2.0.0');
 	});
 });
 
@@ -682,6 +810,42 @@ describe('vmcpUpdateConfigurationTargets', () => {
 		expect(vmcpUpdateConfigurationTargets(vmcp, [snapshot])).toEqual([]);
 		expect(vmcpUpdateConfigurationTargets(vmcp, [])).toEqual([]);
 	});
+
+	it('skips components whose update only releases older connection snapshots', () => {
+		const entry = createMCPCatalogEntry({
+			id: 'entry-1',
+			name: 'GitHub',
+			manifest: {
+				config: [
+					{
+						key: 'API_TOKEN',
+						name: 'API token',
+						description: 'Token',
+						required: true,
+						sensitive: true,
+						value: '',
+						usage: 'env'
+					}
+				]
+			}
+		});
+		const vmcp = createVMCP(
+			{
+				status: {
+					components: [
+						{
+							name: 'GitHub',
+							needsUpdate: true,
+							connectionSnapshot: { manifest: entry.manifest }
+						}
+					]
+				}
+			},
+			[entry]
+		);
+
+		expect(vmcpUpdateConfigurationTargets(vmcp, [entry])).toEqual([]);
+	});
 });
 
 describe('configurationForSnapshotUpdate', () => {
@@ -696,6 +860,7 @@ describe('configurationForSnapshotUpdate', () => {
 			key: string;
 			policy?: 'prohibited' | 'fixed' | 'userAllowed';
 			value?: string;
+			secretBinding?: { name: string; key: string };
 		}>
 	) {
 		const entry = createMCPCatalogEntry({
@@ -731,6 +896,18 @@ describe('configurationForSnapshotUpdate', () => {
 		]);
 	});
 
+	it('keeps secret bindings for omitted required snapshot keys', () => {
+		const secretBinding = { name: 'credentials', key: 'api-token' };
+		const component = snapshotComponent(
+			[{ key: 'API_TOKEN', required: true }],
+			[{ key: 'API_TOKEN', policy: 'fixed', secretBinding }]
+		);
+
+		expect(configurationForSnapshotUpdate(component, [])).toEqual([
+			{ key: 'API_TOKEN', policy: 'fixed', secretBinding }
+		]);
+	});
+
 	it('does not keep keys already present, optional, or catalog-supplied', () => {
 		const component = snapshotComponent(
 			[
@@ -754,6 +931,126 @@ describe('configurationForSnapshotUpdate', () => {
 	});
 });
 
+describe('configurationRetainingOmittedRequired', () => {
+	function seeded(config: Parameters<typeof createMCPCatalogEntry>[0]['manifest']) {
+		return catalogEntryToVMCPComponent(
+			createMCPCatalogEntry({
+				id: 'entry-1',
+				name: 'Regional',
+				manifest: config
+			})
+		);
+	}
+
+	it('keeps policies and catalog values for required fields the dialog omits', () => {
+		const component = seeded({
+			config: [
+				{
+					key: 'API_TOKEN',
+					name: 'API token',
+					description: 'Token',
+					required: true,
+					sensitive: true,
+					value: '',
+					usage: 'env'
+				},
+				{
+					key: 'REGION',
+					name: 'Region',
+					description: 'Deployment region',
+					required: true,
+					sensitive: false,
+					value: 'us-east-1',
+					usage: 'env'
+				}
+			]
+		});
+
+		expect(
+			configurationRetainingOmittedRequired(component, [
+				{ key: 'API_TOKEN', policy: 'userAllowed' }
+			])
+		).toEqual([
+			{ key: 'API_TOKEN', policy: 'userAllowed' },
+			{ key: 'REGION', policy: 'fixed', value: 'us-east-1' }
+		]);
+	});
+
+	it('drops redacted secret placeholders while retaining the required policy', () => {
+		const component = seeded({
+			config: [
+				{
+					key: 'SECRET',
+					name: 'Secret',
+					description: 'Secret',
+					required: true,
+					sensitive: true,
+					value: '******',
+					usage: 'env'
+				},
+				{
+					key: 'OPTIONAL',
+					name: 'Optional',
+					description: 'Optional',
+					required: false,
+					sensitive: false,
+					value: 'kept-out',
+					usage: 'env'
+				},
+				{
+					key: 'STATIC',
+					name: 'Static',
+					description: 'Static',
+					required: true,
+					sensitive: false,
+					static: true,
+					value: 'catalog',
+					usage: 'env'
+				},
+				{
+					key: 'BOUND',
+					name: 'Bound',
+					description: 'Bound',
+					required: true,
+					sensitive: true,
+					value: '',
+					usage: 'env',
+					secretBinding: { name: 'config', key: 'token' }
+				}
+			]
+		});
+		component.configuration = [
+			{ key: 'SECRET', policy: 'fixed', value: '******' },
+			{ key: 'BOUND', policy: 'fixed', value: 'do-not-copy' }
+		];
+
+		expect(configurationRetainingOmittedRequired(component, [])).toEqual([
+			{ key: 'SECRET', policy: 'fixed' }
+		]);
+	});
+
+	it('keeps a user-allowed policy without copying a catalog value onto it', () => {
+		const component = seeded({
+			config: [
+				{
+					key: 'REGION',
+					name: 'Region',
+					description: 'Deployment region',
+					required: true,
+					sensitive: false,
+					value: 'us-east-1',
+					usage: 'env'
+				}
+			]
+		});
+		component.configuration = [{ key: 'REGION', policy: 'userAllowed' }];
+
+		expect(configurationRetainingOmittedRequired(component, [])).toEqual([
+			{ key: 'REGION', policy: 'userAllowed' }
+		]);
+	});
+});
+
 describe('configurationWithRevealedValues', () => {
 	it('fills fixed policies from revealed secrets', () => {
 		expect(
@@ -767,6 +1064,27 @@ describe('configurationWithRevealedValues', () => {
 		).toEqual([
 			{ key: 'API_TOKEN', policy: 'fixed', value: 'secret' },
 			{ key: 'REGION', policy: 'userAllowed' }
+		]);
+	});
+
+	it('leaves a fixed secret binding without a stored value', () => {
+		expect(
+			configurationWithRevealedValues(
+				[
+					{
+						key: 'API_TOKEN',
+						policy: 'fixed',
+						secretBinding: { name: 'gitlab-secret', key: 'gitlab_key' }
+					}
+				],
+				{ API_TOKEN: 'secret' }
+			)
+		).toEqual([
+			{
+				key: 'API_TOKEN',
+				policy: 'fixed',
+				secretBinding: { name: 'gitlab-secret', key: 'gitlab_key' }
+			}
 		]);
 	});
 });

@@ -9,6 +9,7 @@ import (
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/api"
 	"github.com/obot-platform/obot/pkg/gateway/server/dispatcher"
+	"github.com/obot-platform/obot/pkg/i18n"
 	"github.com/obot-platform/obot/pkg/license"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	kclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,6 +37,10 @@ func (a *AvailableModelsHandler) List(req api.Context) error {
 
 	var oModels openai.ModelsList
 	for _, modelProvider := range modelProviders.Items {
+		if _, ok := a.dispatcher.BuiltinModelProvider(modelProvider.Namespace, modelProvider.Name); !ok {
+			// A legacy model provider the LLM gateway hasn't migrated yet; it serves nothing.
+			continue
+		}
 		mps, err := providers.ModelProviderStatus(req.Context(), modelProvider, nil, a.licenseProvider)
 		if err != nil {
 			return err
@@ -69,7 +74,9 @@ func (a *AvailableModelsHandler) ListForModelProvider(req api.Context) error {
 	}
 
 	if len(modelProvider.Status.MissingConfigurationParameters) != 0 {
-		return types.NewErrBadRequest("model provider %s is not configured, missing configuration parameters: %s", modelProvider.Name, strings.Join(modelProvider.Status.MissingConfigurationParameters, ", "))
+		return types.NewErrBadRequest("%s", apiMessage(req, "model_not_configured",
+			"provider", i18n.Resolve(providerResponseLocale(req), modelProvider.Spec.Name),
+			"parameters", strings.Join(modelProvider.Status.MissingConfigurationParameters, ", ")))
 	}
 
 	oModels, err := a.dispatcher.ModelsForProvider(req.Context(), modelProvider)

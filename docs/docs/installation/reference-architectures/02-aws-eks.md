@@ -1,10 +1,15 @@
+---
+displayed_sidebar: sidebar
+title: "Amazon EKS"
+---
+
 # Amazon EKS
 
 Deploying Obot to Amazon Elastic Kubernetes Service follows the standard Helm workflow. As a prerequisite, you'll need the following resources set up in your AWS environment:
 
 * AWS account
 * VPC with subnets
-* Amazon RDS instance running PostgreSQL 17+
+* Amazon RDS instance running PostgreSQL 17+. Obot also uses a second database on the same server, `<db name>_llm_gateway`, for the LLM gateway. Give Obot's database user `CREATEDB`, create it first with `CREATE DATABASE <db name>_llm_gateway OWNER <db user>;`, or set `OBOT_SERVER_LLM_GATEWAY_POSTGRES_DSN`.
 * VPC Security Groups configured to allow connectivity between your EKS cluster and RDS instance
 * (Optional) AWS KMS key for encrypting sensitive information
 * (Optional) IAM role and policy for service account (IRSA) if you're using AWS services like KMS for encryption
@@ -90,7 +95,7 @@ secret:
   # Optional: generated automatically when omitted from the chart-managed Secret
   OBOT_BOOTSTRAP_TOKEN: "<bootstrap password>"
 
-  # Optionally configure model providers
+  # Optional: configures the LLM gateway's OpenAI provider at startup
   OPENAI_API_KEY: "<your openai api key>"
 
 # Non-sensitive configuration
@@ -106,9 +111,6 @@ config:
   OBOT_SERVER_AUTH_ADMIN_EMAILS: "<comma separated list of admin emails>"
   OBOT_SERVER_AUTH_OWNER_EMAILS: "<comma separated list of owner emails>"
 
-mcpServerDefaults:
-  storageClassName: ebs # replace with the name of your StorageClass
-  nanobotWorkspaceSize: 1Gi # Some disk types have a minimum size, read the documentation for the storage type you select.
 ```
 
 With the default configuration on EKS, this will set up ingress to expose Obot through an Application Load Balancer using the AWS Load Balancer Controller. Make sure you have the AWS Load Balancer Controller installed in your cluster. You should also consider adding TLS termination to your ALB for secure HTTPS access.

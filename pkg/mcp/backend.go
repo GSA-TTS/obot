@@ -41,7 +41,8 @@ var (
 )
 
 type backend interface {
-	// ensureServerDeployment will deploy a server if it is not already deployed, and return the updated ServerConfig
+	// ensureServerDeployment validates before deployment, skips validation on cache hits,
+	// and returns the updated ServerConfig.
 	ensureServerDeployment(ctx context.Context, serverConfig ServerConfig) (ServerConfig, error)
 	// deployServer will deploy a server if it is not already deployed, and will not wait or do any readiness checks
 	deployServer(ctx context.Context, server ServerConfig) error
@@ -254,6 +255,10 @@ func ServerHookConfig(server ServerConfig) (Hooks, HookServerConfigs) {
 	hooks := hookDefinitions(server.Webhooks, replacer)
 	servers := make(HookServerConfigs, len(server.Webhooks))
 	for _, webhook := range server.Webhooks {
+		if webhook.Guardrail != nil {
+			// Guardrail filters run in-process and have no server.
+			continue
+		}
 		servers[webhookServerName(webhook, replacer)] = ServerConfig{
 			Runtime:              types.RuntimeRemote,
 			URL:                  webhook.URL,
@@ -279,6 +284,7 @@ func MMMCPConfig(server ServerConfig, env map[string][]byte) *mmmcpconfig.Config
 	}
 
 	if server.Runtime == types.RuntimeVMCP {
+		config.ToolSearch = server.ToolSearch
 		// Component connections are authenticated by the gateway's composite OAuth
 		// handler, not the frontend Authorization header: pooled sessions replay
 		// the headers of the request that opened them long after it expires.
@@ -392,12 +398,25 @@ func hookDefinitions(webhooks []Webhook, replacer *strings.Replacer) Hooks {
 	definitions := make(Hooks, 0, len(webhooks))
 	for _, webhook := range webhooks {
 		webhookName := webhookServerName(webhook, replacer)
-		targetName := webhookName + "/" + webhook.ToolName
+		target := HookTarget{
+			Target:           webhookName + "/" + webhook.ToolName,
+			MutateDisallowed: !webhook.MutateAllowed,
+			Name:             webhook.DisplayName,
+		}
+		if webhook.Guardrail != nil {
+			// A guardrail filter's action, not allowedToMutate, decides whether it may
+			// change messages: redaction is its mutation.
+			target = HookTarget{
+				Target:    webhookName,
+				Name:      webhook.DisplayName,
+				Guardrail: &GuardrailTarget{FilterName: webhook.Name, Config: *webhook.Guardrail.DeepCopy()},
+			}
+		}
 
 		if len(webhook.Definitions) == 0 {
 			definitions = append(definitions, HookMapping{
 				Name:    "*",
-				Targets: []HookTarget{{Target: targetName, MutateDisallowed: !webhook.MutateAllowed}},
+				Targets: []HookTarget{target},
 			})
 			continue
 		}
@@ -410,7 +429,7 @@ func hookDefinitions(webhooks []Webhook, replacer *strings.Replacer) Hooks {
 			if len(def.Identifiers) == 0 {
 				definitions = append(definitions, HookMapping{
 					Name:    method,
-					Targets: []HookTarget{{Target: targetName, MutateDisallowed: !webhook.MutateAllowed}},
+					Targets: []HookTarget{target},
 				})
 			}
 			for _, id := range def.Identifiers {
@@ -421,7 +440,7 @@ func hookDefinitions(webhooks []Webhook, replacer *strings.Replacer) Hooks {
 				definitions = append(definitions, HookMapping{
 					Name:    method,
 					Params:  params,
-					Targets: []HookTarget{{Target: targetName, MutateDisallowed: !webhook.MutateAllowed}},
+					Targets: []HookTarget{target},
 				})
 			}
 		}

@@ -1,0 +1,195 @@
+package safehttp
+
+import (
+	"errors"
+	"net"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestIPClassification(t *testing.T) {
+	tests := []struct {
+		name      string
+		ip        string
+		loopback  bool
+		private   bool
+		linkLocal bool
+	}{
+		{
+			name: "public IPv4",
+			ip:   "8.8.8.8",
+		},
+		{
+			name: "public IPv6",
+			ip:   "2606:4700:4700::1111",
+		},
+		{
+			name:     "unspecified IPv4",
+			ip:       "0.0.0.0",
+			loopback: true,
+		},
+		{
+			name:     "unspecified IPv6",
+			ip:       "::",
+			loopback: true,
+		},
+		{
+			name:      "NAT64 metadata",
+			ip:        "64:ff9b::a9fe:a9fe",
+			linkLocal: true,
+		},
+		{
+			name:     "NAT64 local-use loopback",
+			ip:       "64:ff9b:1::7f00:1",
+			loopback: true,
+		},
+		{
+			name:      "NAT64 local-use /48 metadata",
+			ip:        "64:ff9b:1:a9fe:a9:fe00::",
+			linkLocal: true,
+		},
+		{
+			name:      "NAT64 local-use /56 metadata",
+			ip:        "64:ff9b:1:a9:fe:a9fe::",
+			linkLocal: true,
+		},
+		{
+			name:      "NAT64 local-use /64 metadata",
+			ip:        "64:ff9b:1:0:a9:fea9:fe00:0",
+			linkLocal: true,
+		},
+		{
+			name:    "NAT64 local-use /64 private",
+			ip:      "64:ff9b:1:0:0a:0000:0100:0",
+			private: true,
+		},
+		{
+			name:    "6to4 private",
+			ip:      "2002:0a00:0001::",
+			private: true,
+		},
+		{
+			name:      "6to4 metadata",
+			ip:        "2002:a9fe:a9fe::",
+			linkLocal: true,
+		},
+		{
+			name:     "IPv4-compatible loopback",
+			ip:       "::7f00:1",
+			loopback: true,
+		},
+		{
+			name:      "IPv4-compatible metadata",
+			ip:        "::a9fe:a9fe",
+			linkLocal: true,
+		},
+		{
+			name:    "Teredo obfuscated private client",
+			ip:      "2001:0:4136:e378:8000:63bf:f5ff:fffe",
+			private: true,
+		},
+		{
+			name:      "NAT64 local-use /48 metadata with nonzero suffix",
+			ip:        "64:ff9b:1:a9fe:a9:fe00:0:1",
+			linkLocal: true,
+		},
+		{
+			name:      "NAT64 local-use /56 metadata with nonzero suffix",
+			ip:        "64:ff9b:1:a9:fe:a9fe:0:1",
+			linkLocal: true,
+		},
+		{
+			name:      "NAT64 local-use /64 metadata with nonzero suffix",
+			ip:        "64:ff9b:1:0:a9:fea9:fe00:1",
+			linkLocal: true,
+		},
+		{
+			name: "NAT64 local-use /96 public",
+			ip:   "64:ff9b:1::808:808",
+		},
+		{
+			name: "NAT64 local-use /48 public",
+			ip:   "64:ff9b:1:808:8:800::",
+		},
+		{
+			name: "NAT64 local-use /56 public",
+			ip:   "64:ff9b:1:8:8:808::",
+		},
+		{
+			// A nonzero reserved byte rules out the /48, /56 and /64 layouts.
+			name: "NAT64 local-use with nonzero reserved byte",
+			ip:   "64:ff9b:1:a9fe:ffa9:fe00::",
+		},
+		{
+			name: "NAT64 public",
+			ip:   "64:ff9b::808:808",
+		},
+		{
+			name: "6to4 public",
+			ip:   "2002:808:808::",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ip := net.ParseIP(tt.ip)
+			if ip == nil {
+				t.Fatalf("failed to parse %s", tt.ip)
+			}
+			if got := IsLoopback(ip); got != tt.loopback {
+				t.Errorf("IsLoopback(%s) = %v, want %v", tt.ip, got, tt.loopback)
+			}
+			if got := IsPrivate(ip); got != tt.private {
+				t.Errorf("IsPrivate(%s) = %v, want %v", tt.ip, got, tt.private)
+			}
+			if got := IsLinkLocal(ip); got != tt.linkLocal {
+				t.Errorf("IsLinkLocal(%s) = %v, want %v", tt.ip, got, tt.linkLocal)
+			}
+		})
+	}
+}
+
+func TestClientBlocksNAT64EmbeddedLinkLocalIP(t *testing.T) {
+	_, err := NewClient(Options{BlockLinkLocal: true, Timeout: 5 * time.Second}).Get("http://[64:ff9b::a9fe:a9fe]/latest/meta-data")
+	if err == nil || !strings.Contains(err.Error(), "blocked link-local IP") {
+		t.Fatalf("expected NAT64 address embedding a link-local IP to be blocked, got %v", err)
+	}
+}
+
+func TestIsCloudMetadata(t *testing.T) {
+	tests := []struct {
+		ip   string
+		want bool
+	}{
+		{ip: "fd00:ec2::254", want: true},
+		{ip: "100.100.100.200", want: true},
+		{ip: "::ffff:100.100.100.200", want: true},
+		{ip: "64:ff9b::6464:64c8", want: true},
+		{ip: "fd00:ec2::253"},
+		{ip: "fd12:3456::1"},
+		{ip: "100.100.100.201"},
+		{ip: "8.8.8.8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.ip, func(t *testing.T) {
+			if got := IsCloudMetadata(net.ParseIP(tt.ip)); got != tt.want {
+				t.Errorf("IsCloudMetadata(%s) = %v, want %v", tt.ip, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBlockLinkLocalBlocksCloudMetadata(t *testing.T) {
+	for _, u := range []string{"http://[fd00:ec2::254]/latest/meta-data", "http://100.100.100.200/latest/meta-data"} {
+		err := ValidateURL(t.Context(), u, Options{BlockLinkLocal: true})
+		var blocked *BlockedAddressError
+		if !errors.As(err, &blocked) || blocked.Reason != "cloud metadata" {
+			t.Errorf("%s: expected a blocked cloud metadata address, got %v", u, err)
+		}
+	}
+	// Private addresses stay reachable when only link-local addresses are blocked.
+	if err := ValidateURL(t.Context(), "http://[fd00:ec2::253]/", Options{BlockLinkLocal: true}); err != nil {
+		t.Errorf("expected another unique local address to be allowed, got %v", err)
+	}
+}

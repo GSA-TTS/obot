@@ -29,6 +29,7 @@ kubeconfig
 
 # Ignore dependency directories
 vendor/
+node_modules/
 
 # Ignore temporary files
 *.tmp
@@ -70,3 +71,13 @@ thoughts
 
 # Riptide artifacts (cloud-synced)
 .humanlayer/tasks/
+
+# Ignore Python bytecode
+__pycache__/
+*.py[cod]
+
+.pnpm-store/
+
+# Model data downloaded at build time (see pkg/modeldata/data/README.md)
+/pkg/modeldata/data/*.json.gz
+/pkg/modeldata/data/generated

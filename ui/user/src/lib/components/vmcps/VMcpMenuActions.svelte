@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { m } from '$lib/i18n';
 	import Loading from '$lib/icons/Loading.svelte';
 	import {
 		editVMcpInstanceConfiguration,
@@ -13,12 +14,13 @@
 		type OpenSelectInstance,
 		type OpenUpdateConfirm
 	} from '$lib/runes/vmcps/vmcpItem.svelte';
-	import type { VMCP } from '$lib/services';
+	import { UserService, type VMCP } from '$lib/services';
 	import { profile } from '$lib/stores';
 	import {
 		CircleFadingArrowUp,
 		ExternalLink,
 		GitCompare,
+		KeyRound,
 		Power,
 		ServerCog,
 		Trash2
@@ -28,6 +30,8 @@
 
 	interface Props {
 		vmcp: VMCP;
+		menuOpen?: boolean;
+		openReauthenticate?: (vmcp: VMCP, componentIDs: string[]) => void;
 		toggle: (open?: boolean) => void;
 		onDelete?: () => void;
 		onUpdated?: (vmcp: VMCP) => void;
@@ -39,6 +43,8 @@
 
 	let {
 		vmcp,
+		menuOpen = false,
+		openReauthenticate,
 		toggle,
 		onDelete,
 		onUpdated,
@@ -61,6 +67,33 @@
 		Boolean(openEditInstanceConfiguration) && ctx.canEditInstanceConfiguration
 	);
 
+	let authenticatedComponents = $state<string[]>([]);
+	let checkingOauth = $state(false);
+
+	$effect(() => {
+		const vmcpID = vmcp.id;
+		authenticatedComponents = [];
+		checkingOauth = false;
+		if (!menuOpen || !openReauthenticate || !ctx.connected) return;
+
+		const controller = new AbortController();
+		checkingOauth = true;
+		void UserService.getVMCPOAuthStatus(vmcpID, {
+			signal: controller.signal,
+			dontLogErrors: true
+		})
+			.then((ids) => {
+				if (!controller.signal.aborted) authenticatedComponents = ids;
+			})
+			.catch(() => {
+				// Leave the other actions available if OAuth status cannot be loaded.
+			})
+			.finally(() => {
+				if (!controller.signal.aborted) checkingOauth = false;
+			});
+		return () => controller.abort();
+	});
+
 	onDestroy(() => {
 		destroyed = true;
 	});
@@ -79,7 +112,7 @@
 	{:else}
 		<Power class="size-4" />
 	{/if}
-	Reset
+	{m.core_reset_page()}
 </button>
 {#if openUpdateConfirm && ctx.needsUpdate && ctx.canUpdate}
 	<button
@@ -96,7 +129,7 @@
 		{:else}
 			<CircleFadingArrowUp class="size-4" />
 		{/if}
-		Update vMCP
+		{m.vmcps_update_vmcp()}
 	</button>
 {/if}
 {#if canEditInstanceConfiguration}
@@ -116,9 +149,31 @@
 			);
 		}}
 	>
-		<ServerCog class="size-4" /> Edit Configuration
+		<ServerCog class="size-4" />
+		{m.vmcps_deployments_edit_configuration()}
 	</button>
 {/if}
+
+{#if openReauthenticate && (checkingOauth || authenticatedComponents.length > 0)}
+	<button
+		class="menu-button"
+		disabled={checkingOauth}
+		onclick={(e) => {
+			e.stopPropagation();
+			if (checkingOauth || authenticatedComponents.length === 0) return;
+			openReauthenticate?.(vmcp, authenticatedComponents);
+			toggle(false);
+		}}
+	>
+		{#if checkingOauth}
+			<Loading class="size-4" />
+		{:else}
+			<KeyRound class="size-4" />
+		{/if}
+		{m.vmcps_reauthenticate()}
+	</button>
+{/if}
+
 {#if openDiff && ctx.needsUpdate}
 	<button
 		class="menu-button-primary"
@@ -129,7 +184,8 @@
 			toggle(false);
 		}}
 	>
-		<GitCompare class="size-4" /> View Diff
+		<GitCompare class="size-4" />
+		{m.vmcps_view_diff()}
 	</button>
 {/if}
 {#if ctx.isCreator || profile.current.hasAdminAccess?.()}
@@ -143,7 +199,8 @@
 			toggle(false);
 		}}
 	>
-		View Audit Logs <ExternalLink class="size-4" />
+		{m.vmcps_deployments_view_audit_logs()}
+		<ExternalLink class="size-4" />
 	</a>
 	<a
 		class="menu-button justify-between"
@@ -155,7 +212,8 @@
 			toggle(false);
 		}}
 	>
-		View Usage <ExternalLink class="size-4" />
+		{m.vmcps_view_usage()}
+		<ExternalLink class="size-4" />
 	</a>
 {/if}
 {#if ctx.canDelete}
@@ -168,6 +226,6 @@
 		}}
 	>
 		<Trash2 class="size-4" />
-		Delete
+		{m.core_delete()}
 	</button>
 {/if}

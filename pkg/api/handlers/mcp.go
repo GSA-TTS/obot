@@ -21,13 +21,10 @@ import (
 	"github.com/obot-platform/obot/pkg/api"
 	gateway "github.com/obot-platform/obot/pkg/gateway/client"
 	"github.com/obot-platform/obot/pkg/mcp"
-	"github.com/obot-platform/obot/pkg/principal"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	"github.com/obot-platform/obot/pkg/system"
-	obottunnel "github.com/obot-platform/obot/pkg/tunnel"
-	"github.com/obot-platform/obot/pkg/utils"
 	"github.com/obot-platform/obot/pkg/wait"
-	"k8s.io/apimachinery/pkg/fields"
+	"gorm.io/gorm"
 	kclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -49,18 +46,30 @@ type MCPHandler struct {
 	mcpRuntimeBackend         string
 	serverURL                 string
 	secretBindingAllowedLabel string
+	forceDynamicClient        bool
 }
 
-type missingCatalogEntryAdminConfig struct {
-	SecretBoundFields []string
-	StaticOAuth       bool
+// vmcpOAuthStatus lists the vMCP components that hold an OAuth token for the
+// current user, which are the components the user can reauthenticate.
+type vmcpOAuthStatus struct {
+	AuthenticatedComponents []string `json:"authenticatedComponents"`
+}
+
+// vmcpComponentOAuthTarget identifies where the current user's OAuth token for
+// one vMCP component is stored. The URL is empty when the component is not a
+// remote server and therefore never holds a token.
+type vmcpComponentOAuthTarget struct {
+	componentID string
+	serverName  string
+	connectID   string
+	url         string
 }
 
 type urlTemplateConfigurationError struct {
 	key string
 }
 
-func NewMCPHandler(mcpLoader *mcp.SessionManager, acrHelper *accesscontrolrule.Helper, mcpOAuthChecker MCPOAuthChecker, controllerBackend nahbackend.Trigger, mcpImagePullSecrets []string, serverURL, secretBindingAllowedLabel string) *MCPHandler {
+func NewMCPHandler(mcpLoader *mcp.SessionManager, acrHelper *accesscontrolrule.Helper, mcpOAuthChecker MCPOAuthChecker, controllerBackend nahbackend.Trigger, mcpImagePullSecrets []string, serverURL, secretBindingAllowedLabel string, forceDynamicClient bool) *MCPHandler {
 	return &MCPHandler{
 		mcpSessionManager:         mcpLoader,
 		mcpOAuthChecker:           mcpOAuthChecker,
@@ -70,6 +79,7 @@ func NewMCPHandler(mcpLoader *mcp.SessionManager, acrHelper *accesscontrolrule.H
 		mcpRuntimeBackend:         mcpLoader.MCPRuntimeBackend(),
 		serverURL:                 serverURL,
 		secretBindingAllowedLabel: secretBindingAllowedLabel,
+		forceDynamicClient:        forceDynamicClient,
 	}
 }
 
@@ -84,7 +94,7 @@ func ValidationOptionsWithResourceMaximums(req api.Context, sessionManager *mcp.
 	if sessionManager == nil {
 		return mcp.ValidationOptions{}, nil
 	}
-	options := validationOptions(sessionManager.RemoteMCPURLValidationConfig())
+	options := sessionManager.ValidationOptions()
 	maximums, err := sessionManager.EffectiveKubernetesResourceMaximums(req.Context(), req.Storage)
 	if err != nil {
 		return mcp.ValidationOptions{}, err
@@ -122,7 +132,6 @@ func (m *MCPHandler) currentK8sSettingsHashWithImagePullSecrets(settings v1.K8sS
 		settings,
 		resources,
 		mcpServer.Spec.Manifest.Runtime,
-		mcpServer.Spec.NanobotAgentID != "",
 		imagePullSecretNames,
 	), nil
 }
@@ -142,7 +151,7 @@ func (m *MCPHandler) GetEntryFromAllSources(req api.Context) error {
 		return types.NewErrNotFound("MCP catalog entry not found")
 	}
 
-	return req.Write(ConvertMCPServerCatalogEntryWithWorkspace(entry, entry.Spec.PowerUserWorkspaceID, "", m.serverURL))
+	return req.Write(ConvertMCPServerCatalogEntryWithWorkspace(entry, entry.Spec.PowerUserWorkspaceID, ""))
 }
 
 func (m *MCPHandler) ListEntriesFromAllSources(req api.Context) error {
@@ -153,7 +162,7 @@ func (m *MCPHandler) ListEntriesFromAllSources(req api.Context) error {
 	minimal, _ := strconv.ParseBool(req.URL.Query().Get("minimal"))
 
 	convertEntry := func(entry v1.MCPServerCatalogEntry) types.MCPServerCatalogEntry {
-		return convertMCPServerCatalogEntryForList(entry, entry.Spec.PowerUserWorkspaceID, "", m.serverURL, minimal)
+		return convertMCPServerCatalogEntryForList(entry, entry.Spec.PowerUserWorkspaceID, "", minimal)
 	}
 
 	// Allow admins/auditors to bypass ACR filtering with ?all=true
@@ -199,13 +208,14 @@ func (m *MCPHandler) ListEntriesFromAllSources(req api.Context) error {
 	return req.Write(types.MCPServerCatalogEntryList{Items: entries})
 }
 
-func ConvertMCPServerCatalogEntry(entry v1.MCPServerCatalogEntry, serverURL string) types.MCPServerCatalogEntry {
-	return ConvertMCPServerCatalogEntryWithWorkspace(entry, "", "", serverURL)
+func ConvertMCPServerCatalogEntry(entry v1.MCPServerCatalogEntry) types.MCPServerCatalogEntry {
+	return ConvertMCPServerCatalogEntryWithWorkspace(entry, "", "")
 }
 
-func ConvertMCPServerCatalogEntryWithWorkspace(entry v1.MCPServerCatalogEntry, powerUserWorkspaceID, powerUserID, serverURL string) types.MCPServerCatalogEntry {
+func ConvertMCPServerCatalogEntryWithWorkspace(entry v1.MCPServerCatalogEntry, powerUserWorkspaceID, powerUserID string) types.MCPServerCatalogEntry {
 	// Add extracted env vars directly to the entry
 	addExtractedEnvVarsToCatalogEntry(&entry)
+	entry.Spec.Manifest.OpenAPIConfig = withoutOpenAPISchema(entry.Spec.Manifest.OpenAPIConfig)
 
 	return types.MCPServerCatalogEntry{
 		Metadata:                  MetadataFrom(&entry),
@@ -221,28 +231,20 @@ func ConvertMCPServerCatalogEntryWithWorkspace(entry v1.MCPServerCatalogEntry, p
 		PowerUserID:               powerUserID,
 		NeedsUpdate:               entry.Status.NeedsUpdate,
 		OAuthCredentialConfigured: entry.Status.OAuthCredentialConfigured,
-		ConnectURL:                defaultCatalogEntryConnectURL(serverURL, entry),
 	}
 }
 
-func convertMCPServerCatalogEntryForList(entry v1.MCPServerCatalogEntry, powerUserWorkspaceID, powerUserID, serverURL string, minimal bool) types.MCPServerCatalogEntry {
+func convertMCPServerCatalogEntryForList(entry v1.MCPServerCatalogEntry, powerUserWorkspaceID, powerUserID string, minimal bool) types.MCPServerCatalogEntry {
 	if minimal {
 		minimizeMCPServerCatalogEntryManifest(&entry.Spec.Manifest)
 	}
-	return ConvertMCPServerCatalogEntryWithWorkspace(entry, powerUserWorkspaceID, powerUserID, serverURL)
+	return ConvertMCPServerCatalogEntryWithWorkspace(entry, powerUserWorkspaceID, powerUserID)
 }
 
 func minimizeMCPServerCatalogEntryManifest(manifest *types.MCPServerCatalogEntryManifest) {
 	manifest.Description = ""
 	manifest.ToolPreview = nil
 	manifest.RepoURL = ""
-}
-
-func defaultCatalogEntryConnectURL(serverURL string, entry v1.MCPServerCatalogEntry) string {
-	if serverURL == "" {
-		return ""
-	}
-	return system.MCPConnectURL(serverURL, entry.Name)
 }
 
 func (m *MCPHandler) ListServer(req api.Context) error {
@@ -336,16 +338,10 @@ func (m *MCPHandler) ListServer(req api.Context) error {
 		// Add extracted env vars to the server definition
 		addExtractedEnvVars(&server)
 
-		slug, err := SlugForMCPServer(req.Context(), req.Storage, server, req.User.GetUID(), catalogID, workspaceID)
-		if err != nil {
-			return fmt.Errorf("failed to determine slug: %w", err)
-		}
-
-		mergedEnv, err := mcp.MergeBoundCreds(req.Context(), req.LocalK8sClient, req.ObotNamespace, server.Spec.Manifest.Config, credMap[server.Name], m.secretBindingAllowedLabel)
-		if err != nil {
+		if err := mcp.RefreshSecretBindingStatus(req.Context(), req.LocalK8sClient, req.ObotNamespace, &server, m.secretBindingAllowedLabel); err != nil {
 			return fmt.Errorf("failed to resolve secret bindings for server %s: %w", server.Name, err)
 		}
-		converted := ConvertMCPServer(server, mergedEnv, m.serverURL, slug)
+		converted := ConvertMCPServer(server, credMap[server.Name])
 		items = append(items, converted)
 	}
 
@@ -378,17 +374,11 @@ func (m *MCPHandler) GetServer(req api.Context) error {
 	if err != nil && !errors.As(err, &gateway.CredentialNotFoundError{}) {
 		return fmt.Errorf("failed to find credential: %w", err)
 	}
-	mergedEnv, err := mcp.MergeBoundCreds(req.Context(), req.LocalK8sClient, req.ObotNamespace, server.Spec.Manifest.Config, cred.Secrets, m.secretBindingAllowedLabel)
-	if err != nil {
+
+	if err := mcp.RefreshSecretBindingStatus(req.Context(), req.LocalK8sClient, req.ObotNamespace, &server, m.secretBindingAllowedLabel); err != nil {
 		return fmt.Errorf("failed to resolve secret bindings: %w", err)
 	}
-
-	slug, err := SlugForMCPServer(req.Context(), req.Storage, server, req.User.GetUID(), catalogID, workspaceID)
-	if err != nil {
-		return fmt.Errorf("failed to generate slug: %w", err)
-	}
-
-	converted := ConvertMCPServer(server, mergedEnv, m.serverURL, slug)
+	converted := ConvertMCPServer(server, cred.Secrets)
 	return req.Write(converted)
 }
 
@@ -748,247 +738,6 @@ func (m *MCPHandler) GetPrompt(req api.Context) error {
 	})
 }
 
-func mcpServerOrInstanceFromConnectURL(req api.Context, id, secretBindingAllowedLabel string, validationOptions mcp.ValidationOptions) (v1.MCPServer, v1.MCPServerInstance, error) {
-	switch {
-	case system.IsMCPServerInstanceID(id):
-		var instance v1.MCPServerInstance
-		return v1.MCPServer{}, instance, req.Get(&instance, id)
-	case system.IsMCPServerID(id):
-		var server v1.MCPServer
-		if err := req.Get(&server, id); err != nil {
-			return v1.MCPServer{}, v1.MCPServerInstance{}, err
-		}
-
-		if !server.Spec.IsSingleUser() {
-			// This is a multi-user MCP server, and user is trying to connect to it.
-			// List the MCP server instances, sort by creation time, and take the first one.
-			var instances v1.MCPServerInstanceList
-			if err := req.List(&instances, &kclient.ListOptions{
-				FieldSelector: fields.SelectorFromSet(map[string]string{
-					"spec.mcpServerName": id,
-					"spec.userID":        req.User.GetUID(),
-					"spec.template":      "false",
-					"spec.compositeName": "",
-				}),
-			}); err != nil {
-				return v1.MCPServer{}, v1.MCPServerInstance{}, err
-			}
-			if len(instances.Items) == 0 {
-				// If none exist, then create one for the user.
-				instance := v1.MCPServerInstance{
-					GenerateName: system.MCPServerInstancePrefix,
-					Namespace:    server.Namespace,
-					Spec: v1.MCPServerInstanceSpec{
-						MCPServerName:             id,
-						MCPCatalogName:            server.Spec.MCPCatalogID,
-						MCPServerCatalogEntryName: server.Spec.MCPServerCatalogEntryName,
-						PowerUserWorkspaceID:      server.Spec.PowerUserWorkspaceID,
-						UserID:                    principal.ResourceOwnerID(req.User),
-						Config:                    server.Spec.Manifest.UserConfig(),
-					},
-				}
-				if err := req.Create(&instance); err != nil {
-					return v1.MCPServer{}, v1.MCPServerInstance{}, types.NewErrNotFound("user has not configured an instance of MCP server %s", id)
-				}
-
-				instances.Items = append(instances.Items, instance)
-			}
-
-			slices.SortFunc(instances.Items, func(a, b v1.MCPServerInstance) int {
-				return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
-			})
-
-			return v1.MCPServer{}, instances.Items[0], nil
-		}
-
-		return server, v1.MCPServerInstance{}, nil
-	default:
-		// In this case, id refers to a catalog entry.
-		// Get the catalog entry to make sure it's valid
-		var entry v1.MCPServerCatalogEntry
-		if err := req.Get(&entry, id); err != nil {
-			return v1.MCPServer{}, v1.MCPServerInstance{}, types.NewErrNotFound("catalog entry %s not found", id)
-		}
-		addExtractedEnvVarsToCatalogEntry(&entry)
-
-		// List the MCP servers for the user and take the first one.
-		var servers v1.MCPServerList
-		if err := req.List(&servers, &kclient.ListOptions{
-			FieldSelector: fields.SelectorFromSet(map[string]string{
-				"spec.mcpServerCatalogEntryName": id,
-				"spec.userID":                    req.User.GetUID(),
-				"spec.template":                  "false",
-				"spec.compositeName":             "",
-			}),
-		}); err != nil {
-			return v1.MCPServer{}, v1.MCPServerInstance{}, err
-		}
-		servers.Items = slices.DeleteFunc(servers.Items, func(server v1.MCPServer) bool {
-			return server.Spec.VMCPID != "" || server.Spec.VMCPInstanceID != ""
-		})
-		if len(servers.Items) == 0 {
-			// If the user has not configured an MCP server for the catalog entry, create a server for the user.
-			missingAdminConfig, err := entryMissingAdminConfig(req.Context(), req.LocalK8sClient, req.ObotNamespace, entry, secretBindingAllowedLabel)
-			if err != nil {
-				return v1.MCPServer{}, v1.MCPServerInstance{}, fmt.Errorf("failed to determine required admin configuration for catalog entry %s: %w", id, err)
-			}
-			if err := missingAdminConfig.err(id); err != nil {
-				return v1.MCPServer{}, v1.MCPServerInstance{}, err
-			}
-
-			// Convert the catalog entry manifest to a server manifest. Treat the user as non-admin always.
-			allowMissingURL := catalogEntryRequiresUserURL(entry.Spec.Manifest)
-			manifest, err := serverManifestFromCatalogEntryManifest(false, allowMissingURL, entry.Spec.Manifest, types.MCPServerManifest{})
-			if err != nil {
-				return v1.MCPServer{}, v1.MCPServerInstance{}, types.NewErrBadRequest("catalog entry %s cannot be connected because it could not be converted to an MCP server: %v", id, err)
-			}
-			if err := mcp.ValidateServerManifest(req.Context(), manifest, false, validationOptions); err != nil {
-				return v1.MCPServer{}, v1.MCPServerInstance{}, types.NewErrBadRequest("catalog entry %s cannot be connected because its MCP server manifest is invalid: %v", id, err)
-			}
-			if err := obottunnel.ValidateServerTunnelReferences(req.Context(), req.Storage, manifest); err != nil {
-				return v1.MCPServer{}, v1.MCPServerInstance{}, types.NewErrBadRequest("catalog entry %s cannot be connected because its tunnel configuration is invalid: %v", id, err)
-			}
-
-			// Create a new MCP server for the user.
-			server := v1.MCPServer{
-				GenerateName: system.MCPServerPrefix,
-				Namespace:    req.Namespace(),
-				Spec: v1.MCPServerSpec{
-					Manifest:                  manifest,
-					UnsupportedTools:          entry.Spec.UnsupportedTools,
-					MCPServerCatalogEntryName: id,
-					UserID:                    req.User.GetUID(),
-					NeedsURL:                  allowMissingURL && (manifest.RemoteConfig == nil || manifest.RemoteConfig.URL == ""),
-				},
-			}
-			if err := req.Create(&server); err != nil {
-				return v1.MCPServer{}, v1.MCPServerInstance{}, fmt.Errorf("failed to create MCP server for catalog entry %s: %w", id, err)
-			}
-
-			servers.Items = append(servers.Items, server)
-		}
-
-		slices.SortFunc(servers.Items, func(a, b v1.MCPServer) int {
-			return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
-		})
-
-		server := servers.Items[0]
-		if syncConnectServerRemoteConfigFromCatalogEntry(&server, entry) {
-			if err := req.Update(&server); err != nil {
-				return v1.MCPServer{}, v1.MCPServerInstance{}, fmt.Errorf("failed to update MCP server configuration from catalog entry %s: %w", id, err)
-			}
-		}
-
-		return server, v1.MCPServerInstance{}, nil
-	}
-}
-
-func (m missingCatalogEntryAdminConfig) err(entryID string) error {
-	var parts []string
-	if len(m.SecretBoundFields) > 0 {
-		parts = append(parts, fmt.Sprintf("required Kubernetes Secret bindings are missing or empty for %s", strings.Join(m.SecretBoundFields, ", ")))
-	}
-	if m.StaticOAuth {
-		parts = append(parts, "required static OAuth credentials have not been configured")
-	}
-	if len(parts) == 0 {
-		return nil
-	}
-	return types.NewErrBadRequest("catalog entry %s cannot be connected because %s", entryID, strings.Join(parts, "; "))
-}
-
-func entryMissingAdminConfig(ctx context.Context, client kclient.Client, obotNamespace string, entry v1.MCPServerCatalogEntry, secretBindingAllowedLabel string) (missingCatalogEntryAdminConfig, error) {
-	missing := missingCatalogEntryAdminConfig{
-		StaticOAuth: entryRequiresStaticOAuthCreds(entry),
-	}
-
-	type manifestRef struct {
-		prefix   string
-		manifest types.MCPServerCatalogEntryManifest
-	}
-
-	manifests := []manifestRef{{manifest: entry.Spec.Manifest}}
-	for _, ref := range manifests {
-		cm := ref.manifest
-		missingBindings, err := mcp.MissingSecretBindings(ctx, client, obotNamespace, cm.Config, secretBindingAllowedLabel)
-		if err != nil {
-			return missing, err
-		}
-		for _, binding := range missingBindings {
-			missing.SecretBoundFields = append(missing.SecretBoundFields, secretBoundFieldLabel(ref.prefix, binding.Kind, binding.Header))
-		}
-	}
-
-	return missing, nil
-}
-
-func secretBoundFieldLabel(prefix, kind string, h types.MCPHeader) string {
-	key := h.Key
-	if key == "" {
-		key = h.Name
-	}
-	if key == "" {
-		key = "<unknown>"
-	}
-	if prefix != "" {
-		return fmt.Sprintf("component %s %s %s", prefix, kind, key)
-	}
-	return fmt.Sprintf("%s %s", kind, key)
-}
-
-func catalogEntryRequiresUserURL(manifest types.MCPServerCatalogEntryManifest) bool {
-	if manifest.Runtime == types.RuntimeRemote &&
-		manifest.RemoteConfig != nil &&
-		(manifest.RemoteConfig.Hostname != "" || manifest.RemoteConfig.URLTemplate != "") {
-		return true
-	}
-	return false
-}
-
-func syncConnectServerRemoteConfigFromCatalogEntry(server *v1.MCPServer, entry v1.MCPServerCatalogEntry) bool {
-	if server.Spec.Manifest.Runtime != types.RuntimeRemote || entry.Spec.Manifest.Runtime != types.RuntimeRemote || entry.Spec.Manifest.RemoteConfig == nil {
-		return false
-	}
-
-	before := utils.Digest(server.Spec)
-	entryRemote := entry.Spec.Manifest.RemoteConfig
-	if server.Spec.Manifest.RemoteConfig == nil {
-		server.Spec.Manifest.RemoteConfig = new(types.RemoteRuntimeConfig)
-	}
-	serverRemote := server.Spec.Manifest.RemoteConfig
-
-	server.Spec.Manifest.Config = slices.Clone(entry.Spec.Manifest.Config)
-	server.Spec.Manifest.StaticConfigurationRevision = entry.Spec.Manifest.StaticConfigurationRevision
-	serverRemote.StaticOAuthRequired = entryRemote.StaticOAuthRequired
-	serverRemote.TunnelName = entryRemote.TunnelName
-	switch {
-	case entryRemote.Hostname != "":
-		serverRemote.Hostname = entryRemote.Hostname
-		serverRemote.IsTemplate = false
-		serverRemote.URLTemplate = ""
-		if serverRemote.URL == "" {
-			server.Spec.NeedsURL = true
-		} else if err := types.ValidateURLHostname(serverRemote.URL, entryRemote.Hostname); err != nil {
-			server.Spec.NeedsURL = true
-			server.Spec.PreviousURL = serverRemote.URL
-			serverRemote.URL = ""
-		} else {
-			server.Spec.NeedsURL = false
-			server.Spec.PreviousURL = ""
-		}
-	case entryRemote.URLTemplate != "":
-		serverRemote.IsTemplate = true
-		serverRemote.URLTemplate = entryRemote.URLTemplate
-		serverRemote.Hostname = ""
-		server.Spec.NeedsURL = serverRemote.URL == ""
-		if !server.Spec.NeedsURL {
-			server.Spec.PreviousURL = ""
-		}
-	}
-
-	return before != utils.Digest(server.Spec)
-}
-
 // validateServerScope checks that the catalog_id or workspace_id in the request URL matches the server.
 // This prevents catalog- or workspace-scoped routes from operating on servers in a different scope.
 func validateServerScope(req api.Context, server v1.MCPServer) error {
@@ -1040,74 +789,6 @@ func (m *MCPHandler) aggregateComponentServersForAction(req api.Context, server 
 		return components, nil
 	}
 	return nil, nil
-}
-
-// serverManifestFromCatalogEntryManifest converts a catalog entry manifest to a server manifest.
-// If the user is an admin, they can override anything from the catalog entry.
-func serverManifestFromCatalogEntryManifest(
-	isAdmin bool,
-	disableHostnameValidation bool,
-	entry types.MCPServerCatalogEntryManifest,
-	input types.MCPServerManifest,
-) (types.MCPServerManifest, error) {
-	var userURL string
-	if entry.Runtime == types.RuntimeRemote && entry.RemoteConfig != nil && entry.RemoteConfig.Hostname != "" && input.RemoteConfig != nil {
-		userURL = input.RemoteConfig.URL
-	}
-	result, err := types.MapCatalogEntryToServer(entry, userURL, disableHostnameValidation)
-	if err != nil {
-		return types.MCPServerManifest{}, err
-	}
-	if isAdmin {
-		result = mergeMCPServerManifests(result, input)
-	}
-	return *result.DeepCopy(), nil
-}
-
-func mergeMCPServerManifests(existing, override types.MCPServerManifest) types.MCPServerManifest {
-	if override.Name != "" {
-		existing.Name = override.Name
-	}
-	if override.ShortDescription != "" {
-		existing.ShortDescription = override.ShortDescription
-	}
-	if override.Description != "" {
-		existing.Description = override.Description
-	}
-	if override.Icon != "" {
-		existing.Icon = override.Icon
-	}
-	if len(override.Config) > 0 {
-		existing.Config = override.Config
-	}
-	if override.Resources != nil {
-		existing.Resources = override.Resources
-	}
-	if override.Runtime != "" {
-		existing.Runtime = override.Runtime
-	}
-
-	// Merge runtime-specific configurations
-	if override.UVXConfig != nil {
-		existing.UVXConfig = override.UVXConfig
-	}
-	if override.NPXConfig != nil {
-		existing.NPXConfig = override.NPXConfig
-	}
-	if override.ContainerizedConfig != nil {
-		existing.ContainerizedConfig = override.ContainerizedConfig
-	}
-	if override.RemoteConfig != nil {
-		if existing.RemoteConfig == nil {
-			existing.RemoteConfig = override.RemoteConfig
-		} else {
-			if override.RemoteConfig.URL != "" {
-				existing.RemoteConfig.URL = override.RemoteConfig.URL
-			}
-		}
-	}
-
-	return existing
 }
 
 func (m *MCPHandler) triggerMCPServerControllers(ctx context.Context, serverName string) error {
@@ -1330,16 +1011,23 @@ func addExtractedEnvVarsToCatalogEntryManifest(manifest *types.MCPServerCatalogE
 	}
 }
 
-func ConvertMCPServer(server v1.MCPServer, credEnv map[string]string, serverURL, slug string) types.MCPServer {
+func ConvertMCPServer(server v1.MCPServer, credEnv map[string]string) types.MCPServer {
 	var missingEnvVars, missingHeaders []string
 
 	for _, field := range server.Spec.Manifest.Config {
 		if field.UserAllowed {
 			continue
 		}
-		configuredValue := credEnv[field.Key]
-		missingRequired := field.Required && !field.Static && configuredValue == ""
-		invalidSelection := configuredValue != "" && !mcp.ConfigurationOptionValueValid(field.ToHeader(), credEnv)
+		var missingRequired, invalidSelection bool
+		if field.SecretBinding != nil {
+			// The controller records bindings it cannot resolve. Callers refresh a status the
+			// controller has not caught up with by calling mcp.RefreshSecretBindingStatus.
+			missingRequired = field.Required && !field.Static && slices.Contains(server.Status.UnresolvedSecretBindings, field.Key)
+		} else {
+			configuredValue := credEnv[field.Key]
+			missingRequired = field.Required && !field.Static && configuredValue == ""
+			invalidSelection = configuredValue != "" && !mcp.ConfigurationOptionValueValid(field.ToHeader(), credEnv)
+		}
 		if missingRequired || invalidSelection {
 			if field.Usage == types.Header {
 				missingHeaders = append(missingHeaders, field.Key)
@@ -1357,16 +1045,6 @@ func ConvertMCPServer(server v1.MCPServer, credEnv map[string]string, serverURL,
 		missingOAuth = !server.Status.OAuthCredentialConfigured
 	}
 
-	var connectURL string
-	if serverURL != "" {
-		if server.Spec.IsSingleUser() {
-			connectURL = system.MCPConnectURL(serverURL, slug)
-		} else {
-			// Multi-user servers expose a default connect URL that auto-provisions an instance on first use.
-			connectURL = system.MCPConnectURL(serverURL, server.Name)
-		}
-	}
-
 	conditions := make([]types.DeploymentCondition, 0, len(server.Status.DeploymentConditions))
 	for _, cond := range server.Status.DeploymentConditions {
 		conditions = append(conditions, types.DeploymentCondition{
@@ -1378,6 +1056,8 @@ func ConvertMCPServer(server v1.MCPServer, credEnv map[string]string, serverURL,
 			LastUpdateTime:     *types.NewTime(cond.LastUpdateTime.Time),
 		})
 	}
+
+	server.Spec.Manifest.OpenAPIConfig = withoutOpenAPISchema(server.Spec.Manifest.OpenAPIConfig)
 
 	converted := types.MCPServer{
 		Metadata:                    MetadataFrom(&server),
@@ -1391,8 +1071,6 @@ func ConvertMCPServer(server v1.MCPServer, credEnv map[string]string, serverURL,
 		CatalogEntryID:              server.Spec.MCPServerCatalogEntryName,
 		PowerUserWorkspaceID:        server.Spec.PowerUserWorkspaceID,
 		MCPCatalogID:                server.Spec.MCPCatalogID,
-		ConnectURL:                  connectURL,
-		NeedsUpdate:                 server.Status.NeedsUpdate,
 		NeedsK8sUpdate:              server.Status.NeedsK8sUpdate,
 		NeedsURL:                    server.Spec.NeedsURL,
 		PreviousURL:                 server.Spec.PreviousURL,
@@ -1409,7 +1087,6 @@ func ConvertMCPServer(server v1.MCPServer, credEnv map[string]string, serverURL,
 		VMCPID:                      server.Spec.VMCPID,
 		VMCPInstanceID:              server.Spec.VMCPInstanceID,
 		VMCPComponentID:             server.Spec.VMCPComponentID,
-		NanobotAgentID:              server.Spec.NanobotAgentID,
 	}
 
 	if server.Spec.IsSingleUser() {
@@ -1421,52 +1098,13 @@ func ConvertMCPServer(server v1.MCPServer, credEnv map[string]string, serverURL,
 	return converted
 }
 
-func ConfigurationTargetForConnectID(req api.Context, id, serverURL, secretBindingAllowedLabel string, validationOptions mcp.ValidationOptions) (*types.MCPServer, *types.MCPServerInstance, error) {
-	server, instance, err := mcpServerOrInstanceFromConnectURL(req, id, secretBindingAllowedLabel, validationOptions)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if instance.Name != "" {
-		credEnv, err := mcpServerInstanceCredEnv(req, instance)
-		if err != nil {
-			return nil, nil, err
-		}
-		slug, err := SlugForMCPServerInstance(req.Context(), req.Storage, instance)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to determine MCP server instance slug: %w", err)
-		}
-		converted := ConvertMCPServerInstance(instance, credEnv, serverURL, slug)
-		return nil, &converted, nil
-	}
-
-	credEnv, err := credentialEnvForMCPServer(req, server, secretBindingAllowedLabel)
-	if err != nil {
-		return nil, nil, err
-	}
-	slug, err := SlugForMCPServer(req.Context(), req.Storage, server, req.User.GetUID(), server.Spec.MCPCatalogID, server.Spec.PowerUserWorkspaceID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to determine MCP server slug: %w", err)
-	}
-
-	converted := ConvertMCPServer(server, credEnv, serverURL, slug)
-	return &converted, nil, nil
-}
-
-func credentialEnvForMCPServer(req api.Context, server v1.MCPServer, secretBindingAllowedLabel string) (map[string]string, error) {
-	addExtractedEnvVars(&server)
-
+func credentialEnvForMCPServer(req api.Context, server v1.MCPServer) (map[string]string, error) {
 	cred, err := req.GatewayClient.RevealCredential(req.Context(), []string{server.CredentialContext(server.Spec.UserID)}, server.Name)
 	if err != nil && !errors.As(err, &gateway.CredentialNotFoundError{}) {
 		return nil, fmt.Errorf("failed to find credential: %w", err)
 	}
 
-	mergedEnv, err := mcp.MergeBoundCreds(req.Context(), req.LocalK8sClient, req.ObotNamespace, server.Spec.Manifest.Config, cred.Secrets, secretBindingAllowedLabel)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve secret bindings: %w", err)
-	}
-
-	return mergedEnv, nil
+	return cred.Secrets, nil
 }
 
 func convertOAuthMetadata(metadata *v1.OAuthMetadata) *types.OAuthMetadata {
@@ -1488,42 +1126,6 @@ func convertOAuthMetadata(metadata *v1.OAuthMetadata) *types.OAuthMetadata {
 		ClientRegistration:                registration,
 		ClientIDMetadataDocumentSupported: metadata.ClientIDMetadataDocumentSupported,
 	}
-}
-
-func SlugForMCPServer(ctx context.Context, client kclient.Client, server v1.MCPServer, userID, catalogID, workspaceID string) (string, error) {
-	if server.Spec.VMCPID != "" || server.Spec.VMCPInstanceID != "" {
-		return server.Name, nil
-	}
-	var shouldHaveUnique bool
-	if workspaceID == "" && catalogID == "" && server.Spec.MCPServerCatalogEntryName != "" {
-		var serversWithEntryName v1.MCPServerList
-		if err := client.List(ctx, &serversWithEntryName, &kclient.ListOptions{
-			FieldSelector: fields.SelectorFromSet(map[string]string{
-				"spec.mcpServerCatalogEntryName": server.Spec.MCPServerCatalogEntryName,
-				"spec.userID":                    userID,
-				"spec.template":                  "false",
-				"spec.compositeName":             "",
-			}),
-		}); err != nil {
-			return "", fmt.Errorf("failed to find MCP server catalog entry for server: %w", err)
-		}
-		serversWithEntryName.Items = slices.DeleteFunc(serversWithEntryName.Items, func(server v1.MCPServer) bool {
-			return server.Spec.VMCPID != "" || server.Spec.VMCPInstanceID != ""
-		})
-
-		slices.SortFunc(serversWithEntryName.Items, func(a, b v1.MCPServer) int {
-			return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
-		})
-
-		shouldHaveUnique = len(serversWithEntryName.Items) != 0 && serversWithEntryName.Items[0].Name != server.Name
-	}
-
-	slug := server.Spec.MCPServerCatalogEntryName
-	if shouldHaveUnique || server.Spec.MCPServerCatalogEntryName == "" {
-		slug = server.Name
-	}
-
-	return slug, nil
 }
 
 func (m *MCPHandler) ListServersFromAllSources(req api.Context) error {
@@ -1599,7 +1201,6 @@ func (m *MCPHandler) ListServersFromAllSources(req api.Context) error {
 
 	mcpServers := make([]types.MCPServer, 0, len(allowedServers))
 
-	var slug string
 	for _, server := range allowedServers {
 		addExtractedEnvVars(&server)
 		// Enrich with tool preview data if catalog entry exists
@@ -1609,16 +1210,10 @@ func (m *MCPHandler) ListServersFromAllSources(req api.Context) error {
 			server.Spec.Manifest.ToolPreview = entry.Spec.Manifest.ToolPreview
 		}
 
-		slug, err = SlugForMCPServer(req.Context(), req.Storage, server, req.User.GetUID(), system.DefaultCatalog, server.Spec.PowerUserWorkspaceID)
-		if err != nil {
-			return fmt.Errorf("failed to generate slug: %w", err)
-		}
-
-		mergedEnv, err := mcp.MergeBoundCreds(req.Context(), req.LocalK8sClient, req.ObotNamespace, server.Spec.Manifest.Config, credMap[server.Name], m.secretBindingAllowedLabel)
-		if err != nil {
+		if err := mcp.RefreshSecretBindingStatus(req.Context(), req.LocalK8sClient, req.ObotNamespace, &server, m.secretBindingAllowedLabel); err != nil {
 			return fmt.Errorf("failed to resolve secret bindings for server %s: %w", server.Name, err)
 		}
-		parent := ConvertMCPServer(server, mergedEnv, m.serverURL, slug)
+		parent := ConvertMCPServer(server, credMap[server.Name])
 		mcpServers = append(mcpServers, parent)
 	}
 
@@ -1659,17 +1254,10 @@ func (m *MCPHandler) GetServerFromAllSources(req api.Context) error {
 		// Don't fail if catalog entry is missing, just continue without preview
 	}
 
-	mergedEnv, err := mcp.MergeBoundCreds(req.Context(), req.LocalK8sClient, req.ObotNamespace, server.Spec.Manifest.Config, cred.Secrets, m.secretBindingAllowedLabel)
-	if err != nil {
+	if err := mcp.RefreshSecretBindingStatus(req.Context(), req.LocalK8sClient, req.ObotNamespace, &server, m.secretBindingAllowedLabel); err != nil {
 		return fmt.Errorf("failed to resolve secret bindings: %w", err)
 	}
-
-	slug, err := SlugForMCPServer(req.Context(), req.Storage, server, req.User.GetUID(), server.Spec.MCPCatalogID, server.Spec.PowerUserWorkspaceID)
-	if err != nil {
-		return fmt.Errorf("failed to generate slug: %w", err)
-	}
-
-	return req.Write(ConvertMCPServer(server, mergedEnv, m.serverURL, slug))
+	return req.Write(ConvertMCPServer(server, cred.Secrets))
 }
 
 func (m *MCPHandler) ClearOAuthCredentials(req api.Context) error {
@@ -1678,48 +1266,42 @@ func (m *MCPHandler) ClearOAuthCredentials(req api.Context) error {
 	mcpServerID := mcpActionID(req)
 
 	if system.IsVMCPID(mcpServerID) {
-		server, serverConfig, err := m.mcpSessionManager.ServerForAction(req.Context(), mcpServerID, req.User)
+		// An optional component ID limits the reset to that one component, so
+		// users can reauthenticate it without discarding the others' tokens.
+		componentID := req.PathValue("component_id")
+
+		targets, err := m.vmcpComponentOAuthTargets(req, mcpServerID, catalogID, workspaceID)
 		if err != nil {
 			return err
 		}
 
-		// vMCPs are synthetic MCP servers and intentionally have no catalog or
-		// workspace scope. Keep the same scope check as the legacy endpoint so
-		// scoped routes cannot address an unrelated vMCP.
-		if server.Spec.MCPCatalogID != catalogID || server.Spec.PowerUserWorkspaceID != workspaceID {
-			return types.NewErrNotFound("MCP server not found")
-		}
-
-		componentServers, err := m.aggregateComponentServersForAction(req, server, serverConfig)
-		if err != nil {
-			return err
-		}
-
-		for i, component := range componentServers {
-			if component.Spec.Manifest.Runtime != types.RuntimeRemote ||
-				component.Spec.Manifest.RemoteConfig == nil {
+		var componentFound bool
+		for _, target := range targets {
+			if componentID != "" {
+				if target.componentID != componentID {
+					continue
+				}
+				componentFound = true
+			}
+			if target.url == "" {
 				continue
 			}
 
-			componentServer, componentConfig, err := m.mcpSessionManager.ServerForAction(req.Context(), serverConfig.Components[i].ConnectID(), req.User)
-			if err != nil {
-				return fmt.Errorf("failed to get config for vMCP component server %s: %w", component.Name, err)
-			}
-			if componentConfig.Runtime != types.RuntimeRemote {
-				continue
-			}
-			componentURL := componentConfig.URL
-			if componentURL == "" {
-				componentURL = component.Spec.Manifest.RemoteConfig.URL
-			}
-
-			if err := req.GatewayClient.DeleteMCPOAuthTokenForURL(req.Context(), req.User.GetUID(), serverConfig.Components[i].ConnectID(), componentURL); err != nil {
+			// The connect ID belongs to this user's connection to this component, so
+			// every token under it is this component's. Clearing them all, rather than
+			// only the current URL's, removes a token saved before the URL changed,
+			// which token lookups would otherwise still fall back to.
+			if err := req.GatewayClient.DeleteMCPOAuthTokens(req.Context(), req.User.GetUID(), target.connectID); err != nil {
 				return fmt.Errorf("failed to delete OAuth credentials: %v", err)
 			}
 
-			if err := m.triggerMCPServerControllers(req.Context(), componentServer.Name); err != nil {
+			if err := m.triggerMCPServerControllers(req.Context(), target.serverName); err != nil {
 				return fmt.Errorf("failed to trigger MCP server reconciliation: %w", err)
 			}
+		}
+
+		if componentID != "" && !componentFound {
+			return types.NewErrNotFound("vMCP component %q not found", componentID)
 		}
 
 		req.WriteHeader(http.StatusNoContent)
@@ -1750,6 +1332,70 @@ func (m *MCPHandler) ClearOAuthCredentials(req api.Context) error {
 
 	req.WriteHeader(http.StatusNoContent)
 	return nil
+}
+
+func (m *MCPHandler) GetVMCPOAuthStatus(req api.Context) error {
+	targets, err := m.vmcpComponentOAuthTargets(req, req.PathValue("vmcp_id"), "", "")
+	if err != nil {
+		return err
+	}
+
+	status := vmcpOAuthStatus{AuthenticatedComponents: []string{}}
+	for _, target := range targets {
+		if target.url == "" {
+			continue
+		}
+		if _, err := req.GatewayClient.GetMCPOAuthToken(req.Context(), req.User.GetUID(), target.connectID, target.url); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				continue
+			}
+			return fmt.Errorf("failed to get OAuth token for vMCP component %s: %w", target.componentID, err)
+		}
+		status.AuthenticatedComponents = append(status.AuthenticatedComponents, target.componentID)
+	}
+
+	return req.Write(status)
+}
+
+func (m *MCPHandler) vmcpComponentOAuthTargets(req api.Context, vmcpID, catalogID, workspaceID string) ([]vmcpComponentOAuthTarget, error) {
+	server, serverConfig, err := m.mcpSessionManager.ServerForAction(req.Context(), vmcpID, req.User)
+	if err != nil {
+		return nil, err
+	}
+
+	// vMCPs are synthetic MCP servers and intentionally have no catalog or
+	// workspace scope. Keep the same scope check as the legacy endpoint so
+	// scoped routes cannot address an unrelated vMCP.
+	if server.Spec.MCPCatalogID != catalogID || server.Spec.PowerUserWorkspaceID != workspaceID {
+		return nil, types.NewErrNotFound("MCP server not found")
+	}
+
+	componentServers, err := m.aggregateComponentServersForAction(req, server, serverConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	targets := make([]vmcpComponentOAuthTarget, 0, len(componentServers))
+	for i, component := range componentServers {
+		target := vmcpComponentOAuthTarget{
+			componentID: component.Spec.VMCPComponentID,
+			serverName:  component.Name,
+			connectID:   serverConfig.Components[i].ConnectID(),
+		}
+		if component.Spec.Manifest.Runtime == types.RuntimeRemote && component.Spec.Manifest.RemoteConfig != nil {
+			componentServer, componentConfig, err := m.mcpSessionManager.ServerForAction(req.Context(), target.connectID, req.User)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get config for vMCP component server %s: %w", component.Name, err)
+			}
+			if componentConfig.Runtime == types.RuntimeRemote {
+				target.serverName = componentServer.Name
+				target.url = cmp.Or(componentConfig.URL, component.Spec.Manifest.RemoteConfig.URL)
+			}
+		}
+		targets = append(targets, target)
+	}
+
+	return targets, nil
 }
 
 func (m *MCPHandler) GetServerDetails(req api.Context) error {
@@ -2011,18 +1657,12 @@ func (m *MCPHandler) RedeployWithK8sSettings(req api.Context) error {
 		return fmt.Errorf("failed to find credential: %w", err)
 	}
 
-	mergedEnv, err := mcp.MergeBoundCreds(req.Context(), req.LocalK8sClient, req.ObotNamespace, server.Spec.Manifest.Config, cred.Secrets, m.secretBindingAllowedLabel)
-	if err != nil {
+	if err := mcp.RefreshSecretBindingStatus(req.Context(), req.LocalK8sClient, req.ObotNamespace, &server, m.secretBindingAllowedLabel); err != nil {
 		return fmt.Errorf("failed to resolve secret bindings: %w", err)
 	}
 
-	slug, err := SlugForMCPServer(req.Context(), req.Storage, server, req.User.GetUID(), catalogID, workspaceID)
-	if err != nil {
-		return fmt.Errorf("failed to generate slug: %w", err)
-	}
-
 	// Return updated server
-	return req.Write(ConvertMCPServer(server, mergedEnv, m.serverURL, slug))
+	return req.Write(ConvertMCPServer(server, cred.Secrets))
 }
 
 // ListServersNeedingK8sUpdateInCatalog lists all servers in a catalog that need redeployment with new K8s settings
@@ -2271,17 +1911,12 @@ func (m *MCPHandler) ListServerInstances(req api.Context) error {
 	// Convert instances to API types
 	convertedInstances := make([]types.MCPServerInstance, 0, len(filteredInstances))
 	for _, instance := range filteredInstances {
-		slug, err := SlugForMCPServerInstance(req.Context(), req.Storage, instance)
-		if err != nil {
-			return fmt.Errorf("failed to determine slug for instance %s: %w", instance.Name, err)
-		}
-
 		credEnv, err := mcpServerInstanceCredEnv(req, instance)
 		if err != nil {
 			return err
 		}
 
-		convertedInstances = append(convertedInstances, ConvertMCPServerInstance(instance, credEnv, m.serverURL, slug))
+		convertedInstances = append(convertedInstances, ConvertMCPServerInstance(instance, credEnv))
 	}
 
 	return req.Write(types.MCPServerInstanceList{

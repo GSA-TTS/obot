@@ -43,8 +43,9 @@ const (
 )
 
 type Options struct {
-	MCPBaseImage                      string   `usage:"The base image to use for MCP containers" default:"ghcr.io/obot-platform/mcp-images/stdio-wrapper:v0.26.1"`
-	MCPHTTPWebhookBaseImage           string   `usage:"The base image to use for HTTP-based MCP webhook containers" default:"ghcr.io/obot-platform/mcp-images/http-webhook-mcp-converter:v0.26.1"`
+	MCPOpenAPIImage                   string   `usage:"Container image for the hosted OpenAPI runtime" default:"ghcr.io/obot-platform/mcp-images/openapi-mcp:v0.27.2"`
+	MCPBaseImage                      string   `usage:"The base image to use for MCP containers" default:"ghcr.io/obot-platform/mcp-images/stdio-wrapper:v0.26.2"`
+	MCPHTTPWebhookBaseImage           string   `usage:"The base image to use for HTTP-based MCP webhook containers" default:"ghcr.io/obot-platform/mcp-images/http-webhook-mcp-converter:v0.26.2"`
 	MCPNamespace                      string   `usage:"The namespace to use for MCP containers" default:"obot-mcp"`
 	MCPClusterDomain                  string   `usage:"The cluster domain to use for MCP containers" default:"cluster.local"`
 	DisallowLocalhostMCP              bool     `usage:"Disallow MCP containers from connecting to localhost" default:"true"`
@@ -55,20 +56,16 @@ type Options struct {
 	MCPImagePullSecrets               []string `usage:"The name of the image pull secret to use for pulling MCP images"`
 	SingleUserIdleServerShutdownHours int      `usage:"The interval in hours to check for idle MCP servers designated to a single user and shut them down, set to -1 to disable shutdown" default:"24"`
 	MultiUserIdleServerShutdownHours  int      `usage:"The interval in hours to check for idle multi-user MCP servers and shut them down, set to -1 to disable" default:"168"`
-	IdleAgentShutdownHours            int      `usage:"The interval in hours to check for idle agents and shut them down, set to -1 to disable" default:"72"`
 
 	// Kubernetes settings from Helm
-	MCPK8sSettingsAffinity              string `usage:"Affinity rules for MCP server pods (JSON)"`
-	MCPK8sSettingsTolerations           string `usage:"Tolerations for MCP server pods (JSON)"`
-	MCPK8sSettingsResources             string `usage:"Resource requests/limits for MCP server pods (JSON)"`
-	MCPK8sSettingsNanobotAgentResources string `usage:"Resource requests/limits for NanobotAgent pods (JSON)"`
-	MCPK8sSettingsRuntimeClassName      string `usage:"RuntimeClass name for MCP server pods (e.g., gvisor, kata)"`
-	MCPK8sSettingsStorageClassName      string `usage:"StorageClass name for nanobot workspace volumes"`
-	MCPK8sSettingsNanobotWorkspaceSize  string `usage:"Nanobot workspace size for MCP server pods (e.g., 1Gi)"`
-	MCPK8sMaxCPURequest                 string `usage:"Maximum CPU request allowed for normal MCP server pods"`
-	MCPK8sMaxCPULimit                   string `usage:"Maximum CPU limit allowed for normal MCP server pods"`
-	MCPK8sMaxMemoryRequest              string `usage:"Maximum memory request allowed for normal MCP server pods"`
-	MCPK8sMaxMemoryLimit                string `usage:"Maximum memory limit allowed for normal MCP server pods"`
+	MCPK8sSettingsAffinity         string `usage:"Affinity rules for MCP server pods (JSON)"`
+	MCPK8sSettingsTolerations      string `usage:"Tolerations for MCP server pods (JSON)"`
+	MCPK8sSettingsResources        string `usage:"Resource requests/limits for MCP server pods (JSON)"`
+	MCPK8sSettingsRuntimeClassName string `usage:"RuntimeClass name for MCP server pods (e.g., gvisor, kata)"`
+	MCPK8sMaxCPURequest            string `usage:"Maximum CPU request allowed for normal MCP server pods"`
+	MCPK8sMaxCPULimit              string `usage:"Maximum CPU limit allowed for normal MCP server pods"`
+	MCPK8sMaxMemoryRequest         string `usage:"Maximum memory request allowed for normal MCP server pods"`
+	MCPK8sMaxMemoryLimit           string `usage:"Maximum memory limit allowed for normal MCP server pods"`
 
 	// Obot service configuration for constructing internal service FQDN
 	ServiceName      string `usage:"The Kubernetes service name for the obot server"`
@@ -93,6 +90,7 @@ type Options struct {
 }
 
 type SessionManager struct {
+	devMode                   bool
 	backend                   backend
 	runtimeBackend            string
 	contextLock               sync.Mutex
@@ -107,7 +105,9 @@ type SessionManager struct {
 	resourceMaximums          ResourceMaximums
 	storageClient             kclient.WithWatch
 	gatewayClient             *gateway.Client
-	localK8sClient            kclient.Client
+	// localCachedClient reads from the local router's cache, so lookups made on
+	// every request, such as resolving secret bindings, never reach the API server.
+	localCachedClient         kclient.Client
 	obotNamespace             string
 	secretBindingAllowedLabel string
 	tunnelManager             *tunnel.Manager
@@ -138,16 +138,34 @@ type RemoteMCPURLValidationConfig struct {
 	AllowedHosts []string
 }
 
-func NewSessionManager(ctx context.Context, authEnabled bool, globalTokenStore GlobalTokenStore, tokenService *persistent.TokenService, baseURL string, httpListenPort int, opts Options, webhookHelper *WebhookHelper, localK8sConfig *rest.Config, client, cachedClient, obotStorageClient kclient.WithWatch, gatewayClient *gateway.Client, obotNamespace string, tunnelManager *tunnel.Manager) (*SessionManager, error) {
+// SafeHTTPOptions applies the remote MCP address policy to HTTP clients and URL checks.
+func (c RemoteMCPURLValidationConfig) SafeHTTPOptions() safehttp.Options {
+	return safehttp.Options{
+		BlockLoopback:  !c.AllowLocalhostMCP,
+		BlockPrivateIP: !c.AllowPrivateIPMCP,
+		BlockLinkLocal: !c.AllowLinkLocalMCP,
+	}
+}
+
+func NewSessionManager(ctx context.Context, authEnabled, devMode bool, globalTokenStore GlobalTokenStore, tokenService *persistent.TokenService, baseURL string, httpListenPort int, opts Options, webhookHelper *WebhookHelper, localK8sConfig *rest.Config, client, cachedClient, obotStorageClient kclient.WithWatch, gatewayClient *gateway.Client, obotNamespace string, tunnelManager *tunnel.Manager) (*SessionManager, error) {
 	var backend backend
 	resourceMaximums, err := ParseResourceMaximums(opts)
 	if err != nil {
 		return nil, err
 	}
 
+	validationOptions := ValidationOptions{
+		DevMode: devMode,
+		RemoteMCPURLValidationConfig: RemoteMCPURLValidationConfig{
+			AllowLocalhostMCP: !opts.DisallowLocalhostMCP,
+			AllowPrivateIPMCP: !opts.DisallowPrivateIPMCP,
+			AllowLinkLocalMCP: !opts.DisallowLinkLocalMCP,
+		},
+	}
+
 	switch opts.MCPRuntimeBackend {
 	case runtimeBackendDocker:
-		dockerBackend, err := newDockerBackend(ctx, authEnabled, httpListenPort, opts)
+		dockerBackend, err := newDockerBackend(ctx, authEnabled, httpListenPort, opts, validationOptions)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize Docker backend: %w", err)
 		}
@@ -192,6 +210,7 @@ func NewSessionManager(ctx context.Context, authEnabled bool, globalTokenStore G
 			cachedClient,
 			obotStorageClient,
 			opts,
+			validationOptions,
 		)
 	case RuntimeBackendCloudFoundry:
 		backend = newCloudFoundryBackend(authEnabled, httpListenPort, opts)
@@ -200,6 +219,7 @@ func NewSessionManager(ctx context.Context, authEnabled bool, globalTokenStore G
 	}
 
 	return &SessionManager{
+		devMode:                   devMode,
 		webhookHelper:             webhookHelper,
 		tokenService:              tokenService,
 		globalTokenStore:          globalTokenStore,
@@ -210,15 +230,11 @@ func NewSessionManager(ctx context.Context, authEnabled bool, globalTokenStore G
 		resourceMaximums:          resourceMaximums,
 		storageClient:             obotStorageClient,
 		gatewayClient:             gatewayClient,
-		localK8sClient:            client,
+		localCachedClient:         cachedClient,
 		obotNamespace:             obotNamespace,
 		secretBindingAllowedLabel: strings.TrimSpace(opts.MCPSecretBindingAllowedLabel),
 		tunnelManager:             tunnelManager,
-		remoteURLValidationConfig: RemoteMCPURLValidationConfig{
-			AllowLocalhostMCP: !opts.DisallowLocalhostMCP,
-			AllowPrivateIPMCP: !opts.DisallowPrivateIPMCP,
-			AllowLinkLocalMCP: !opts.DisallowLinkLocalMCP,
-		},
+		remoteURLValidationConfig: validationOptions.RemoteMCPURLValidationConfig,
 	}, nil
 }
 
@@ -249,6 +265,14 @@ func (sm *SessionManager) RemoteMCPURLValidationConfig() RemoteMCPURLValidationC
 		config.AllowedHosts = allowedHosts
 	}
 	return config
+}
+
+// ValidationOptions returns the startup destination validation settings.
+func (sm *SessionManager) ValidationOptions() ValidationOptions {
+	return ValidationOptions{
+		RemoteMCPURLValidationConfig: sm.remoteURLValidationConfig,
+		DevMode:                      sm.devMode,
+	}
 }
 
 func (sm *SessionManager) ResourceMaximums() ResourceMaximums {
@@ -429,6 +453,9 @@ func (sm *SessionManager) closeClients(serverName string) {
 // RestartServerDeployment restarts the server in the currently used backend, if the backend supports it.
 // If the backend does not support restarts, then an [ErrNotSupportedByBackend] error is returned.
 func (sm *SessionManager) RestartServerDeployment(ctx context.Context, server ServerConfig) error {
+	if err := validateDeployment(ctx, server, sm.ValidationOptions()); err != nil {
+		return err
+	}
 	return sm.backend.restartServer(ctx, server)
 }
 
@@ -449,6 +476,13 @@ func (sm *SessionManager) ensureDeployment(ctx context.Context, server ServerCon
 	defer cancel()
 
 	return sm.backend.ensureServerDeployment(ctx, server)
+}
+
+func (sm *SessionManager) deployServer(ctx context.Context, server ServerConfig) error {
+	if err := validateDeployment(ctx, server, sm.ValidationOptions()); err != nil {
+		return err
+	}
+	return sm.backend.deployServer(ctx, server)
 }
 
 // ValidateRemoteMCPURL rejects remote MCP URLs that resolve to blocked local address ranges.
@@ -492,18 +526,20 @@ func ValidateRemoteMCPURL(ctx context.Context, rawURL string, config RemoteMCPUR
 	}
 
 	for _, addr := range addrs {
+		// Drop any IPv6 zone (fe80::1%eth0), which net.ParseIP rejects, so scoped literals are still classified.
+		addr, _, _ = strings.Cut(addr, "%")
 		ip := net.ParseIP(addr)
 		if ip == nil {
 			continue
 		}
 
-		if !config.AllowLocalhostMCP && ip.IsLoopback() {
+		if !config.AllowLocalhostMCP && safehttp.IsLoopback(ip) {
 			return fmt.Errorf("MCP server URL must not be a localhost URL: %s", rawURL)
 		}
-		if !config.AllowPrivateIPMCP && ip.IsPrivate() {
+		if !config.AllowPrivateIPMCP && safehttp.IsPrivate(ip) {
 			return fmt.Errorf("MCP server URL must not resolve to a private IP address: %s", rawURL)
 		}
-		if !config.AllowLinkLocalMCP && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+		if !config.AllowLinkLocalMCP && safehttp.IsLinkLocal(ip) {
 			return fmt.Errorf("MCP server URL must not resolve to a link-local address: %s", rawURL)
 		}
 	}

@@ -1,6 +1,10 @@
 import { page as appPage } from '$app/state';
 import { COMMUNITY_ENTITLEMENT } from '$lib/constants';
 import { MCPTesterSession } from '$lib/services/mcp/tester.svelte';
+import {
+	createMcpConnectPostResolver,
+	type MCPRequest
+} from '../../../../tests/helpers/mcpConnect';
 import { preparePageData } from '../../../../tests/helpers/pageData';
 import { createMcpServerDetailsFixtures, getLicenseResponse } from '../../../../tests/mocks/data';
 import { worker } from '../../../../tests/mocks/worker';
@@ -13,43 +17,14 @@ import { page } from 'vitest/browser';
 
 const fixtures = createMcpServerDetailsFixtures();
 
-interface MCPRequest {
-	id?: string | number;
-	method: string;
-	params?: Record<string, unknown>;
-}
-
 function mockMCPInitialization(
 	capabilities: Record<string, unknown> = {},
 	handleRequest?: (request: MCPRequest) => unknown,
-	serverID = fixtures.serverSingle.id
+	_serverID = fixtures.serverSingle.id
 ) {
 	worker.use(
-		http.post(`/mcp-connect/${serverID}`, async ({ request }) => {
-			const body = (await request.json()) as MCPRequest;
-			if (body.method === 'initialize') {
-				return HttpResponse.json(
-					{
-						jsonrpc: '2.0',
-						id: body.id,
-						result: {
-							protocolVersion: body.params?.protocolVersion,
-							capabilities,
-							serverInfo: { name: 'tester-server', version: '1.0.0' }
-						}
-					},
-					{ headers: { 'Mcp-Session-Id': 'tester-session' } }
-				);
-			}
-			const result = handleRequest?.(body);
-			if (result !== undefined) {
-				return HttpResponse.json({ jsonrpc: '2.0', id: body.id, result });
-			}
-			return new HttpResponse(null, { status: 202 });
-		}),
-		http.get(`/mcp-connect/${serverID}`, () => {
-			return new HttpResponse(null, { status: 405 });
-		})
+		http.post('/mcp-connect/:connectId', createMcpConnectPostResolver(capabilities, handleRequest)),
+		http.get('/mcp-connect/:connectId', () => new HttpResponse(null, { status: 405 }))
 	);
 }
 
@@ -412,7 +387,7 @@ describe('MCP Tester page', () => {
 			.toBeVisible();
 		await expect
 			.element(page.getByRole('link', { name: 'configuring your own model provider' }))
-			.toHaveAttribute('href', '/models?view=model-providers');
+			.toHaveAttribute('href', '/models?view=providers');
 		await expect.element(page.getByRole('button', { name: 'Register' })).toBeVisible();
 		await expect
 			.element(page.getByRole('region', { name: 'Chat composer' }))
@@ -1148,7 +1123,7 @@ describe('MCP Tester page', () => {
 		});
 		render(TesterPage, { data });
 
-		await expect.element(page.getByRole('alert')).toMatchTextContent('Connection failed');
+		await expect.element(page.getByRole('alert')).toMatchTextContent('Unavailable');
 		// The failed handshake is inspectable even though the session never connected.
 		await expect
 			.element(page.getByRole('button', { name: /transport .*Streamable HTTP error/ }))
@@ -1177,4 +1152,56 @@ describe('MCP Tester page', () => {
 			.element(page.getByRole('heading', { name: 'Server setup required' }))
 			.not.toBeInTheDocument();
 	});
+});
+
+it('shows CLI login and retries a localhost component in the inspector', async () => {
+	appPage.url.searchParams.delete('tab');
+	mockMCPInitializationFailure(401);
+	const attemptURL = `${window.location.origin}/oauth/mcp/login/ui-attempt`;
+	let checks = 0;
+	worker.use(
+		http.get('*/oauth/mcp/login/:state', () => HttpResponse.json({ expiresIn: 600 })),
+		http.get(`/api/oauth/vmcp/vmcpi1component/components/${fixtures.serverSingle.id}`, () =>
+			HttpResponse.json({ authURL: ++checks === 1 ? attemptURL : '' })
+		)
+	);
+
+	const server = structuredClone(fixtures.serverSingle);
+	server.configured = true;
+	server.vmcpInstanceID = 'vmcpi1component';
+	server.deploymentStatus = 'Available';
+	server.manifest.remoteConfig = { url: 'https://mcp.example.com', localhostCallbackEnabled: true };
+	const data = await preparePageData<PageData>({
+		server,
+		backTarget: `/mcp-servers/s/${server.id}`
+	});
+	await render(TesterPage, { data });
+	await expect
+		.element(page.getByLabelText('Authentication command'))
+		.toHaveTextContent(`obot mcp login "${attemptURL}"`);
+	await expect.element(page.getByRole('timer')).toBeVisible();
+	mockMCPInitialization();
+	worker.use(http.get('*/oauth/mcp/login/:state', () => new HttpResponse(null, { status: 400 })));
+	document.dispatchEvent(new Event('visibilitychange'));
+	await expect
+		.element(page.getByRole('heading', { name: 'Reauthentication required' }))
+		.not.toBeInTheDocument();
+});
+
+it('keeps management navigation for a legacy localhost deployment without a vMCP owner', async () => {
+	appPage.url.searchParams.delete('tab');
+	mockMCPInitializationFailure(401);
+	const server = structuredClone(fixtures.serverSingle);
+	server.configured = true;
+	server.deploymentStatus = 'Available';
+	server.manifest.remoteConfig = { url: 'https://mcp.example.com', localhostCallbackEnabled: true };
+	const data = await preparePageData<PageData>({
+		server,
+		backTarget: `/mcp-servers/s/${server.id}`
+	});
+	await render(TesterPage, { data });
+	await expect
+		.element(page.getByRole('link', { name: 'Manage authentication', exact: true }))
+		.toHaveAttribute('href', `/mcp-servers/s/${server.id}`);
+	await expect.element(page.getByLabelText('Authentication command')).not.toBeInTheDocument();
 });

@@ -77,7 +77,7 @@ func TestVMCPHandlerRejectsProhibitedRequiredConfiguration(t *testing.T) {
 				GatewayClient: newHandlerTestGateway(t),
 				User:          &user.DefaultInfo{UID: "admin", Groups: []string{types.GroupAdmin}},
 			}
-			handler := NewVMCPHandler(nil)
+			handler := NewVMCPHandler(nil, "", "")
 			switch operation {
 			case "create":
 				err = handler.Create(ctx)
@@ -175,7 +175,7 @@ func TestMigratedVMCPAllowsAdminToDisableComponentForceSingleUser(t *testing.T) 
 	}
 	request := httptest.NewRequest(http.MethodPut, "/api/vmcps/"+vmcp.Name, strings.NewReader(`{"displayName":"Migrated vMCP","components":[{"id":"one","mcpServerCatalogEntryID":"entry","forceSingleUser":false}]}`))
 	request.SetPathValue("vmcp_id", vmcp.Name)
-	err := NewVMCPHandler(nil).Update(api.Context{
+	err := NewVMCPHandler(nil, "", "").Update(api.Context{
 		ResponseWriter: httptest.NewRecorder(),
 		GatewayClient:  newHandlerTestGateway(t),
 		Request:        request,
@@ -228,7 +228,7 @@ func TestVMCPHandlerUpdateRejectsCatalogSyncedVMCP(t *testing.T) {
 			storage.onUpdate = func(kclient.Object) { t.Fatal("rejected request updated a resource") }
 			request := httptest.NewRequest(http.MethodPut, "/api/vmcps/"+vmcp.Name, strings.NewReader(tc.body))
 			request.SetPathValue("vmcp_id", vmcp.Name)
-			err := NewVMCPHandler(nil).Update(api.Context{
+			err := NewVMCPHandler(nil, "", "").Update(api.Context{
 				ResponseWriter: httptest.NewRecorder(),
 				GatewayClient:  newHandlerTestGateway(t),
 				Request:        request,
@@ -247,7 +247,7 @@ func TestVMCPHandlerUpdateMissingVMCPReturnsGetError(t *testing.T) {
 	storage := newVMCPTestStorage()
 	request := httptest.NewRequest(http.MethodPut, "/api/vmcps/missing", strings.NewReader("{not json"))
 	request.SetPathValue("vmcp_id", "missing")
-	err := NewVMCPHandler(nil).Update(api.Context{
+	err := NewVMCPHandler(nil, "", "").Update(api.Context{
 		ResponseWriter: httptest.NewRecorder(),
 		GatewayClient:  newHandlerTestGateway(t),
 		Request:        request,
@@ -380,7 +380,7 @@ func TestVMCPHandlerCreateStoresStaticConfigurationInCredential(t *testing.T) {
 		{Key: "USER_HEADER", Policy: types.VMCPConfigurationPolicyUserAllowed},
 	}
 
-	created := callVMCPCreate(t, storage, gatewayClient, NewVMCPHandler(nil), manifest, &user.DefaultInfo{
+	created := callVMCPCreate(t, storage, gatewayClient, NewVMCPHandler(nil, "", ""), manifest, &user.DefaultInfo{
 		Name: "admin", UID: "admin", Groups: []string{types.GroupAdmin},
 	})
 	if !published {
@@ -457,7 +457,7 @@ func TestVMCPHandlerUpdatePreservesStaticConfiguration(t *testing.T) {
 		t.Run(fmt.Sprintf("versioned=%t", versioned), func(t *testing.T) {
 			storage := newVMCPTestStorage(vmcpCatalogEntryForTest("entry"))
 			gatewayClient := newHandlerTestGateway(t)
-			handler := NewVMCPHandler(nil)
+			handler := NewVMCPHandler(nil, "", "")
 			admin := &user.DefaultInfo{UID: "admin", Groups: []string{types.GroupAdmin}}
 			manifest := testVMCPManifest()
 			manifest.Components[0].Configuration = []types.VMCPConfigurationPolicy{
@@ -553,7 +553,7 @@ func TestVMCPHandlerUpdateDefaultsFromStoredPersonalScope(t *testing.T) {
 	}
 	storage := newVMCPTestStorage(vmcp)
 	gatewayClient := newHandlerTestGateway(t)
-	handler := NewVMCPHandler(nil)
+	handler := NewVMCPHandler(nil, "", "")
 
 	body, err := json.Marshal(vmcp.Spec.Manifest)
 	if err != nil {
@@ -604,7 +604,7 @@ func TestVMCPHandlerCreateDefersCleanupWhenPublishingStaticConfigurationFails(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = NewVMCPHandler(nil).Create(api.Context{
+	err = NewVMCPHandler(nil, "", "").Create(api.Context{
 		Request:       httptest.NewRequest(http.MethodPost, "/api/vmcps", bytes.NewReader(body)),
 		Storage:       storage,
 		GatewayClient: gatewayClient,
@@ -647,7 +647,7 @@ func TestVMCPDeletesDeferCredentialCleanup(t *testing.T) {
 				Finalizers: []string{v1.VMCPFinalizer},
 			},
 			pathKey: "vmcp_id",
-			delete:  NewVMCPHandler(nil).Delete,
+			delete:  NewVMCPHandler(nil, "", "").Delete,
 		},
 		{
 			name: "vMCP instance",
@@ -691,7 +691,7 @@ func TestVMCPHandlerDeleteRejectsCatalogSyncedVMCP(t *testing.T) {
 	storage := newVMCPTestStorage(vmcp)
 	request := httptest.NewRequest(http.MethodDelete, "/api/vmcps/"+vmcp.Name, nil)
 	request.SetPathValue("vmcp_id", vmcp.Name)
-	err := NewVMCPHandler(nil).Delete(api.Context{Request: request, Storage: storage})
+	err := NewVMCPHandler(nil, "", "").Delete(api.Context{Request: request, Storage: storage})
 	var httpErr *types.ErrHTTP
 	if !errors.As(err, &httpErr) || httpErr.Code != http.StatusBadRequest || !strings.Contains(httpErr.Message, "cannot delete vMCP vmcp1synced synced from a catalog") {
 		t.Fatalf("expected 400 for catalog synced vMCP, got %v", err)
@@ -710,7 +710,7 @@ func TestVMCPHandlerDeleteMissingVMCPSucceeds(t *testing.T) {
 	storage := newVMCPTestStorage()
 	request := httptest.NewRequest(http.MethodDelete, "/api/vmcps/missing", nil)
 	request.SetPathValue("vmcp_id", "missing")
-	if err := NewVMCPHandler(nil).Delete(api.Context{Request: request, Storage: storage}); err != nil {
+	if err := NewVMCPHandler(nil, "", "").Delete(api.Context{Request: request, Storage: storage}); err != nil {
 		t.Fatalf("expected deleting a missing vMCP to succeed, got %v", err)
 	}
 }
@@ -756,7 +756,7 @@ func TestVMCPHandlerListFiltersByProfileForAdministrators(t *testing.T) {
 	}
 	storage := newVMCPTestStorage(visible, hiddenShared, hiddenPersonal)
 	recorder := httptest.NewRecorder()
-	err := NewVMCPHandler(nil).List(api.Context{
+	err := NewVMCPHandler(nil, "", "").List(api.Context{
 		ResponseWriter: recorder,
 		Request:        httptest.NewRequest(http.MethodGet, "/api/vmcps", nil),
 		Storage:        storage,
@@ -953,7 +953,7 @@ func TestVMCPHandlerLimitsSharedVMCPToUserProfiles(t *testing.T) {
 				listURL += "?all=true"
 			}
 			recorder := httptest.NewRecorder()
-			if err := NewVMCPHandler(nil).List(api.Context{
+			if err := NewVMCPHandler(nil, "", "").List(api.Context{
 				ResponseWriter: recorder,
 				Request:        httptest.NewRequest(http.MethodGet, listURL, nil),
 				Storage:        storage,
@@ -973,7 +973,7 @@ func TestVMCPHandlerLimitsSharedVMCPToUserProfiles(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "/api/vmcps/"+vmcp.Name, nil)
 			request.SetPathValue("vmcp_id", vmcp.Name)
 			recorder = httptest.NewRecorder()
-			if err := NewVMCPHandler(nil).Get(api.Context{
+			if err := NewVMCPHandler(nil, "", "").Get(api.Context{
 				ResponseWriter: recorder,
 				Request:        request,
 				Storage:        storage,
@@ -995,7 +995,7 @@ func TestVMCPInstanceSelectionValidation(t *testing.T) {
 		for _, selection := range []map[string]types.VMCPComponentSet{nil, {}, {"everything": {AllowedTools: []string{"echo"}}}, {"everything": {AllowedTools: []string{"forbidden"}}}} {
 			t.Run(fmt.Sprintf("%s/%v", method, selection), func(t *testing.T) {
 				vmcp := &v1.VMCP{Name: "vmcp1test", Namespace: system.DefaultNamespace, Spec: v1.VMCPSpec{Manifest: types.VMCPManifest{
-					Components: []types.VMCPComponent{{ID: "everything", Name: "everything", AllowedTools: []string{"echo"}}},
+					Components: []types.VMCPComponent{{ID: "everything", Name: "everything"}},
 					Profiles:   []types.VMCPProfile{{Subjects: []types.Subject{{Type: types.SubjectTypeGroup, ID: "team"}}, Permissions: types.VMCPProfilePermissions{AllowedComponents: map[string]types.VMCPComponentSet{"everything": {AllowedTools: []string{"echo"}}}}}},
 				}}}
 				instance := &v1.VMCPInstance{Name: "vmcpi1test", Namespace: system.DefaultNamespace, Spec: v1.VMCPInstanceSpec{
@@ -1382,7 +1382,7 @@ func vmcpHandlerForTest(t *testing.T, storage kclient.Client) *VMCPHandler {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return NewVMCPHandler(accesscontrolrule.NewAccessControlRuleHelper(indexer, storage))
+	return NewVMCPHandler(accesscontrolrule.NewAccessControlRuleHelper(indexer, storage), "", "")
 }
 
 func TestVMCPComponentSnapshots(t *testing.T) {
@@ -1779,5 +1779,271 @@ func TestVMCPComponentAccess(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestVMCPHandlerCreateRefusesProfilesForMissingSCIMGroups(t *testing.T) {
+	storage := newVMCPTestStorage(vmcpCatalogEntryForTest("entry"))
+	gatewayClient := newHandlerTestGateway(t)
+	if _, _, err := gatewayClient.CreateSCIMConnection(t.Context(), gateway.CreateSCIMConnectionOptions{
+		AuthProviderNamespace: system.DefaultNamespace,
+		AuthProviderName:      "okta-auth-provider",
+		GroupIDPrefix:         "okta/",
+		Origin:                gatewaytypes.SCIMConnectionOriginSCIMFirst,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := vmcpHandlerForTest(t, storage)
+	manifest := testVMCPManifest()
+	manifest.Profiles = []types.VMCPProfile{{
+		Name: "team",
+		Subjects: []types.Subject{{
+			Type: types.SubjectTypeGroup,
+			ID:   "okta/00g-missing",
+		}},
+		Permissions: types.VMCPProfilePermissions{
+			AllowAllComponents: true,
+		},
+	}}
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = handler.Create(api.Context{
+		ResponseWriter: httptest.NewRecorder(),
+		Request:        httptest.NewRequest(http.MethodPost, "/api/vmcps", bytes.NewReader(body)),
+		Storage:        storage,
+		GatewayClient:  gatewayClient,
+		User:           &user.DefaultInfo{Name: "admin", UID: "admin", Groups: []string{types.GroupAdmin}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "okta/00g-missing") || !strings.Contains(err.Error(), "push the group") {
+		t.Fatalf("Create() error = %v, want a refusal of the missing group", err)
+	}
+	var vmcps v1.VMCPList
+	if err := storage.List(t.Context(), &vmcps); err != nil {
+		t.Fatal(err)
+	}
+	if len(vmcps.Items) != 0 {
+		t.Fatalf("a refused vMCP was saved: %+v", vmcps.Items)
+	}
+}
+
+func TestVMCPTriggerUpdateReleasesOutdatedConnectionSnapshots(t *testing.T) {
+	entry := vmcpCatalogEntryForTest("entry")
+	entry.Spec.Manifest.RemoteConfig = &types.RemoteCatalogConfig{FixedURL: "https://example.com/v2"}
+	storage := newVMCPTestStorage(entry)
+	handler := vmcpHandlerForTest(t, storage)
+	u := &user.DefaultInfo{UID: "user-1"}
+	created := callVMCPCreate(t, storage, newHandlerTestGateway(t), handler, testVMCPManifest(), u)
+	var parent v1.VMCP
+	require.NoError(t, storage.Get(t.Context(), kclient.ObjectKey{Namespace: system.DefaultNamespace, Name: created.ID}, &parent))
+	component := parent.Spec.Manifest.Components[0]
+	binding := utils.Digest([]any{component, parent.Spec.ComponentStaticConfigurationHashes[component.ID]})
+
+	retained := func(name, vmcpID, digest, url string) *v1.VMCPInstance {
+		legacy := *component.DeepCopy()
+		legacy.SourceDigest = digest
+		legacy.ToolPrefix = "mine_"
+		legacy.CatalogEntry.Manifest.RemoteConfig = &types.RemoteCatalogConfig{FixedURL: url}
+		return &v1.VMCPInstance{
+			Name:      name,
+			Namespace: system.DefaultNamespace,
+			Spec: v1.VMCPInstanceSpec{
+				UserID:           "user-1",
+				LegacySlug:       name,
+				Manifest:         types.VMCPInstanceManifest{VMCPID: vmcpID},
+				LegacyComponents: []types.VMCPComponent{legacy},
+			},
+		}
+	}
+	instances := []*v1.VMCPInstance{
+		retained("outdated", parent.Name, binding, "https://example.com/v1"),
+		retained("current", parent.Name, binding, "https://example.com/v2"),
+		retained("released", parent.Name, "retired", "https://example.com/v1"),
+		retained("other", "other-vmcp", binding, "https://example.com/v1"),
+	}
+	for _, instance := range instances {
+		require.NoError(t, storage.Create(t.Context(), instance))
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/vmcps/"+created.ID+"/trigger-update", nil)
+	request.SetPathValue("vmcp_id", created.ID)
+	require.NoError(t, handler.TriggerUpdate(api.Context{
+		ResponseWriter: httptest.NewRecorder(),
+		Request:        request,
+		Storage:        storage,
+		User:           u,
+	}))
+
+	var stored v1.VMCP
+	require.NoError(t, storage.Get(t.Context(), kclient.ObjectKeyFromObject(&parent), &stored))
+	require.Equal(t, parent.Spec.Manifest, stored.Spec.Manifest, "a current component is unchanged")
+	for _, instance := range instances {
+		var got v1.VMCPInstance
+		require.NoError(t, storage.Get(t.Context(), kclient.ObjectKeyFromObject(instance), &got))
+		if instance.Name == "outdated" {
+			require.Empty(t, got.Spec.LegacyComponents, "the outdated snapshot is released")
+			require.Equal(t, parent.Spec.Manifest.Components, vmcpconfig.ComponentsForInstance(stored, got))
+			continue
+		}
+		require.Equal(t, instance.Spec.LegacyComponents, got.Spec.LegacyComponents, instance.Name)
+	}
+}
+
+func TestVMCPTriggerUpdatePublishesBeforeReleasingConnectionSnapshots(t *testing.T) {
+	entry, second := vmcpCatalogEntryForTest("entry"), vmcpCatalogEntryForTest("second")
+	entry.Spec.Manifest.RemoteConfig = &types.RemoteCatalogConfig{FixedURL: "https://example.com/v2"}
+	second.Spec.Manifest.RemoteConfig = &types.RemoteCatalogConfig{FixedURL: "https://example.com/mcp"}
+	storage := newVMCPTestStorage(entry, second)
+	handler := vmcpHandlerForTest(t, storage)
+	u := &user.DefaultInfo{UID: "user-1"}
+	manifest := testVMCPManifest()
+	manifest.Components = append(manifest.Components, types.VMCPComponent{Name: "second", MCPServerCatalogEntryID: second.Name})
+	created := callVMCPCreate(t, storage, newHandlerTestGateway(t), handler, manifest, u)
+	var parent v1.VMCP
+	require.NoError(t, storage.Get(t.Context(), kclient.ObjectKey{Namespace: system.DefaultNamespace, Name: created.ID}, &parent))
+	component := parent.Spec.Manifest.Components[0]
+	legacy := *component.DeepCopy()
+	legacy.SourceDigest = utils.Digest([]any{component, parent.Spec.ComponentStaticConfigurationHashes[component.ID]})
+	legacy.CatalogEntry.Manifest.RemoteConfig = &types.RemoteCatalogConfig{FixedURL: "https://example.com/v1"}
+	instance := &v1.VMCPInstance{
+		Name:      "outdated",
+		Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPInstanceSpec{
+			UserID:           "user-1",
+			LegacySlug:       "outdated",
+			Manifest:         types.VMCPInstanceManifest{VMCPID: parent.Name},
+			LegacyComponents: []types.VMCPComponent{legacy},
+		},
+	}
+	require.NoError(t, storage.Create(t.Context(), instance))
+	second.Spec.Manifest.Name = "Updated second"
+	require.NoError(t, storage.Update(t.Context(), second))
+
+	var failRelease, concurrentInstanceWrite, concurrentStatusWrite bool
+	bumpParentStatus := func() {
+		var current v1.VMCP
+		require.NoError(t, storage.Get(t.Context(), kclient.ObjectKeyFromObject(&parent), &current))
+		current.Status.Ready = !current.Status.Ready
+		require.NoError(t, storage.WithWatch.Update(t.Context(), &current))
+	}
+	storage.onUpdate = func(object kclient.Object) {
+		storage.updateErr = nil
+		updated, ok := object.(*v1.VMCPInstance)
+		if !ok {
+			if concurrentStatusWrite {
+				// A controller writes the vMCP's status while the update is loading, so it conflicts once.
+				concurrentStatusWrite = false
+				bumpParentStatus()
+			}
+			return
+		}
+		if failRelease {
+			storage.updateErr = errors.New("release failed")
+			return
+		}
+		if concurrentInstanceWrite {
+			// Another writer changes the connection, so this write conflicts once.
+			concurrentInstanceWrite = false
+			var current v1.VMCPInstance
+			require.NoError(t, storage.Get(t.Context(), kclient.ObjectKeyFromObject(updated), &current))
+			current.Status.Configured = !current.Status.Configured
+			require.NoError(t, storage.WithWatch.Update(t.Context(), &current))
+		}
+		// Drift detection watches connections and writes the vMCP's status.
+		bumpParentStatus()
+	}
+	triggerUpdate := func() error {
+		request := httptest.NewRequest(http.MethodPost, "/api/vmcps/"+created.ID+"/trigger-update", nil)
+		request.SetPathValue("vmcp_id", created.ID)
+		return handler.TriggerUpdate(api.Context{
+			ResponseWriter: httptest.NewRecorder(),
+			Request:        request,
+			Storage:        storage,
+			User:           u,
+		})
+	}
+
+	failRelease = true
+	require.Error(t, triggerUpdate())
+	var stored v1.VMCP
+	require.NoError(t, storage.Get(t.Context(), kclient.ObjectKeyFromObject(&parent), &stored))
+	require.Equal(t, "Updated second", stored.Spec.Manifest.Components[1].CatalogEntry.Manifest.Name, "the update is published before snapshots are released")
+	require.Equal(t, parent.Spec.Manifest.Components[0], stored.Spec.Manifest.Components[0])
+	var got v1.VMCPInstance
+	require.NoError(t, storage.Get(t.Context(), kclient.ObjectKeyFromObject(instance), &got))
+	require.Len(t, got.Spec.LegacyComponents, 1, "a failed release leaves the snapshot for a retry")
+
+	failRelease, concurrentInstanceWrite, concurrentStatusWrite = false, true, true
+	require.NoError(t, triggerUpdate())
+	require.NoError(t, storage.Get(t.Context(), kclient.ObjectKeyFromObject(instance), &got))
+	require.Empty(t, got.Spec.LegacyComponents, "a retry releases the outdated snapshot")
+	require.False(t, concurrentInstanceWrite)
+	require.False(t, concurrentStatusWrite)
+}
+
+func TestVMCPCallbackPathsUseRequestingUsersEffectiveSnapshots(t *testing.T) {
+	vmcp := &v1.VMCP{Name: "vmcp1paths", Namespace: system.DefaultNamespace}
+	vmcp.Spec.Manifest.Profiles = []types.VMCPProfile{{
+		Name:        "default",
+		Subjects:    []types.Subject{{Type: types.SubjectTypeSelector, ID: "*"}},
+		Permissions: types.VMCPProfilePermissions{AllowAllComponents: true},
+	}}
+	component := types.VMCPComponent{ID: "provider"}
+	component.CatalogEntry.Manifest.RemoteConfig = &types.RemoteCatalogConfig{LocalhostCallbackEnabled: true, LocalhostCallbackPath: "/current"}
+	vmcp.Spec.Manifest.Components = []types.VMCPComponent{component}
+	legacy := *component.DeepCopy()
+	legacy.SourceDigest = utils.Digest([]any{component, ""})
+	legacy.CatalogEntry.Manifest.RemoteConfig.LocalhostCallbackPath = "/retained"
+	instance := &v1.VMCPInstance{Name: "vmcpi1paths", Namespace: system.DefaultNamespace}
+	instance.Spec.Manifest.VMCPID = vmcp.Name
+	instance.Spec.UserID = "owner"
+	instance.Spec.LegacyComponents = []types.VMCPComponent{legacy}
+	for _, tc := range []struct {
+		name     string
+		userID   string
+		disabled bool
+		want     []string
+	}{
+		{
+			name:   "retained callback",
+			userID: "owner",
+			want:   []string{"/retained"},
+		},
+		{
+			name:   "other users do not inherit snapshots",
+			userID: "other",
+			want:   []string{"/current"},
+		},
+		{
+			name:     "disabled components require no callbacks",
+			userID:   "owner",
+			disabled: true,
+			want:     []string{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			connection := instance.DeepCopy()
+			if tc.disabled {
+				connection.Spec.LegacyDisabledComponents = []string{component.ID}
+			}
+			req := api.Context{
+				Request: httptest.NewRequest(http.MethodGet, "/api/vmcps/"+vmcp.Name, nil),
+				Storage: newVMCPTestStorage(vmcp, connection),
+				User:    &user.DefaultInfo{UID: tc.userID},
+			}
+			resolved, err := vmcpconfig.FindInstance(req.Context(), req.Storage, vmcp.Namespace, vmcp.Name, req.User.GetUID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := convertVMCPForInstance(req, *vmcp, resolved)
+			if !reflect.DeepEqual(got.LocalhostCallbackPaths, tc.want) {
+				t.Fatalf("callback paths = %v, want %v", got.LocalhostCallbackPaths, tc.want)
+			}
+			if got.Components[0].CatalogEntry.Manifest.RemoteConfig.LocalhostCallbackPath != "/current" {
+				t.Fatal("conversion changed the public component snapshot")
+			}
+		})
 	}
 }

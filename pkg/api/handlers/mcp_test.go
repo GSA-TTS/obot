@@ -62,10 +62,99 @@ func TestConvertMCPServer_StaticEnvIsConfigured(t *testing.T) {
 		},
 	}
 
-	converted := ConvertMCPServer(server, nil, "", "")
+	converted := ConvertMCPServer(server, nil)
 
 	assert.True(t, converted.Configured)
 	assert.Empty(t, converted.MissingRequiredEnvVars)
+}
+
+func TestConvertMCPServer_SecretBindingsUseStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		unresolved  []string
+		credEnv     map[string]string
+		wantMissing []string
+	}{
+		{
+			name: "resolved binding is configured without its value",
+		},
+		{
+			name:        "unresolved binding is missing",
+			unresolved:  []string{"BOUND_TOKEN"},
+			wantMissing: []string{"BOUND_TOKEN"},
+		},
+		{
+			name:        "credential value does not satisfy an unresolved binding",
+			unresolved:  []string{"BOUND_TOKEN"},
+			credEnv:     map[string]string{"BOUND_TOKEN": "stale"},
+			wantMissing: []string{"BOUND_TOKEN"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := v1.MCPServer{
+				Spec: v1.MCPServerSpec{
+					Manifest: types.MCPServerManifest{
+						Runtime: types.RuntimeNPX,
+						Config: []types.MCPConfig{{
+							Key:           "BOUND_TOKEN",
+							Required:      true,
+							Usage:         types.Env,
+							SecretBinding: &types.MCPSecretBinding{Name: "tokens", Key: "token"},
+						}},
+					},
+				},
+				Status: v1.MCPServerStatus{UnresolvedSecretBindings: tt.unresolved},
+			}
+
+			converted := ConvertMCPServer(server, tt.credEnv)
+
+			assert.Equal(t, tt.wantMissing, converted.MissingRequiredEnvVars)
+			assert.Equal(t, len(tt.wantMissing) == 0, converted.Configured)
+		})
+	}
+}
+
+func TestConvertMCPServer_ExtractedStaticValuesAreConfigured(t *testing.T) {
+	server := v1.MCPServer{
+		Spec: v1.MCPServerSpec{
+			Manifest: types.MCPServerManifest{
+				Runtime: types.RuntimeRemote,
+				Config: []types.MCPConfig{
+					{
+						Key:      "REGION",
+						Value:    "us-west",
+						Required: true,
+						Usage:    types.Env,
+					},
+					{
+						Key:      "X-Tenant",
+						Value:    "tenant-1",
+						Required: true,
+						Usage:    types.Header,
+					},
+				},
+			},
+		},
+	}
+
+	values, err := mcp.ExtractStaticConfiguration(server.Spec.Manifest.Config, nil, false)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{
+		"REGION":   "us-west",
+		"X-Tenant": "tenant-1",
+	}, values)
+	for _, field := range server.Spec.Manifest.Config {
+		require.True(t, field.Static)
+		require.Empty(t, field.Value)
+	}
+
+	converted := ConvertMCPServer(server, nil)
+
+	assert.True(t, converted.Configured)
+	assert.Empty(t, converted.MissingRequiredEnvVars)
+	assert.Empty(t, converted.MissingRequiredHeaders)
 }
 
 func TestConvertMCPResources(t *testing.T) {
@@ -83,9 +172,8 @@ func TestConvertMCPResources(t *testing.T) {
 				Runtime:   types.RuntimeRemote,
 			},
 		},
-	}, "https://example.com")
+	})
 	assert.Equal(t, resources, entry.Manifest.Resources)
-	assert.Equal(t, "https://example.com/mcp-connect/entry", entry.ConnectURL)
 
 	server := ConvertMCPServer(v1.MCPServer{
 		Name: "server",
@@ -95,7 +183,7 @@ func TestConvertMCPResources(t *testing.T) {
 				Resources: resources,
 			},
 		},
-	}, nil, "", "")
+	}, nil)
 	assert.Equal(t, resources, server.MCPServerManifest.Resources)
 }
 
@@ -110,7 +198,7 @@ func TestConvertMCPServerCatalogEntryDetached(t *testing.T) {
 				UpgradeNote: "Review the new settings.",
 			},
 		},
-	}, "https://example.com")
+	})
 
 	assert.True(t, entry.Detached)
 	assert.True(t, entry.Editable)
@@ -142,45 +230,6 @@ func TestValidationOptionsWithResourceMaximumsIgnoresPersistedMaximumForNonKuber
 		},
 	}, false, options)
 	require.NoError(t, err)
-}
-
-func TestMCPServerOrInstanceFromConnectURLRejectsCatalogEntryResourcesAboveMaximum(t *testing.T) {
-	entry := v1.MCPServerCatalogEntry{
-		Name:      "entry",
-		Namespace: system.DefaultNamespace,
-		Spec: v1.MCPServerCatalogEntrySpec{
-			Manifest: types.MCPServerCatalogEntryManifest{
-				Name:    "entry",
-				Runtime: types.RuntimeNPX,
-				NPXConfig: &types.NPXRuntimeConfig{
-					Package: "test-package",
-				},
-				Resources: &types.MCPResourceRequirements{
-					Requests: types.MCPResourceRequests{
-						CPU: "250m",
-					},
-				},
-			},
-		},
-	}
-	storage := newFakeStorage(t, &entry)
-
-	_, _, err := mcpServerOrInstanceFromConnectURL(api.Context{
-		ResponseWriter: httptest.NewRecorder(),
-		Request:        httptest.NewRequest(http.MethodGet, "/mcp-connect/entry", nil),
-		Storage:        storage,
-		User:           testUser("user"),
-	}, "entry", "", mcp.ValidationOptions{
-		ResourceMaximums: mcp.ResourceMaximums{
-			CPURequest: new(resource.MustParse("100m")),
-		},
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "resources.requests.cpu 250m exceeds configured maximum 100m")
-
-	var servers v1.MCPServerList
-	require.NoError(t, storage.List(t.Context(), &servers, kclient.InNamespace(system.DefaultNamespace)))
-	assert.Empty(t, servers.Items)
 }
 
 // Test functions for applyURLTemplate
@@ -351,7 +400,7 @@ func TestApplyRemoteURLTemplate(t *testing.T) {
 	require.True(t, manifest.RemoteConfig.StaticOAuthRequired)
 
 	server := v1.MCPServer{Name: "tool-preview", Spec: v1.MCPServerSpec{Manifest: manifest}}
-	serverConfig, missing, err := mcp.ServerToServerConfig(server, nil, "system", "temp", "default", nil)
+	serverConfig, missing, err := mcp.ServerToServerConfig(server, nil, "system", "temp", "default", nil, false)
 	require.NoError(t, err)
 	require.Empty(t, missing)
 	require.Equal(t, manifest.RemoteConfig.URL, serverConfig.URL)
@@ -391,7 +440,7 @@ func TestValidateConfiguredOptionsExcludesPerUserHeaders(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"X-Region"}, missing)
 	server := v1.MCPServer{Spec: v1.MCPServerSpec{Manifest: types.MCPServerManifest{Config: config}}}
-	require.Empty(t, ConvertMCPServer(server, nil, "", "").MissingRequiredHeaders)
+	require.Empty(t, ConvertMCPServer(server, nil).MissingRequiredHeaders)
 }
 
 func TestApplyRemoteURLTemplateRejectsInvalidRenderedURL(t *testing.T) {
@@ -617,208 +666,4 @@ func newCreateServerSecretBindingK8sClient(t *testing.T, objects ...kclient.Obje
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-}
-
-func TestServerManifestFromCatalogEntryManifestAllowsMissingRemoteHostname(t *testing.T) {
-	entry := types.MCPServerCatalogEntryManifest{
-		Runtime: types.RuntimeRemote,
-		RemoteConfig: &types.RemoteCatalogConfig{
-			Hostname: "api.example.com",
-		},
-	}
-
-	manifest, err := serverManifestFromCatalogEntryManifest(false, true, entry, types.MCPServerManifest{})
-	require.NoError(t, err)
-	require.NotNil(t, manifest.RemoteConfig)
-	assert.Equal(t, "api.example.com", manifest.RemoteConfig.Hostname)
-	assert.Empty(t, manifest.RemoteConfig.URL)
-}
-
-func TestServerManifestFromCatalogEntryManifestPreservesRemoteURLTemplateConfig(t *testing.T) {
-	const template = "https://${WORKSPACE}.example.com/mcp/${SPACE_ID}"
-	entry := v1.MCPServerCatalogEntry{
-		Spec: v1.MCPServerCatalogEntrySpec{
-			Manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeRemote,
-				RemoteConfig: &types.RemoteCatalogConfig{
-					URLTemplate: template,
-				},
-			},
-		},
-	}
-	addExtractedEnvVarsToCatalogEntry(&entry)
-
-	manifest, err := serverManifestFromCatalogEntryManifest(false, true, entry.Spec.Manifest, types.MCPServerManifest{})
-	require.NoError(t, err)
-	require.NotNil(t, manifest.RemoteConfig)
-	assert.True(t, manifest.RemoteConfig.IsTemplate)
-	assert.Equal(t, template, manifest.RemoteConfig.URLTemplate)
-	assert.Empty(t, manifest.RemoteConfig.URL)
-	assert.ElementsMatch(t, []types.MCPConfig{
-		{
-			Name:        "WORKSPACE",
-			Key:         "WORKSPACE",
-			Description: "Automatically detected variable",
-			Required:    true,
-			Usage:       types.Header,
-		},
-		{
-			Name:        "SPACE_ID",
-			Key:         "SPACE_ID",
-			Description: "Automatically detected variable",
-			Required:    true,
-			Usage:       types.Header,
-		},
-	}, manifest.Config)
-}
-
-func TestEntryMissingAdminConfig(t *testing.T) {
-	const ns = "obot-ns"
-
-	newClient := func(t *testing.T, objects ...kclient.Object) kclient.Client {
-		t.Helper()
-		scheme := runtime.NewScheme()
-		require.NoError(t, corev1.AddToScheme(scheme))
-		return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-	}
-	secret := func(name string, data map[string][]byte) *corev1.Secret {
-		return &corev1.Secret{Data: data, Name: name, Namespace: ns, Labels: map[string]string{"label": ""}}
-	}
-
-	tests := []struct {
-		name            string
-		manifest        types.MCPServerCatalogEntryManifest
-		oauthConfigured bool
-		client          kclient.Client
-		wantFields      []string
-		wantOAuth       bool
-	}{
-		{
-			name: "required env resolved binding",
-			manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeNPX,
-				Config: []types.MCPConfig{
-					{
-						Key:           "TOKEN",
-						Required:      true,
-						SecretBinding: &types.MCPSecretBinding{Name: "s", Key: "k"},
-						Usage:         types.Env,
-					},
-				},
-			},
-			client: newClient(t, secret("s", map[string][]byte{"k": []byte("v")})),
-		},
-		{
-			name: "required env missing binding",
-			manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeNPX,
-				Config: []types.MCPConfig{
-					{
-						Key:           "TOKEN",
-						Required:      true,
-						SecretBinding: &types.MCPSecretBinding{Name: "s", Key: "k"},
-						Usage:         types.Env,
-					},
-				},
-			},
-			client:     newClient(t),
-			wantFields: []string{"env TOKEN"},
-		},
-		{
-			name: "non-required env missing binding",
-			manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeNPX,
-				Config: []types.MCPConfig{
-					{
-						Key:           "TOKEN",
-						SecretBinding: &types.MCPSecretBinding{Name: "s", Key: "k"},
-						Usage:         types.Env,
-					},
-				},
-			},
-			client:     newClient(t),
-			wantFields: []string{"env TOKEN"},
-		},
-		{
-			name: "required env empty binding",
-			manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeNPX,
-				Config: []types.MCPConfig{
-					{
-						Key:           "TOKEN",
-						Required:      true,
-						SecretBinding: &types.MCPSecretBinding{Name: "s", Key: "k"},
-						Usage:         types.Env,
-					},
-				},
-			},
-			client:     newClient(t, secret("s", map[string][]byte{"k": []byte("")})),
-			wantFields: []string{"env TOKEN"},
-		},
-		{
-			name: "required header missing binding",
-			manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeRemote,
-				RemoteConfig: &types.RemoteCatalogConfig{
-					FixedURL: "https://example.com",
-				},
-				Config: []types.MCPConfig{
-					{
-						Key:           "X-Api-Key",
-						Required:      true,
-						SecretBinding: &types.MCPSecretBinding{Name: "s", Key: "k"},
-						Usage:         types.Header,
-					},
-				},
-			},
-			client:     newClient(t),
-			wantFields: []string{"header X-Api-Key"},
-		},
-		{
-			name: "static oauth missing",
-			manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeRemote,
-				RemoteConfig: &types.RemoteCatalogConfig{
-					FixedURL:            "https://example.com",
-					StaticOAuthRequired: true,
-				},
-			},
-			wantOAuth: true,
-		},
-		{
-			name: "static oauth configured",
-			manifest: types.MCPServerCatalogEntryManifest{
-				Runtime: types.RuntimeRemote,
-				RemoteConfig: &types.RemoteCatalogConfig{
-					FixedURL:            "https://example.com",
-					StaticOAuthRequired: true,
-				},
-			},
-			oauthConfigured: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			entry := v1.MCPServerCatalogEntry{
-				Spec:   v1.MCPServerCatalogEntrySpec{Manifest: tt.manifest},
-				Status: v1.MCPServerCatalogEntryStatus{OAuthCredentialConfigured: tt.oauthConfigured},
-			}
-			got, err := entryMissingAdminConfig(t.Context(), tt.client, ns, entry, "label")
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantFields, got.SecretBoundFields)
-			assert.Equal(t, tt.wantOAuth, got.StaticOAuth)
-
-			err = got.err("entry")
-			if len(tt.wantFields) == 0 && !tt.wantOAuth {
-				require.NoError(t, err)
-				return
-			}
-			require.Error(t, err)
-			errHTTP, ok := err.(*types.ErrHTTP)
-			require.True(t, ok)
-			assert.Equal(t, http.StatusBadRequest, errHTTP.Code)
-			assert.Contains(t, errHTTP.Message, "catalog entry entry cannot be connected")
-		})
-	}
 }

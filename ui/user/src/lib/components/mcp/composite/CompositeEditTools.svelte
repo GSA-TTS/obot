@@ -4,6 +4,7 @@
 	import Search from '$lib/components/Search.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
 	import { CATALOG_SERVER_FIELD_IDS } from '$lib/constants';
+	import { m } from '$lib/i18n';
 	import type {
 		CompositeServerToolRow,
 		MCPCatalogEntry,
@@ -16,9 +17,6 @@
 		effectiveToolName,
 		isDeprecatedMCPServer,
 		isToolCustomized,
-		MAX_TOOL_PREFIX_LENGTH,
-		TOOL_NAME_CHARSET_REGEX,
-		TOOL_NAME_SPECIAL_CHAR_WARNING,
 		toolNameIssue
 	} from '$lib/services/user/mcp';
 	import McpDeprecatedNotice from '../McpDeprecatedNotice.svelte';
@@ -27,6 +25,7 @@
 	import type { Snippet } from 'svelte';
 
 	interface Props {
+		name?: string;
 		configuringEntry?: MCPCatalogEntry | MCPCatalogServer;
 		onClose?: () => void;
 		onCancel?: () => void;
@@ -37,9 +36,8 @@
 		componentId?: string;
 		// Effective names of enabled tools from OTHER components of the composite,
 		// so the modal can flag cross-component final-name conflicts live as the
-		// admin edits overrides or the prefix.
+		// admin edits overrides. The tool name prefix is edited from component details.
 		otherEffectiveNames?: string[];
-		otherToolPrefixes?: string[];
 		additionalActions?: Snippet;
 		readonly?: boolean;
 	}
@@ -50,13 +48,13 @@
 	};
 
 	let {
+		name,
 		configuringEntry,
 		tools = [],
-		toolPrefix = $bindable(),
+		toolPrefix,
 		profiles,
 		componentId,
 		otherEffectiveNames,
-		otherToolPrefixes,
 		onClose,
 		onCancel,
 		onSuccess,
@@ -69,38 +67,6 @@
 	);
 	let conflictSet = $derived(
 		duplicateToolNames([...(otherEffectiveNames ?? []), ...ownEnabledEffectiveNames])
-	);
-
-	let prefixInvalid = $derived(!TOOL_NAME_CHARSET_REGEX.test(toolPrefix ?? ''));
-	let prefixTooLong = $derived((toolPrefix ?? '').length > MAX_TOOL_PREFIX_LENGTH);
-	let prefixSpecialChar = $derived(/[./]/.test(toolPrefix ?? ''));
-	let duplicatePrefix = $derived.by(() => {
-		const prefix = (toolPrefix ?? '').trim();
-		if (!prefix) return false;
-		return (otherToolPrefixes ?? []).some((p) => p === prefix);
-	});
-	let prefixIssue = $derived(
-		prefixInvalid
-			? ({
-					severity: 'error',
-					message: "Prefix may only contain letters, digits, '.', '/', '_', and '-'."
-				} as const)
-			: prefixTooLong
-				? ({
-						severity: 'error',
-						message: `Prefix must be at most ${MAX_TOOL_PREFIX_LENGTH} characters.`
-					} as const)
-				: duplicatePrefix
-					? ({
-							severity: 'error',
-							message: `Another component already uses the prefix "${(toolPrefix ?? '').trim()}". Non-empty prefixes must be unique across components.`
-						} as const)
-					: prefixSpecialChar
-						? ({
-								severity: 'warning',
-								message: TOOL_NAME_SPECIAL_CHAR_WARNING
-							} as const)
-						: undefined
 	);
 
 	// Only enabled tools contribute to blocking errors; disabled tools aren't exposed.
@@ -179,7 +145,7 @@
 			const matched = disabling.filter((tool) => allowed.includes(tool.name));
 			if (matched.length === 0) continue;
 			impacts.push({
-				name: profile.name || 'Unnamed profile',
+				name: profile.name || m.mcps_composite_unnamed_profile(),
 				tools: matched.map(toolLabel)
 			});
 		}
@@ -241,7 +207,13 @@
 	id={CATALOG_SERVER_FIELD_IDS.compositeEntryEditToolsDialog}
 	bind:this={dialog}
 	animate="slide"
-	title={`${readonly ? 'View' : 'Configure'} ${configuringEntry?.manifest?.name ?? 'MCP Server'} Tools`}
+	title={readonly
+		? m.mcps_composite_view_tools_title({
+				name: name ?? configuringEntry?.manifest?.name ?? m.mcps_server_fallback_name()
+			})
+		: m.mcps_composite_configure_tools_title({
+				name: name ?? configuringEntry?.manifest?.name ?? m.mcps_server_fallback_name()
+			})}
 	class="bg-base-200 md:max-w-(--breakpoint-xl)"
 	classes={{ content: 'p-0', header: 'p-4 pb-0' }}
 	onClickOutside={handleClose}
@@ -252,63 +224,14 @@
 		child
 		class="mx-4 mb-3"
 	/>
-	<p class="text-muted-content px-4 text-xs font-light">
+	<p class="text-muted-content px-4 text-sm font-light">
 		{#if readonly}
-			Tools configured for this server. They cannot be changed here.
+			{m.mcps_composite_tools_readonly_description()}
 		{:else}
-			Toggle what tools are available to users of this composite server. Or modify the name or
-			description of a tool; this will override the default name or description provided by the
-			server. It may affect the LLM's ability to understand the tool so be careful when adjusting
-			these values.
+			{m.mcps_composite_tools_description()}
 		{/if}
 	</p>
 	<div class="relative flex flex-col gap-2 overflow-x-hidden p-4">
-		<div class="flex flex-col gap-1">
-			<p class="flex items-center gap-1.5 text-xs text-muted-content">
-				<span>Tool name prefix</span>
-				{#if prefixIssue}
-					<ToolNameIssueIcon issue={prefixIssue} disablePortal />
-				{/if}
-			</p>
-			<div class="flex items-center gap-2">
-				<input
-					class="text-input-filled shadow-none bg-base-100 flex-1 text-sm"
-					placeholder="No prefix"
-					bind:value={toolPrefix}
-					{readonly}
-				/>
-				{#if !readonly}
-					<button
-						type="button"
-						class="btn btn-secondary btn-sm px-3 py-1"
-						onclick={() => {
-							toolPrefix = '';
-						}}
-					>
-						Clear
-					</button>
-				{/if}
-			</div>
-			{#if prefixIssue}
-				<p class={`text-xs ${prefixIssue.severity === 'error' ? 'text-error' : 'text-warning'}`}>
-					{prefixIssue.message}
-				</p>
-			{:else}
-				<p class="text-muted-content text-[11px]">
-					{#if readonly}
-						Prepended to every tool name exposed by this component.
-					{:else}
-						Prepended to every tool name exposed by this component. Clear to remove.
-					{/if}
-				</p>
-			{/if}
-		</div>
-		<Search
-			class="dark:bg-base-200 dark:border-base-400 bg-base-100 border border-transparent shadow-sm"
-			onChange={(val) => (search = val)}
-			placeholder="Search tools..."
-		/>
-
 		<div class="flex w-full justify-end items-center pr-2.5 gap-1">
 			{#if additionalActions && !readonly}
 				<div>
@@ -324,7 +247,7 @@
 						if (readonly) return;
 						for (const tool of actionableTools) tool.enabled = checked;
 					}}
-					label="Enable All Tools"
+					label={m.mcps_composite_enable_all_tools()}
 					labelInline
 					classes={{
 						label: 'text-sm gap-2'
@@ -333,6 +256,11 @@
 				/>
 			</div>
 		</div>
+		<Search
+			class="dark:bg-base-200 dark:border-base-400 bg-base-100 border border-transparent shadow-sm"
+			onChange={(val) => (search = val)}
+			placeholder={m.mcps_tools_search_placeholder()}
+		/>
 		{#each visibleTools as tool (tool.id)}
 			{@const currentName = (tool.overrideName || '').trim() || tool.name}
 			{@const currentDescription = (tool.overrideDescription || '').trim() || tool.description}
@@ -380,7 +308,9 @@
 										expandedTools[tool.id] = !expandedTools[tool.id];
 									}}
 								>
-									{expandedTools[tool.id] ? 'Hide details' : 'Customize'}
+									{expandedTools[tool.id]
+										? m.mcps_composite_hide_details()
+										: m.mcps_composite_customize()}
 								</button>
 								<div class="divider divider-horizontal mx-0"></div>
 							{/if}
@@ -391,20 +321,24 @@
 									if (readonly || tool.removed) return;
 									tool.enabled = checked;
 								}}
-								label={`${tool.enabled ? 'Disable Tool' : 'Enable Tool'}`}
+								label={tool.enabled
+									? m.mcps_composite_disable_tool()
+									: m.mcps_composite_enable_tool()}
 								disablePortal
 							/>
 						</div>
 					</div>
 					{#if tool.removed}
-						<p class="text-muted-content text-[11px] italic">This tool is no longer available.</p>
+						<p class="text-muted-content text-[11px] italic">
+							{m.mcps_composite_tool_removed()}
+						</p>
 					{/if}
 
 					{#if isCustomized}
 						<div class="mt-1 flex items-center gap-1 text-[11px] text-amber-600">
 							<TriangleAlert class="size-3 shrink-0" />
 							<p>
-								Modified: This tool has been customized. The description or name has been changed.
+								{m.mcps_composite_tool_modified()}
 							</p>
 						</div>
 					{/if}
@@ -412,7 +346,7 @@
 					{#if expandedTools[tool.id]}
 						<div class="mt-2 flex flex-col gap-2">
 							<div class="flex flex-col gap-1">
-								<p class="text-xs text-muted-content">Tool name</p>
+								<p class="text-xs text-muted-content">{m.mcps_composite_tool_name()}</p>
 								<input
 									class="text-input-filled flex-1 text-sm"
 									bind:value={tool.overrideName}
@@ -421,11 +355,11 @@
 							</div>
 
 							<div class="flex flex-col gap-1">
-								<p class="text-xs text-muted-content">Description</p>
+								<p class="text-xs text-muted-content">{m.core_description()}</p>
 								<textarea
 									class="text-input-filled h-24 resize-none text-xs"
 									bind:value={tool.overrideDescription}
-									placeholder="Enter tool description..."
+									placeholder={m.mcps_composite_tool_description_placeholder()}
 									{readonly}></textarea>
 							</div>
 
@@ -439,7 +373,7 @@
 											tool.overrideDescription = tool.description;
 										}}
 									>
-										Reset to default
+										{m.mcps_composite_reset_to_default()}
 									</button>
 								</div>
 							{/if}
@@ -452,14 +386,14 @@
 	<div class="bg-base-200 sticky bottom-0 left-0 mt-4 flex w-full justify-end gap-2 p-4">
 		<div class="flex gap-2 items-center">
 			<button class="btn btn-secondary" onclick={handleCancel}
-				>{readonly ? 'Close' : 'Cancel'}</button
+				>{readonly ? m.core_close() : m.common_cancel()}</button
 			>
 			{#if !readonly}
 				<button
 					id={CATALOG_SERVER_FIELD_IDS.compositeEntryConfigureToolsConfirmBtn}
 					class="btn btn-primary"
-					disabled={hasBlockingToolNameErrors || prefixIssue?.severity === 'error'}
-					onclick={handleSave}>Confirm</button
+					disabled={hasBlockingToolNameErrors}
+					onclick={handleSave}>{m.core_confirm()}</button
 				>
 			{/if}
 		</div>
@@ -467,15 +401,24 @@
 </ResponsiveDialog>
 
 <!-- Confirmation Dialog for Unsaved Changes -->
-<ResponsiveDialog bind:this={confirmDialog} title="Discard Changes?" class="max-w-xl">
+<ResponsiveDialog
+	bind:this={confirmDialog}
+	title={m.mcps_composite_discard_changes_title()}
+	class="max-w-xl"
+>
 	<p class="text-muted-content mb-4 text-sm">
-		You have unsaved changes for {configuringEntry?.manifest?.name ?? 'MCP Server'} configuration. Are
-		you sure you want to discard these changes?
+		{m.mcps_composite_unsaved_changes({
+			name: configuringEntry?.manifest?.name ?? m.mcps_server_fallback_name()
+		})}
 	</p>
 
 	<div class="flex justify-end gap-3">
-		<button class="btn btn-secondary" onclick={cancelDiscard}>Keep Editing</button>
-		<button class="btn btn-error" onclick={confirmDiscard}> Discard Changes </button>
+		<button class="btn btn-secondary" onclick={cancelDiscard}
+			>{m.mcps_composite_keep_editing()}</button
+		>
+		<button class="btn btn-error" onclick={confirmDiscard}>
+			{m.mcps_composite_discard_changes()}
+		</button>
 	</div>
 </ResponsiveDialog>
 
@@ -483,19 +426,19 @@
 	show={profileToolImpact.length > 0}
 	onsuccess={confirmSave}
 	oncancel={cancelSave}
-	title="Confirm Save"
-	submitText="Save"
+	title={m.mcps_composite_confirm_save()}
+	submitText={m.core_save()}
 	type="info"
-	msg="Are you sure you want to save these changes?"
+	msg={m.mcps_composite_confirm_save_msg()}
 >
 	{#snippet note()}
-		<p>The following profile(s) will be impacted by these changes:</p>
+		<p>{m.mcps_composite_profiles_impacted()}</p>
 
 		<table class="table table-xs my-4">
 			<thead class="text-xs">
 				<tr>
-					<th>Name</th>
-					<th>Affected Tool(s)</th>
+					<th>{m.core_name()}</th>
+					<th>{m.mcps_composite_affected_tools()}</th>
 				</tr>
 			</thead>
 			<tbody>

@@ -34,6 +34,17 @@ const (
 )
 
 type Client struct {
+	egressAuditLock           sync.Mutex
+	egressAuditPersistLock    sync.Mutex
+	egressAuditBuffer         []types.EgressAuditLog
+	egressAuditPending        int
+	egressAuditBytes          int
+	egressAuditDropped        uint64
+	egressAuditOverflowLogged time.Time
+	kickEgressAuditPersist    chan struct{}
+	egressAuditCancel         context.CancelFunc
+	egressAuditDone           chan struct{}
+
 	db                        *db.DB
 	encryptionConfig          *encryptionconfig.EncryptionConfiguration
 	emailsWithExplicitRoles   map[string]types2.Role
@@ -61,6 +72,7 @@ type Client struct {
 	mcpOAuthTokenTrigger      func(context.Context, string) error
 	groupRefresh              singleflight.Group
 	groupCooldown             groupRefreshCooldown
+	kickLifecycleDelivery     chan struct{}
 }
 
 func New(ctx context.Context, db *db.DB, storageClient kclient.Client, encryptionConfig *encryptionconfig.EncryptionConfiguration, mcpOAuthTokenTrigger func(context.Context, string) error, ownerEmails, adminEmails []string, auditLogPersistenceInterval time.Duration, auditLogBatchSize, auditLogRetentionDays, llmAuditLogRetentionDays, deviceScanRetentionDays int, llmAuditEnabled bool) *Client {
@@ -72,7 +84,12 @@ func New(ctx context.Context, db *db.DB, storageClient kclient.Client, encryptio
 	for _, email := range ownerEmails {
 		explicitRoleEmailsSet[strings.ToLower(email)] = types2.RoleOwner
 	}
+	egressCtx, egressCancel := context.WithCancel(ctx)
 	c := &Client{
+		egressAuditBuffer:         make([]types.EgressAuditLog, 0, min(2*auditLogBatchSize, egressAuditMaxEntries)),
+		kickEgressAuditPersist:    make(chan struct{}, 1),
+		egressAuditCancel:         egressCancel,
+		egressAuditDone:           make(chan struct{}),
 		db:                        db,
 		encryptionConfig:          encryptionConfig,
 		emailsWithExplicitRoles:   explicitRoleEmailsSet,
@@ -93,8 +110,10 @@ func New(ctx context.Context, db *db.DB, storageClient kclient.Client, encryptio
 		auditLogDeleteBatchSize:   defaultAuditLogDeleteBatchSize,
 		deviceScanCleanupInterval: defaultDeviceScanCleanupInterval,
 		deviceScanDeleteBatchSize: defaultDeviceScanDeleteBatchSize,
+		kickLifecycleDelivery:     make(chan struct{}, 1),
 	}
 
+	go c.runEgressAuditPersistenceLoop(egressCtx, auditLogPersistenceInterval)
 	go c.runMCPAuditLogPersistenceLoop(ctx, auditLogPersistenceInterval)
 	go c.runEnforcementDecisionPersistenceLoop(ctx, auditLogPersistenceInterval)
 	go c.runLLMAuditPersistenceLoop(ctx, c.llmAuditBatchSize, auditLogPersistenceInterval)
@@ -103,11 +122,20 @@ func New(ctx context.Context, db *db.DB, storageClient kclient.Client, encryptio
 	go c.runAPIKeyCacheCleanup(ctx)
 	go c.runRetentionCleanup(ctx, auditLogRetentionDays, llmAuditLogRetentionDays)
 	go c.runDeviceScanCleanup(ctx, deviceScanRetentionDays)
+	go c.runUserLifecycleEventDelivery(ctx)
+	go c.runSCIMGroupDeletionMarkExpiry(ctx)
 	return c
 }
 
 func (c *Client) Close() error {
 	var errs []error
+	if c.egressAuditCancel != nil {
+		c.egressAuditCancel()
+		<-c.egressAuditDone
+	}
+	if err := c.FlushEgressAuditLogs(); err != nil {
+		errs = append(errs, fmt.Errorf("failed to persist egress audit logs: %w", err))
+	}
 	if err := c.persistMCPAuditLogs(); err != nil {
 		errs = append(errs, fmt.Errorf("failed to persist audit logs: %w", err))
 	}

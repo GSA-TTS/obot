@@ -1,12 +1,12 @@
 ---
-title: MCP Server GitOps
+title: "Git Catalogs"
 ---
 
 ## Overview
 
 Obot supports managing MCP servers through Git repositories, enabling GitOps workflows. Instead of manually adding MCP servers one at a time, administrators can source server configurations from Git repositories. This supports collaborative workflows with proper code review, versioning, and automated validation processes.
 
-Catalog sources can also define [vMCPs](../functionality/virtual-mcps.md) whose components refer to entries in those sources.
+Catalog sources can also define [vMCPs](../mcp-gateway/server-types.md) whose components refer to entries in those sources.
 
 ### Key Benefits
 
@@ -118,6 +118,8 @@ obot mcp validate-catalog --format json .
 
 For system MCP catalog entries, use `obot mcp validate-system-catalog` with the same `--format yaml|json` flag. Both commands default to `yaml`; other format values are rejected.
 
+Both commands validate entries against the Obot version of the CLI. An entry whose [Obot version range](#obot-version-range) excludes that version is skipped the same way catalog sync skips it: the command checks only the entry's version range and that its `entryKey` (or, for system catalog entries, its name) is valid and unique, and prints a note to stderr instead of validating the rest of the entry. A development build of the CLI validates every entry. To validate entries that require a newer Obot version, use a CLI from that version or later.
+
 The previous names, `validate-catalog-yaml` and `validate-system-catalog-yaml`, remain available as compatibility aliases with the same flags and YAML default.
 
 ## Converting Legacy Catalog Configuration
@@ -162,17 +164,20 @@ The optional `entryKey` field defines a stable key for this catalog entry. It mu
 
 ### vMCP definitions
 
-Set top-level `type: vmcp` to synchronize a vMCP. An omitted or empty `type` means `entry`. A vMCP uses the [vMCP manifest fields](../functionality/virtual-mcps.md), plus an optional `entryKey` that keeps its identity stable when its display name changes:
+Set top-level `type: vmcp` to synchronize a vMCP. An omitted or empty `type` means `entry`. A vMCP uses the [vMCP manifest fields](../mcp-gateway/server-types.md), plus an optional `entryKey` that keeps its identity stable when its display name changes:
 
 ```yaml
 type: vmcp
 entryKey: research
 displayName: Research
+toolSearch: true # Optional; defaults to false for direct tool listing and calls.
 components:
   - name: Search
     id: search-component
     mcpServerCatalogEntryKey: search
 ```
+
+With `toolSearch: true`, clients discover tools through `search_tools` and invoke them through `call_tool`. See [Tool search](../mcp-gateway/server-types.md#tool-search) for client behavior and access controls.
 
 Each component's `mcpServerCatalogEntryKey` names an entry's `entryKey` in the same source. To refer to an entry in another source of the same catalog, use `sourceID::entryKey`, where `sourceID` is the source URL without `http://` or `https://` and trailing slashes. Catalog entries used as vMCP components therefore need an `entryKey`. A vMCP can be in its own file or in a YAML/JSON list alongside entries.
 
@@ -268,6 +273,26 @@ repoURL: https://github.com/owner/repo
 `unsupportedTools` is a comma-separated list of tools that are known not to work well in Obot. Obot marks these tools as unsupported and leaves them unselected by default, but this field is not an access-control restriction: a client connected directly to the MCP server can still discover them through `tools/list` and call them.
 
 To restrict which tools clients can discover and call, create a [virtual MCP (vMCP)](../concepts/mcp-hosting.md#virtual-mcps-vmcps) and configure its exposed tools and access profiles.
+
+### Obot Version Range
+
+```yaml
+minObotVersion: v0.27.0 # optional
+maxObotVersion: v0.30.0 # optional
+```
+
+Use `minObotVersion` and `maxObotVersion` to offer an entry only on the Obot versions that support it, for example when the entry relies on functionality added in a specific release. Both fields are optional and inclusive, and an omitted field leaves that side of the range unrestricted. Values must be full release versions with a leading `v`, such as `v0.27.0`.
+
+When the running Obot version is outside the range, Obot skips the entry during catalog sync, as if the entry were not in the source:
+
+- The entry does not appear in Obot and cannot be used to create servers.
+- A [vMCP definition](#vmcp-definitions) that references the entry is not created. A vMCP that already exists is kept as it is, without catalog updates, until the entry is back in range. vMCP definitions do not support `minObotVersion` and `maxObotVersion` themselves.
+- Skipped entries do not cause sync errors, even if they use fields or runtimes that the running Obot version does not support.
+- If an entry that was previously synced falls outside the range, Obot handles it the same way as an entry removed from the source.
+
+Obot re-syncs its catalogs when it starts on a new version, so entries become available or unavailable as soon as you upgrade. Development builds ignore the version range. Obot versions released before support for these fields ignore them and show the entry.
+
+These fields also apply to entries in the system MCP catalog, such as [built-in filters](../functionality/filters.md#built-in-filters). They are only supported on entries synced from a catalog source.
 
 ### Environment Variables
 
@@ -451,7 +476,6 @@ env:
 - Not supported for `remote` runtime env vars (use a header binding instead).
 - `required: false` is allowed — when the Secret or key is absent the server deploys without that env var.
 - For `remoteConfig.urlTemplate`, `${VAR}` placeholders must not reference env vars that use `secretBinding`.
-- Do not set `secretBinding.adminAdded` in Git catalog YAML. Obot sets this field only on deployed servers for admin-selected bindings.
 
 #### File binding
 
@@ -511,6 +535,54 @@ remoteConfig:
         name: api-token-secret
         key: token
 ```
+
+### OpenAPI schemas
+
+Use the `openapi` runtime to expose an HTTP API as an MCP server. These examples use [Frankfurter](https://frankfurter.dev/), a public exchange-rate API that requires no authentication.
+
+To import a schema through the admin UI, follow [OpenAPI: Import an HTTP API](../concepts/mcp-hosting.md#openapi-import-an-http-api).
+
+#### Basic example
+
+This exposes the API's operations as MCP tools:
+
+```yaml
+name: Frankfurter
+description: Currency information and exchange rates
+runtime: openapi
+openAPIConfig:
+  source:
+    url: https://api.frankfurter.dev/v2/openapi.json
+  baseURL: https://api.frankfurter.dev/v2 # Optional override
+```
+
+#### Header input
+
+Configure API token headers as required, sensitive inputs:
+
+```yaml
+name: Frankfurter with header input
+description: Currency information and exchange rates
+runtime: openapi
+openAPIConfig:
+  source:
+    url: https://api.frankfurter.dev/v2/openapi.json
+  baseURL: https://api.frankfurter.dev/v2 # Optional override
+config:
+  - key: Authorization
+    name: Example API token
+    description: Demonstration only; enter a dummy value for Frankfurter.
+    usage: header
+    required: true
+    sensitive: true
+    prefix: "Bearer "
+```
+
+Instead of `source.url`, use `source.content: |` with an inline JSON or YAML schema. Set exactly one source. Do not set `schema`; Obot generates it from the source, and entries that set it fail to sync. Omit `config` for APIs without authentication. Configure any credential headers declared by the schema; GitOps does not automatically add them. Supply credentials through Obot, not in the catalog file. OAuth flows are not supported; OAuth declarations do not prevent importing a schema.
+
+If importing or validating a schema fails, the catalog reports a sync error and keeps its last good entry. Schema download URLs and parsed API target URLs use the same localhost, private-IP, and link-local restrictions configured for remote MCP servers. In production, schema URLs and API targets must use HTTPS. Schema URLs cannot include authentication or redirects, and catalog access tokens are never forwarded to them. Schemas are limited to 1 MiB and must be self-contained, without external references.
+
+Obot supplies a default hosted OpenAPI wrapper image, so no custom MCP server image is needed. Running servers use the imported snapshot; synchronizing the catalog source imports the schema again and retains the last good entry if import or validation fails.
 
 ### Runtime Configuration
 
@@ -597,7 +669,7 @@ This example demonstrates all the key components: descriptive content with markd
 
 ## Migrating Git-synced composites to vMCPs
 
-When Obot upgrades to a release without composite MCP servers, it converts every composite catalog entry to a [vMCP](../functionality/virtual-mcps.md) at startup. The vMCP keeps the composite's components, tool settings, access, configuration, and users' existing connections and credentials.
+When Obot upgrades to a release without composite MCP servers, it converts every composite catalog entry to a [vMCP](../mcp-gateway/server-types.md) at startup. The vMCP keeps the composite's components, tool settings, access, configuration, and users' existing connections and credentials.
 
 Composites that you created in the Obot UI need no further action. A composite that was synced from a Git source becomes an **orphaned** vMCP: Obot keeps serving it, but no catalog source defines it. To manage it through GitOps again, publish a matching vMCP definition in the same source. On its next sync, Obot adopts the vMCP instead of creating a new one, so connections and credentials carry over.
 

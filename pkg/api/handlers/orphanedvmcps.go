@@ -26,6 +26,7 @@ type catalogVMCPItem struct {
 	DisplayName string                 `json:"displayName"`
 	Description string                 `json:"description,omitempty"`
 	Icon        string                 `json:"icon,omitempty"`
+	ToolSearch  bool                   `json:"toolSearch,omitempty"`
 	Components  []catalogVMCPComponent `json:"components"`
 	// Profiles is never omitted: sync replaces a missing list with an admin-only default.
 	Profiles []types.VMCPProfile `json:"profiles"`
@@ -37,7 +38,6 @@ type catalogVMCPComponent struct {
 	Name                     string                          `json:"name"`
 	MCPServerCatalogEntryKey string                          `json:"mcpServerCatalogEntryKey"`
 	Configuration            []types.VMCPConfigurationPolicy `json:"configuration,omitempty"`
-	AllowedTools             []string                        `json:"allowedTools,omitempty"`
 	ToolPrefix               string                          `json:"toolPrefix,omitempty"`
 	ToolOverrides            []types.ToolOverride            `json:"toolOverrides,omitempty"`
 }
@@ -123,6 +123,7 @@ func orphanedVMCPCatalogYAML(req api.Context, catalog *v1.MCPCatalog, vmcp *v1.V
 		DisplayName: vmcp.Spec.Manifest.DisplayName,
 		Description: vmcp.Spec.Manifest.Description,
 		Icon:        vmcp.Spec.Manifest.Icon,
+		ToolSearch:  vmcp.Spec.Manifest.ToolSearch,
 		Components:  make([]catalogVMCPComponent, 0, len(vmcp.Spec.Manifest.Components)),
 		Profiles:    vmcp.Spec.Manifest.Profiles,
 	}
@@ -146,7 +147,6 @@ func orphanedVMCPCatalogYAML(req api.Context, catalog *v1.MCPCatalog, vmcp *v1.V
 			Name:                     component.Name,
 			MCPServerCatalogEntryKey: reference,
 			Configuration:            configuration,
-			AllowedTools:             component.AllowedTools,
 			ToolPrefix:               component.ToolPrefix,
 			ToolOverrides:            component.ToolOverrides,
 		})
