@@ -1,7 +1,7 @@
-import type { MCPCatalogEntry } from '$lib/services';
+import type { MCPCatalogEntry, VMCP } from '$lib/services';
 import { borderAnchor, buildWirePath, distanceToRect } from '../../services/vmcps/utils';
+import { onDestroy } from 'svelte';
 import type { Action } from 'svelte/action';
-import type { Attachment } from 'svelte/attachments';
 
 export const CREATE_VMCP_DROP_ID = '__create__';
 
@@ -20,12 +20,17 @@ type DropTarget = {
 };
 
 export interface EntryDragOptions {
-	composites: () => MCPCatalogEntry[];
+	vmcps: () => VMCP[];
 	panelEl: () => HTMLElement | undefined;
+	/** Graph canvas. A drag over this surface links to {@link canvasDropId} without a proximity check. */
+	canvasEl?: () => HTMLElement | undefined;
+	/** Selected vMCP id, or {@link CREATE_VMCP_DROP_ID} when the canvas is empty. */
+	canvasDropId?: () => string | undefined;
 	openEntry: (entry: MCPCatalogEntry) => void;
-	createEntry: (target?: { vmcp?: MCPCatalogEntry }) => void;
+	createEntry: (target?: { vmcp?: VMCP }) => void;
 	dropOnCreate: (entry: MCPCatalogEntry) => void;
-	dropOnVMcp: (entry: MCPCatalogEntry, vmcp: MCPCatalogEntry) => void;
+	dropOnVMcp: (entry: MCPCatalogEntry, vmcp: VMCP) => void;
+	disabled?: () => boolean;
 }
 
 /**
@@ -52,8 +57,11 @@ export function createEntryDrag(options: EntryDragOptions) {
 	let createEl = $state<HTMLElement>();
 	const vmcpEls = $state<Record<string, HTMLElement>>({});
 	const componentEls = $state<Record<string, { target: ComponentTarget; el: HTMLElement }>>({});
+	let capturedEl: HTMLElement | undefined;
+	let listening = false;
+	const pointerListenerOpts = { capture: true } as const;
 
-	const linkedVMcp = $derived(options.composites().find((vmcp) => vmcp.id === linkedVMcpId));
+	const linkedVMcp = $derived(options.vmcps().find((vmcp) => vmcp.id === linkedVMcpId));
 
 	const wire = $derived.by(() => {
 		if (!drag?.active || !linkedVMcpId) return undefined;
@@ -77,10 +85,24 @@ export function createEntryDrag(options: EntryDragOptions) {
 		return () => cancelAnimationFrame(frame);
 	});
 
+	function isDisabled() {
+		return options.disabled?.() === true;
+	}
+
+	$effect(() => {
+		if (isDisabled() && drag?.active) cancel();
+	});
+
 	function isOutsidePanel(x: number, y: number) {
 		const rect = options.panelEl()?.getBoundingClientRect();
 		if (!rect) return true;
 		return x < rect.left || x > rect.right || y < rect.top || y > rect.bottom;
+	}
+
+	function isInside(el: HTMLElement | undefined, x: number, y: number) {
+		if (!el) return false;
+		const rect = el.getBoundingClientRect();
+		return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 	}
 
 	function dropTargets() {
@@ -88,7 +110,7 @@ export function createEntryDrag(options: EntryDragOptions) {
 		if (createEl) {
 			targets.push({ vmcpId: CREATE_VMCP_DROP_ID, el: createEl, isComponentsPanel: false });
 		}
-		for (const vmcp of options.composites()) {
+		for (const vmcp of options.vmcps()) {
 			const card = vmcpEls[vmcp.id];
 			if (card) targets.push({ vmcpId: vmcp.id, el: card, isComponentsPanel: false });
 		}
@@ -106,6 +128,26 @@ export function createEntryDrag(options: EntryDragOptions) {
 	function updateLinkTarget() {
 		if (!drag?.active || !isOutsidePanel(drag.x, drag.y)) {
 			clearLinkTarget();
+			return;
+		}
+
+		// A target the pointer sits directly on wins, so the create button and the component blocks
+		// drawn on the canvas stay droppable. Anywhere else on the canvas falls back to the canvas
+		// itself rather than making the user come within reach of a card.
+		const point = { x: drag.x, y: drag.y };
+		const hovered = dropTargets().find((target) => isInside(target.el, point.x, point.y));
+		if (hovered) {
+			linkedVMcpId = hovered.vmcpId;
+			linkedViaComponentsPanel = hovered.isComponentsPanel;
+			linkedComponentKey = hovered.componentKey;
+			return;
+		}
+
+		const canvasDropId = options.canvasDropId?.();
+		if (canvasDropId && isInside(options.canvasEl?.(), drag.x, drag.y)) {
+			linkedVMcpId = canvasDropId;
+			linkedViaComponentsPanel = false;
+			linkedComponentKey = undefined;
 			return;
 		}
 
@@ -129,9 +171,44 @@ export function createEntryDrag(options: EntryDragOptions) {
 		linkedComponentKey = undefined;
 	}
 
+	function attachPointerListeners() {
+		if (listening) return;
+		listening = true;
+		window.addEventListener('pointermove', pointerMove, pointerListenerOpts);
+		window.addEventListener('pointerup', pointerUp, pointerListenerOpts);
+		window.addEventListener('pointercancel', handlePointerCancel, pointerListenerOpts);
+	}
+
+	function detachPointerListeners() {
+		if (!listening) return;
+		listening = false;
+		window.removeEventListener('pointermove', pointerMove, pointerListenerOpts);
+		window.removeEventListener('pointerup', pointerUp, pointerListenerOpts);
+		window.removeEventListener('pointercancel', handlePointerCancel, pointerListenerOpts);
+	}
+
+	function releaseCapture() {
+		const el = capturedEl;
+		const pointerId = drag?.pointerId;
+		capturedEl = undefined;
+		if (!el || pointerId == null) return;
+		try {
+			if (el.hasPointerCapture(pointerId)) el.releasePointerCapture(pointerId);
+		} catch {
+			// The source node may already have been unmounted.
+		}
+	}
+
 	function cancel() {
+		releaseCapture();
+		detachPointerListeners();
 		drag = undefined;
 		clearLinkTarget();
+	}
+
+	function handlePointerCancel(event: PointerEvent) {
+		if (!drag || event.pointerId !== drag.pointerId) return;
+		cancel();
 	}
 
 	function activate(entry?: MCPCatalogEntry) {
@@ -144,15 +221,27 @@ export function createEntryDrag(options: EntryDragOptions) {
 
 	function pointerDown(event: PointerEvent, entry?: MCPCatalogEntry) {
 		if (event.button !== 0) return;
+		if (drag) cancel();
 
 		const card = event.currentTarget as HTMLButtonElement;
-		card.setPointerCapture(event.pointerId);
+		capturedEl = card;
+		try {
+			card.setPointerCapture(event.pointerId);
+		} catch {
+			// Capture can fail if the pointer is already gone; window listeners still track it.
+		}
 		dragOrigin = { x: event.clientX, y: event.clientY };
 		drag = { entry, pointerId: event.pointerId, x: event.clientX, y: event.clientY, active: false };
+		attachPointerListeners();
 	}
 
 	function pointerMove(event: PointerEvent) {
 		if (!drag || event.pointerId !== drag.pointerId) return;
+
+		if (isDisabled()) {
+			if (drag.active) cancel();
+			return;
+		}
 
 		drag.x = event.clientX;
 		drag.y = event.clientY;
@@ -169,10 +258,15 @@ export function createEntryDrag(options: EntryDragOptions) {
 	function pointerUp(event: PointerEvent) {
 		if (!drag || event.pointerId !== drag.pointerId) return;
 
+		event.preventDefault();
+		event.stopPropagation();
+
 		const dropped = drag;
 		const vmcp = linkedVMcp;
 		const dropOnCreate = linkedVMcpId === CREATE_VMCP_DROP_ID;
 		cancel();
+
+		if (isDisabled()) return;
 
 		if (!dropped.active) {
 			activate(dropped.entry);
@@ -220,17 +314,6 @@ export function createEntryDrag(options: EntryDragOptions) {
 		};
 	};
 
-	/**
-	 * Attachment form of {@link vmcpTarget}, for drop targets a parent can only reach through a
-	 * prop rather than a directive, such as a row rendered by a shared table component.
-	 */
-	const vmcpTargetAttachment =
-		(vmcpId: string): Attachment<HTMLElement> =>
-		(node) => {
-			const registered = vmcpTarget(node, vmcpId);
-			return () => registered?.destroy?.();
-		};
-
 	const componentTarget: Action<HTMLElement, ComponentTarget> = (node, target) => {
 		let current = `${target.vmcpId}::${target.key}`;
 		componentEls[current] = { target, el: node };
@@ -247,6 +330,8 @@ export function createEntryDrag(options: EntryDragOptions) {
 			}
 		};
 	};
+
+	onDestroy(cancel);
 
 	return {
 		/** A drag that has travelled far enough to be more than a click. */
@@ -283,6 +368,9 @@ export function createEntryDrag(options: EntryDragOptions) {
 		get isDraggingNewEntry() {
 			return drag?.active === true && !drag.entry;
 		},
+		get disabled() {
+			return isDisabled();
+		},
 		activate,
 		cancel,
 		pointerDown,
@@ -290,7 +378,6 @@ export function createEntryDrag(options: EntryDragOptions) {
 		pointerUp,
 		createTarget,
 		vmcpTarget,
-		vmcpTargetAttachment,
 		componentTarget
 	};
 }

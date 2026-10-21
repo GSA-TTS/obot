@@ -86,26 +86,6 @@ func TestComputeK8sSettingsHashUsesServerSpecificResources(t *testing.T) {
 		t.Fatalf("remote server hash = %s, want %s", got, remoteBaseHash)
 	}
 
-	compositeBaseHash := ComputeK8sSettingsHash(
-		baseSettings,
-		nil,
-		types.RuntimeComposite,
-		false,
-		nil,
-	)
-	if got := ComputeK8sSettingsHash(
-		resourceSettings,
-		nil,
-		types.RuntimeComposite,
-		false,
-		nil,
-	); got != compositeBaseHash {
-		t.Fatalf("composite server hash = %s, want %s", got, compositeBaseHash)
-	}
-	if compositeBaseHash != remoteBaseHash {
-		t.Fatalf("composite base hash = %s, want remote base hash %s", compositeBaseHash, remoteBaseHash)
-	}
-
 	agentBaseHash := ComputeK8sSettingsHash(
 		baseSettings,
 		nil,
@@ -483,8 +463,8 @@ func TestK8sObjects_DoesNotCreateShimContainer(t *testing.T) {
 	}
 }
 
-func TestK8sObjects_RemoteAndCompositeCreateNoObjects(t *testing.T) {
-	for _, runtime := range []types.Runtime{types.RuntimeRemote, types.RuntimeComposite} {
+func TestK8sObjects_RemoteAndVMCPCreateNoObjects(t *testing.T) {
+	for _, runtime := range []types.Runtime{types.RuntimeRemote, types.RuntimeVMCP} {
 		t.Run(string(runtime), func(t *testing.T) {
 			k := newTestKubernetesBackend(t)
 
@@ -789,8 +769,12 @@ func TestAnalyzePodStatus(t *testing.T) {
 			name: "running mcp container remains retryable",
 			pod: corev1.Pod{
 				Status: corev1.PodStatus{
-					Phase:             corev1.PodRunning,
-					ContainerStatuses: []corev1.ContainerStatus{{Name: "mcp"}},
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "mcp",
+						},
+					},
 				},
 			},
 			wantRetryable:   true,
@@ -801,12 +785,14 @@ func TestAnalyzePodStatus(t *testing.T) {
 			pod: corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodPending,
-					ContainerStatuses: []corev1.ContainerStatus{{
-						Name: "mcp",
-						State: corev1.ContainerState{
-							Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"},
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "mcp",
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"},
+							},
 						},
-					}},
+					},
 				},
 			},
 			wantRetryable:   true,
@@ -818,11 +804,13 @@ func TestAnalyzePodStatus(t *testing.T) {
 			pod: corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodPending,
-					Conditions: []corev1.PodCondition{{
-						Type:   corev1.PodScheduled,
-						Status: corev1.ConditionFalse,
-						Reason: corev1.PodReasonUnschedulable,
-					}},
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   corev1.PodScheduled,
+							Status: corev1.ConditionFalse,
+							Reason: corev1.PodReasonUnschedulable,
+						},
+					},
 				},
 			},
 			wantRetryable:   true,
@@ -834,12 +822,14 @@ func TestAnalyzePodStatus(t *testing.T) {
 			pod: corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
-					ContainerStatuses: []corev1.ContainerStatus{{
-						Name: "mcp",
-						State: corev1.ContainerState{
-							Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off restarting failed container"},
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "mcp",
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off restarting failed container"},
+							},
 						},
-					}},
+					},
 				},
 			},
 			wantErr:         ErrPodCrashLoopBackOff,
@@ -883,13 +873,15 @@ func TestAnalyzePodStatus(t *testing.T) {
 			pod: corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
-					ContainerStatuses: []corev1.ContainerStatus{{
-						Name:         "mcp",
-						RestartCount: 4,
-						State: corev1.ContainerState{
-							Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"},
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name:         "mcp",
+							RestartCount: 4,
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"},
+							},
 						},
-					}},
+					},
 				},
 			},
 			wantErr:         ErrPodCrashLoopBackOff,
@@ -911,7 +903,7 @@ func TestAnalyzePodStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			retryable, err := analyzePodStatus(t.Context(), &tt.pod, tt.server)
+			retryable, err := analyzePodStatus(t.Context(), &tt.pod, tt.server, &podHealthCheckState{})
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("analyzePodStatus() error = %v, want %v", err, tt.wantErr)
@@ -929,16 +921,95 @@ func TestAnalyzePodStatus(t *testing.T) {
 	}
 }
 
+func TestGetNewestPodSkipsTerminatingPods(t *testing.T) {
+	now := metav1.Now()
+	oldPod := corev1.Pod{
+		Name:              "old",
+		CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+		DeletionTimestamp: &now,
+	}
+	newPod := corev1.Pod{
+		Name:              "new",
+		CreationTimestamp: now,
+	}
+	terminatingPod := corev1.Pod{
+		Name:              "newest-terminating",
+		CreationTimestamp: metav1.NewTime(now.Add(time.Minute)),
+		DeletionTimestamp: &now,
+	}
+	for _, tt := range []struct {
+		name string
+		pods []corev1.Pod
+		want string
+	}{
+		{
+			name: "no pods",
+		},
+		{
+			name: "replacement not created yet",
+			pods: []corev1.Pod{oldPod},
+		},
+		{
+			name: "replacement created",
+			pods: []corev1.Pod{oldPod, newPod},
+			want: "new",
+		},
+		{
+			name: "newest pod is terminating",
+			pods: []corev1.Pod{newPod, terminatingPod},
+			want: "new",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pod, err := getNewestPod(tt.pods)
+			if tt.want == "" {
+				if err == nil || pod != nil {
+					t.Fatalf("getNewestPod() = %v, %v, want no eligible pod", pod, err)
+				}
+				return
+			}
+			if err != nil || pod == nil || pod.Name != tt.want {
+				t.Fatalf("getNewestPod() = %v, %v, want %s", pod, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestAnalyzePodStatusCommandRuntimeHealthCheck(t *testing.T) {
 	tests := []struct {
 		name              string
 		runtime           types.Runtime
 		podIP             string
 		statusCode        int
+		requestErr        error
 		wantCalls         int
 		wantRetryable     bool
 		wantHealthFailure bool
 	}{
+		{
+			name:          "connection failure returns to deployment watch after one attempt",
+			runtime:       types.RuntimeNPX,
+			podIP:         "10.0.0.7",
+			requestErr:    io.EOF,
+			wantCalls:     1,
+			wantRetryable: true,
+		},
+		{
+			name:          "503 returns to deployment watch after one attempt",
+			runtime:       types.RuntimeUVX,
+			podIP:         "10.0.0.7",
+			statusCode:    http.StatusServiceUnavailable,
+			wantCalls:     1,
+			wantRetryable: true,
+		},
+		{
+			name:          "425 returns to deployment watch after one attempt",
+			runtime:       types.RuntimeNPX,
+			podIP:         "10.0.0.7",
+			statusCode:    http.StatusTooEarly,
+			wantCalls:     1,
+			wantRetryable: true,
+		},
 		{
 			name:              "NPX fails immediately on health check 500",
 			runtime:           types.RuntimeNPX,
@@ -987,8 +1058,16 @@ func TestAnalyzePodStatusCommandRuntimeHealthCheck(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				calls++
 				gotURL = req.URL.String()
+				if calls == 1 && tt.requestErr != nil {
+					return nil, tt.requestErr
+				}
+				statusCode := tt.statusCode
+				if calls > 1 {
+					// Let an accidental retry finish so the call-count assertion reports it.
+					statusCode = http.StatusOK
+				}
 				return &http.Response{
-					StatusCode: tt.statusCode,
+					StatusCode: statusCode,
 					Body:       io.NopCloser(strings.NewReader("tool discovery failed")),
 					Header:     make(http.Header),
 					Request:    req,
@@ -1003,10 +1082,13 @@ func TestAnalyzePodStatusCommandRuntimeHealthCheck(t *testing.T) {
 			}, ServerConfig{
 				Runtime:     tt.runtime,
 				HealthzPath: "/healthz",
-			}, client)
+			}, client, &podHealthCheckState{})
 
 			if retryable != tt.wantRetryable {
 				t.Fatalf("analyzePodStatusWithClient() retryable = %v, want %v", retryable, tt.wantRetryable)
+			}
+			if tt.requestErr != nil && !errors.Is(err, tt.requestErr) {
+				t.Fatalf("analyzePodStatusWithClient() error = %v, want %v", err, tt.requestErr)
 			}
 			if errors.Is(err, ErrHealthCheckFailed) != tt.wantHealthFailure {
 				t.Fatalf("analyzePodStatusWithClient() error = %v, want health failure %v", err, tt.wantHealthFailure)
@@ -1021,6 +1103,69 @@ func TestAnalyzePodStatusCommandRuntimeHealthCheck(t *testing.T) {
 				t.Fatalf("health check URL = %q, want %q", gotURL, "http://10.0.0.7:8099/healthz")
 			}
 		})
+	}
+}
+
+func TestAnalyzePodStatusServiceUnavailableGracePeriod(t *testing.T) {
+	pod := &corev1.Pod{
+		UID: "original",
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.7",
+		},
+	}
+	server := ServerConfig{
+		Runtime:     types.RuntimeNPX,
+		HealthzPath: "/healthz",
+	}
+	var health podHealthCheckState
+	statusCode := http.StatusServiceUnavailable
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: statusCode,
+			Body:       io.NopCloser(strings.NewReader("tool discovery failed")),
+			Request:    req,
+		}, nil
+	})}
+	probe := func(wantFailure bool) {
+		t.Helper()
+		retryable, err := analyzePodStatusWithClient(t.Context(), pod, server, client, &health)
+		if retryable == wantFailure || errors.Is(err, ErrHealthCheckFailed) != wantFailure {
+			t.Fatalf("probe = (%v, %v), want health failure %v", retryable, err, wantFailure)
+		}
+		if wantFailure && !strings.Contains(err.Error(), "tool discovery failed") {
+			t.Fatalf("probe error = %v, want response body", err)
+		}
+	}
+
+	probe(false)
+	first := health.firstServiceUnavailable
+	if first.IsZero() {
+		t.Fatal("first 503 did not start grace period")
+	}
+	probe(false)
+	if health.firstServiceUnavailable != first {
+		t.Fatal("repeated 503 restarted grace period")
+	}
+	health.firstServiceUnavailable = time.Now().Add(-serviceUnavailableGracePeriod - time.Second)
+	probe(true)
+
+	// A replacement pod gets its own grace period, even at the same IP.
+	pod.UID = "replacement"
+	probe(false)
+	if time.Since(health.firstServiceUnavailable) > serviceUnavailableGracePeriod {
+		t.Fatal("replacement pod inherited expired grace period")
+	}
+
+	for _, code := range []int{http.StatusTooEarly, http.StatusOK} {
+		health.firstServiceUnavailable = time.Now().Add(-serviceUnavailableGracePeriod - time.Second)
+		statusCode = code
+		probe(false)
+		if !health.firstServiceUnavailable.IsZero() {
+			t.Fatalf("status %d did not reset grace period", code)
+		}
+		statusCode = http.StatusServiceUnavailable
+		probe(false)
 	}
 }
 
@@ -1182,16 +1327,19 @@ func TestUpdatedMCPPodName_ContainerStartupDeadlineExceeded(t *testing.T) {
 func TestK8sObjects_ManagedImagePullSecrets(t *testing.T) {
 	managedSecrets := []v1.ImagePullSecret{
 		{
-			Name: "managed-b", Namespace: system.DefaultNamespace,
-			Spec: v1.ImagePullSecretSpec{Enabled: true},
+			Name:      "managed-b",
+			Namespace: system.DefaultNamespace,
+			Spec:      v1.ImagePullSecretSpec{Enabled: true},
 		},
 		{
-			Name: "disabled", Namespace: system.DefaultNamespace,
-			Spec: v1.ImagePullSecretSpec{Enabled: false},
+			Name:      "disabled",
+			Namespace: system.DefaultNamespace,
+			Spec:      v1.ImagePullSecretSpec{Enabled: false},
 		},
 		{
-			Name: "managed-a", Namespace: system.DefaultNamespace,
-			Spec: v1.ImagePullSecretSpec{Enabled: true},
+			Name:      "managed-a",
+			Namespace: system.DefaultNamespace,
+			Spec:      v1.ImagePullSecretSpec{Enabled: true},
 		},
 	}
 

@@ -40,6 +40,9 @@ func (h *Handler) MigrationDeleteSingleUserInstances(req router.Request, _ route
 
 func (h *Handler) UpdateMultiUserConfig(req router.Request, _ router.Response) error {
 	instance := req.Object.(*v1.MCPServerInstance)
+	if instance.Spec.VMCPInstanceID != "" {
+		return nil
+	}
 
 	var server v1.MCPServer
 	if err := req.Get(&server, req.Namespace, instance.Spec.MCPServerName); apierrors.IsNotFound(err) {
@@ -50,8 +53,8 @@ func (h *Handler) UpdateMultiUserConfig(req router.Request, _ router.Response) e
 	}
 
 	if !server.Spec.IsSingleUser() {
-		if !equality.Semantic.DeepEqual(instance.Spec.MultiUserConfig, server.Spec.Manifest.MultiUserConfig) {
-			instance.Spec.MultiUserConfig = server.Spec.Manifest.MultiUserConfig
+		if !equality.Semantic.DeepEqual(instance.Spec.Config, server.Spec.Manifest.UserConfig()) {
+			instance.Spec.Config = server.Spec.Manifest.UserConfig()
 			return req.Client.Update(req.Ctx, instance)
 		}
 	}

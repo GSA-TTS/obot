@@ -1,4 +1,4 @@
-import type { VMcpSortBy } from './types';
+import type { VMcpSortBy, VMcpStatusFilter } from './types';
 
 const SETTINGS_BUTTON_ID = 'mcp-server-settings-button';
 const SETTINGS_PANEL_ID = 'mcp-server-settings-panel';
@@ -20,11 +20,8 @@ export const SHORT_DESCRIPTION_MAX_LENGTH = 160;
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 1.5;
 export const ZOOM_STEP = 1.2;
-export const VMCP_ROW_GAP = 40;
-export const VMCP_COLLAPSED_ROW_HEIGHT = 236;
 export const VMCP_CARD_HEIGHT = 236;
 export const VMCP_COMPONENT_HEIGHT = 148;
-export const VMCP_CREATE_HEIGHT = 168;
 export const VMCP_COMPONENT_WINDOW_THRESHOLD = 15;
 export const VMCP_OVERSCAN_ROWS = 2;
 
@@ -111,4 +108,11 @@ export const VMCP_SORT_OPTIONS: Array<{ id: VMcpSortBy; label: string }> = [
 	{ id: 'name', label: 'Name' },
 	{ id: 'created', label: 'Created' },
 	{ id: 'componentServers', label: 'MCP Servers' }
+];
+
+export const VMCP_STATUS_FILTER_OPTIONS: Array<{ id: VMcpStatusFilter; label: string }> = [
+	{ id: 'needs-update', label: 'Needs Update' },
+	{ id: 'not-configured', label: 'Not Configured' },
+	{ id: 'connected', label: 'Connected' },
+	{ id: 'not-connected', label: 'Not Connected' }
 ];

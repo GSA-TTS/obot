@@ -15,7 +15,6 @@
 		SquareMinus
 	} from '@lucide/svelte';
 	import { onMount, type Snippet } from 'svelte';
-	import type { Attachment } from 'svelte/attachments';
 	import { SvelteSet } from 'svelte/reactivity';
 	import { twMerge } from 'tailwind-merge';
 
@@ -60,8 +59,6 @@
 		remeasureKey?: string | number;
 		/** Field names that should not be auto-hidden when the table is too narrow. Users can still hide them manually. */
 		noAutoHideFields?: string[];
-		/** Attachment applied to each data row, e.g. to register the row as a drop target. */
-		rowAttachment?: (row: T) => Attachment<HTMLElement> | undefined;
 	}
 
 	const {
@@ -93,8 +90,7 @@
 		disablePortal,
 		columnMaxWidths,
 		remeasureKey,
-		noAutoHideFields,
-		rowAttachment
+		noAutoHideFields
 	}: Props<T> = $props();
 
 	let page = $state(0);
@@ -295,12 +291,16 @@
 		visibleItems.filter((d) => (validateSelect ? validateSelect(d) : true)).length
 	);
 
+	export function clearSelect(id: string) {
+		delete selected[id];
+	}
+
 	export function clearSelectAll() {
 		selected = {};
 	}
 
 	function getColumnMinWidth(width: number, index: number, columnCount: number): number {
-		if (index === 0 && tableSelectActions) return 57;
+		if (index === 0 && tableSelectActions) return validateSelect ? 76 : 57;
 		if (actions && index === columnCount - 1) return Math.max(width, ACTIONS_MIN_WIDTH);
 		// if filterable fields are present, add width to account for filter button
 		return Math.max(width * 0.3, 100) + (filterableFields.size > 0 ? 36 : 0);
@@ -879,7 +879,6 @@
 			const isCtrlClick = isTouchDevice ? false : e.metaKey || e.ctrlKey;
 			onClickRow?.(d, isCtrlClick);
 		}}
-		{@attach rowAttachment?.(d)}
 	>
 		{#if tableSelectActions}
 			{@const canSelect = validateSelect ? validateSelect(d) : true}

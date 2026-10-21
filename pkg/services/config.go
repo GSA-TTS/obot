@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"net/mail"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/adrg/xdg"
 	"github.com/glebarez/sqlite"
+	kinmdb "github.com/obot-platform/kinm/pkg/db"
 	"github.com/obot-platform/nah"
 	"github.com/obot-platform/nah/pkg/apply"
 	"github.com/obot-platform/nah/pkg/leader"
@@ -46,9 +50,11 @@ import (
 	"github.com/obot-platform/obot/pkg/localauth"
 	"github.com/obot-platform/obot/pkg/logutil"
 	"github.com/obot-platform/obot/pkg/mcp"
+	"github.com/obot-platform/obot/pkg/mcptester"
 	"github.com/obot-platform/obot/pkg/messagepolicy"
 	"github.com/obot-platform/obot/pkg/modelaccesspolicy"
 	"github.com/obot-platform/obot/pkg/otel"
+	"github.com/obot-platform/obot/pkg/producttelemetry"
 	"github.com/obot-platform/obot/pkg/proxy"
 	"github.com/obot-platform/obot/pkg/serviceaccounts"
 	"github.com/obot-platform/obot/pkg/skillaccessrule"
@@ -60,6 +66,7 @@ import (
 	storageservices "github.com/obot-platform/obot/pkg/storage/services"
 	"github.com/obot-platform/obot/pkg/system"
 	"github.com/obot-platform/obot/pkg/tunnel"
+	"github.com/obot-platform/obot/pkg/upgrade"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -91,18 +98,24 @@ type (
 )
 
 type Config struct {
-	HTTPListenPort       int      `usage:"HTTP port to listen on" default:"8080" name:"http-listen-port"`
-	AllowedOrigin        string   `usage:"Allowed origin for CORS"`
-	ProviderRegistries   []string `usage:"Local filesystem paths to provider registries (directories) to load providers from"`
-	EnableAuthentication bool     `usage:"Enable authentication" default:"false"`
-	AuthAdminEmails      []string `usage:"Emails of admin users"`
-	AuthOwnerEmails      []string `usage:"Emails of owner users"`
-	TunnelPeerID         string   `usage:"Unique Pod UID of this Obot replica for tunnel peering"`
-	TunnelPeerToken      string   `usage:"Shared internal credential for tunnel peering"`
+	GitMaxRepoSizeMB                               int      `usage:"Maximum git repository size in MB" default:"100" name:"git-max-repo-size-mb"`
+	ModelProxyURL                                  string   `usage:"MCP Tester model proxy base URL; empty disables the model proxy" default:"https://model-service.obot.ai"`
+	HTTPListenPort                                 int      `usage:"HTTP port to listen on" default:"8080" name:"http-listen-port"`
+	AllowedOrigin                                  string   `usage:"Allowed origin for CORS"`
+	ProviderRegistries                             []string `usage:"Local filesystem paths to provider registries (directories) to load providers from"`
+	EnableAuthentication                           bool     `usage:"Enable authentication" default:"false"`
+	AuthAdminEmails                                []string `usage:"Emails of admin users"`
+	AuthOwnerEmails                                []string `usage:"Emails of owner users"`
+	LocalAuthInitialOwnerEmail                     string   `usage:"Email address for the initial local-auth owner" env:"OBOT_SERVER_LOCAL_AUTH_INITIAL_OWNER_EMAIL"`
+	LocalAuthInitialOwnerSetupToken                string   `usage:"High-entropy setup token for the initial local-auth owner" env:"OBOT_SERVER_LOCAL_AUTH_INITIAL_OWNER_SETUP_TOKEN"`
+	LocalAuthInitialOwnerSetupTokenExpirationHours int      `usage:"Hours the initial local-auth owner setup link remains valid" default:"168" env:"OBOT_SERVER_LOCAL_AUTH_INITIAL_OWNER_SETUP_TOKEN_EXPIRATION_HOURS"`
+	TunnelPeerID                                   string   `usage:"Unique Pod UID of this Obot replica for tunnel peering"`
+	TunnelPeerToken                                string   `usage:"Shared internal credential for tunnel peering"`
 
-	MCPOAuthClientExpiration       string   `usage:"The expiration time in dynamically registered MCP OAuth clients, must be a valid duration string and may include days, hours, or minutes" default:"30d"`
-	MCPOAuthClientNativeExceptions []string `usage:"Additional Client ID Metadata Document URLs that default to the native application type when application_type is omitted"`
-	ForceDynamicClient             bool     `usage:"Force Dynamic Client Registration for MCP OAuth instead of Client ID Metadata Documents"`
+	MCPOAuthClientExpiration       string                `usage:"The expiration time in dynamically registered MCP OAuth clients, must be a valid duration string and may include days, hours, or minutes" default:"30d"`
+	MCPOAuthClientNativeExceptions []string              `usage:"Additional Client ID Metadata Document URLs that default to the native application type when application_type is omitted"`
+	ForceDynamicClient             bool                  `usage:"Force Dynamic Client Registration for MCP OAuth instead of Client ID Metadata Documents"`
+	ProductAnalyticsMode           producttelemetry.Mode `usage:"Product analytics mode: consent, on, or off" default:"consent" env:"OBOT_SERVER_PRODUCT_ANALYTICS_MODE"`
 
 	DevMode              bool   `usage:"Enable development mode" default:"false" name:"dev-mode" env:"OBOT_DEV_MODE"`
 	DevUIPort            int    `usage:"The port on localhost running the dev instance of the UI" default:"5174"`
@@ -113,7 +126,7 @@ type Config struct {
 
 	DefaultMCPCatalogPath                string `usage:"The path to the default MCP catalog (accessible to all users)" default:""`
 	DefaultSystemMCPCatalogPath          string `usage:"The path to the default System MCP catalog" default:""`
-	MDMAssetSource                       string `usage:"The source for MDM assets (a local directory, a tar archive path, or an HTTP(S) tarball URL)" default:"https://github.com/obot-platform/obot-sentry/releases/download/v0.1.6/mdm-assets.tar.gz" env:"OBOT_SERVER_MDM_ASSET_SOURCE"`
+	MDMAssetSource                       string `usage:"The source for MDM assets (a local directory, a tar archive path, or an HTTP(S) tarball URL)" default:"https://github.com/obot-platform/obot-sentry/releases/download/v0.1.7/mdm-assets.tar.gz" env:"OBOT_SERVER_MDM_ASSET_SOURCE"`
 	DefaultSkillRepoURL                  string `usage:"The default skill repository URL (must be HTTPS GitHub URL)" default:"https://github.com/obot-platform/skills" env:"OBOT_DEFAULT_SKILL_REPO_URL"`
 	DefaultSkillRepoRef                  string `usage:"The ref (branch/tag) for the default skill repository" default:"" env:"OBOT_DEFAULT_SKILL_REPO_REF"`
 	DefaultHostedAgentsCatalogURL        string `usage:"The default hosted agent catalog repository URL (must be HTTPS)" default:"https://github.com/obot-platform/hosted-agents-catalog" env:"OBOT_DEFAULT_HOSTED_AGENTS_CATALOG_URL"`
@@ -169,8 +182,10 @@ type Config struct {
 }
 
 type Services struct {
+	GitMaxRepoSizeMB      int
 	EncryptionConfig      *encryptionconfig.EncryptionConfiguration
 	StorageClient         storage.Client
+	StorageDB             *kinmdb.Factory
 	Router                *router.Router
 	PersistentTokenServer *persistent.TokenService
 	APIServer             *server.Server
@@ -181,6 +196,9 @@ type Services struct {
 	AuditLogger           audit.Logger
 	DSN                   string
 	ServerURL             string
+	// LocalServerURL is Obot's address as Obot itself can reach it, which differs
+	// from ServerURL when the public port is mapped by a Service or ingress.
+	LocalServerURL string
 	// AgentServerURL is Obot's address as a sandbox can reach it, which differs
 	// from ServerURL when Obot runs outside the cluster its sandboxes run in.
 	AgentServerURL    string
@@ -226,12 +244,15 @@ type Services struct {
 	MCPOAuthClientSecretExpiration time.Duration
 	MCPOAuthClientNativeExceptions []string
 	ForceDynamicClient             bool
+	ProductTelemetryConsent        *producttelemetry.Consent
+	ProductTelemetryPublisher      *producttelemetry.Publisher
 
 	// LocalK8sClient is a kclient for the local Kubernetes cluster — the
 	// cluster the obot pod runs in, where source Secrets for
 	// secretBindings live. Nil on the docker backend.
 	LocalK8sClient            kclient.Client
 	LocalRouter               *router.Router
+	K8SEveryReplicaRouter     *router.Router
 	EveryReplicaRouter        *router.Router
 	MCPServerNamespace        string
 	ServiceAccountIssuerURL   string
@@ -254,7 +275,6 @@ type Services struct {
 	// environment/Helm config and not modifiable via UI.
 	PSASettingsFromHelm *v1.PodSecurityAdmissionSettings
 
-	DisableUpdateCheck      bool
 	HideK8sDetails          bool
 	MCPRuntimeBackend       string
 	MCPImagePullSecrets     []string
@@ -287,6 +307,10 @@ type Services struct {
 
 	// License provider
 	LicenseProvider *license.Provider
+	VersionChecker  *upgrade.VersionChecker
+
+	ModelProxyConfiguredURL string
+	ModelProxyURL           *url.URL
 }
 
 type hostedAgentPodSchedulingSettings struct {
@@ -488,6 +512,36 @@ func parsePodSchedulingJSONFields(affinityJSON, tolerationsJSON, resourcesJSON, 
 }
 
 func New(ctx context.Context, config Config) (*Services, error) {
+	if config.GitMaxRepoSizeMB <= 0 || int64(config.GitMaxRepoSizeMB) > math.MaxInt64/(1024*1024) {
+		return nil, fmt.Errorf("git-max-repo-size-mb must be positive and no greater than %d", int64(math.MaxInt64)/(1024*1024))
+	}
+	if err := config.ProductAnalyticsMode.Validate(); err != nil {
+		return nil, err
+	}
+	modelProxyURL, err := mcptester.ParseModelProxyURL(config.ModelProxyURL, config.DevMode)
+	if err != nil {
+		return nil, err
+	}
+
+	initialOwnerConfigured := config.LocalAuthInitialOwnerEmail != "" || config.LocalAuthInitialOwnerSetupToken != ""
+	if initialOwnerConfigured {
+		if !config.EnableAuthentication {
+			return nil, errors.New("initial local auth owner requires authentication to be enabled")
+		}
+		if config.LocalAuthInitialOwnerEmail == "" || config.LocalAuthInitialOwnerSetupToken == "" {
+			return nil, errors.New("initial local auth owner email and setup token must be set together")
+		}
+		parsedEmail, err := mail.ParseAddress(client.NormalizeEmail(config.LocalAuthInitialOwnerEmail))
+		if err != nil {
+			return nil, fmt.Errorf("invalid initial local auth owner email: %w", err)
+		}
+		config.LocalAuthInitialOwnerEmail = client.NormalizeEmail(parsedEmail.Address)
+		if config.LocalAuthInitialOwnerSetupTokenExpirationHours <= 0 {
+			return nil, errors.New("initial local auth owner setup token expiration must be greater than zero")
+		}
+		config.AuthOwnerEmails = append(config.AuthOwnerEmails, config.LocalAuthInitialOwnerEmail)
+	}
+
 	// Setup Otel first so other services can use it.
 	otel, err := otel.New(ctx)
 	if err != nil {
@@ -593,7 +647,8 @@ func New(ctx context.Context, config Config) (*Services, error) {
 	if config.ElectionFile != "" {
 		electionConfig = leader.NewFileElectionConfig(config.ElectionFile)
 	} else {
-		electionConfig = leader.NewDefaultElectionConfig("", "obot-controller", leaderElectionRESTConfig(restConfig))
+		electionConfig = leader.NewSQLElectionConfig("obot-controller", dbAccess.SQLDB).
+			WithLegacyLeaseLock("", leaderElectionRESTConfig(restConfig))
 	}
 	r, err := nah.NewRouter("obot-controller", &nah.Options{
 		RESTConfig:     restConfig,
@@ -603,6 +658,18 @@ func New(ctx context.Context, config Config) (*Services, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	// This router intentionally has no leader election: its handlers maintain
+	// process-local state, so every replica must run them.
+	everyReplicaRouter, err := nah.NewRouter("obot-every-replica", &nah.Options{
+		RESTConfig:     restConfig,
+		Scheme:         scheme.Scheme,
+		Namespace:      system.DefaultNamespace,
+		ElectionConfig: nil,
+		HealthzPort:    -1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create every replica router: %w", err)
 	}
 
 	gatewayClient := client.New(
@@ -937,6 +1004,16 @@ func New(ctx context.Context, config Config) (*Services, error) {
 			}
 			return results, nil
 		},
+		skillaccessrule.ObotGroupIDIndex: func(obj any) ([]string, error) {
+			rule := obj.(*v1.SkillAccessRule)
+			var results []string
+			for _, subject := range rule.Spec.Manifest.Subjects {
+				if subject.Type == apiclienttypes.SubjectTypeObotGroup {
+					results = append(results, subject.ID)
+				}
+			}
+			return results, nil
+		},
 		skillaccessrule.SubjectSelectorIndex: func(obj any) ([]string, error) {
 			rule := obj.(*v1.SkillAccessRule)
 			var results []string
@@ -1004,6 +1081,16 @@ func New(ctx context.Context, config Config) (*Services, error) {
 			}
 			return results, nil
 		},
+		hostedagentaccessrule.ObotGroupIDIndex: func(obj any) ([]string, error) {
+			rule := obj.(*v1.HostedAgentAccessRule)
+			var results []string
+			for _, subject := range rule.Spec.Manifest.Subjects {
+				if subject.Type == apiclienttypes.SubjectTypeObotGroup {
+					results = append(results, subject.ID)
+				}
+			}
+			return results, nil
+		},
 		hostedagentaccessrule.SubjectSelectorIndex: func(obj any) ([]string, error) {
 			rule := obj.(*v1.HostedAgentAccessRule)
 			var results []string
@@ -1030,7 +1117,7 @@ func New(ctx context.Context, config Config) (*Services, error) {
 		return nil, fmt.Errorf("failed to create license provider: %w", err)
 	}
 
-	providerDispatcher := dispatcher.New(mcpSessionManager, storageClient, gatewayClient, licenseProvider, config.Hostname, fmt.Sprintf("http://localhost:%d", config.HTTPListenPort), postgresDSN)
+	providerDispatcher := dispatcher.New(mcpSessionManager, storageClient, gatewayClient, licenseProvider, config.Hostname, system.LocalServerURL(config.HTTPListenPort), postgresDSN)
 
 	var msgPolicyHelper *messagepolicy.Helper
 	if config.EnableMessagePolicies {
@@ -1044,7 +1131,10 @@ func New(ctx context.Context, config Config) (*Services, error) {
 	apply.AddValidOwnerChange("mcpcatalogentries", "catalog-default")
 
 	var proxyManager *proxy.Manager
-	bootstrapper, err := bootstrap.New(ctx, config.Hostname, gatewayClient, providerDispatcher, config.EnableAuthentication, config.ForceEnableBootstrap)
+	if initialOwnerConfigured && os.Getenv("OBOT_BOOTSTRAP_TOKEN") != "" {
+		slog.Warn("OBOT_BOOTSTRAP_TOKEN is ignored because initial local auth owner provisioning disables bootstrap authentication")
+	}
+	bootstrapper, err := bootstrap.New(ctx, config.Hostname, gatewayClient, providerDispatcher, config.EnableAuthentication, config.ForceEnableBootstrap, initialOwnerConfigured)
 	if err != nil {
 		return nil, err
 	}
@@ -1072,6 +1162,21 @@ func New(ctx context.Context, config Config) (*Services, error) {
 			return nil, err
 		}
 		providerDispatcher.RegisterBuiltinAuthProvider(system.DefaultNamespace, localauth.ProviderName, localAuthProviderURL)
+
+		if initialOwnerConfigured {
+			configuredProvider, err := providerDispatcher.GetConfiguredAuthProvider(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to check configured auth provider before provisioning initial owner: %w", err)
+			}
+			if configuredProvider != "" && configuredProvider != localauth.ProviderName {
+				slog.Info("Skipping initial local auth owner provisioning because another auth provider is configured", "authProvider", configuredProvider)
+			} else {
+				expiresAt := time.Now().Add(time.Duration(config.LocalAuthInitialOwnerSetupTokenExpirationHours) * time.Hour)
+				if err := localAuthProvider.EnsureInitialOwner(ctx, config.LocalAuthInitialOwnerEmail, config.LocalAuthInitialOwnerSetupToken, expiresAt); err != nil {
+					return nil, fmt.Errorf("failed to provision initial local auth owner: %w", err)
+				}
+			}
+		}
 
 		// Token Auth + OAuth auth
 		authenticators = union.NewFailOnError(authenticators, proxyManager)
@@ -1255,11 +1360,24 @@ func New(ctx context.Context, config Config) (*Services, error) {
 	if mcp.IsKubernetesBackend(config.MCPRuntimeBackend) {
 		mcpLocalK8sClient = apiLocalK8sClient
 	}
+
+	versionChecker, err := upgrade.NewVersionChecker(ctx, upgrade.VersionCheckerOptions{
+		GatewayClient:      gatewayClient,
+		DisableUpdateCheck: config.DisableUpdateCheck,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	telemetryConsent := producttelemetry.NewConsent(gatewayClient, config.ProductAnalyticsMode)
+
 	// For now, always auto-migrate the gateway database
 	svcs := &Services{
 		EncryptionConfig:      encryptionConfig,
 		ServerURL:             config.Hostname,
+		LocalServerURL:        system.LocalServerURL(config.HTTPListenPort),
 		StorageClient:         storageClient,
+		StorageDB:             dbAccess,
 		Router:                r,
 		PersistentTokenServer: persistentTokenServer,
 		APIServer: server.NewServer(
@@ -1280,6 +1398,8 @@ func New(ctx context.Context, config Config) (*Services, error) {
 		GatewayClient:                gatewayClient,
 		ProxyManager:                 proxyManager,
 		ProviderDispatcher:           providerDispatcher,
+		ModelProxyURL:                modelProxyURL,
+		ModelProxyConfiguredURL:      config.ModelProxyURL,
 		Otel:                         otel,
 		AuditLogger:                  auditLogger,
 		MCPSessionManager:            mcpSessionManager,
@@ -1301,6 +1421,7 @@ func New(ctx context.Context, config Config) (*Services, error) {
 		LocalAuthProvider:            localAuthProvider,
 
 		DefaultMCPCatalogPath:          config.DefaultMCPCatalogPath,
+		GitMaxRepoSizeMB:               config.GitMaxRepoSizeMB,
 		MDMAssetSource:                 config.MDMAssetSource,
 		DefaultSystemMCPCatalogPath:    config.DefaultSystemMCPCatalogPath,
 		DefaultSkillRepoURL:            config.DefaultSkillRepoURL,
@@ -1311,6 +1432,8 @@ func New(ctx context.Context, config Config) (*Services, error) {
 		MCPOAuthClientSecretExpiration: oauthClientExpiration,
 		MCPOAuthClientNativeExceptions: config.MCPOAuthClientNativeExceptions,
 		ForceDynamicClient:             config.ForceDynamicClient,
+		ProductTelemetryConsent:        telemetryConsent,
+		ProductTelemetryPublisher:      producttelemetry.NewPublisher(ctx, telemetryConsent, gatewayClient, storageClient, licenseProvider, config.MCPRuntimeBackend),
 		AccessControlRuleHelper:        acrHelper,
 		ModelAccessPolicyHelper:        mapHelper,
 
@@ -1318,7 +1441,8 @@ func New(ctx context.Context, config Config) (*Services, error) {
 		HostedAgentAccessRuleHelper:          hostedAgentAccessRuleHelper,
 		LocalK8sClient:                       mcpLocalK8sClient,
 		LocalRouter:                          localRouter,
-		EveryReplicaRouter:                   tunnelPeerRouter,
+		K8SEveryReplicaRouter:                tunnelPeerRouter,
+		EveryReplicaRouter:                   everyReplicaRouter,
 		MCPServerNamespace:                   config.MCPNamespace,
 		ServiceAccountIssuerURL:              serviceAccountIssuerURL,
 		ServiceAccountIssuerError:            serviceAccountIssuerError,
@@ -1329,7 +1453,6 @@ func New(ctx context.Context, config Config) (*Services, error) {
 		StorageListenPort:                    config.StorageListenPort,
 		PodSchedulingSettingsFromHelm:        podSchedulingSettings,
 		PSASettingsFromHelm:                  psaSettings,
-		DisableUpdateCheck:                   config.DisableUpdateCheck,
 		HideK8sDetails:                       config.HideK8sDetails,
 		MCPRuntimeBackend:                    config.MCPRuntimeBackend,
 		MCPImagePullSecrets:                  config.MCPImagePullSecrets,
@@ -1355,6 +1478,7 @@ func New(ctx context.Context, config Config) (*Services, error) {
 		MCPNetworkPolicyProviderValues:       config.MCPNetworkPolicyProviderValues,
 		ArtifactBlobBucket:                   config.ArtifactStorageBucket,
 		LicenseProvider:                      licenseProvider,
+		VersionChecker:                       versionChecker,
 	}
 
 	if (config.ArtifactStorageProvider == "") != (config.ArtifactStorageBucket == "") {

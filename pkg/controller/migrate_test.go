@@ -266,6 +266,91 @@ func TestMigrateAuditLogExportSourceTypes(t *testing.T) {
 	}
 }
 
+func TestMigrateVMCPDefaultAdminGroups(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		profileName string
+		allowAll    bool
+		subjectType types.SubjectType
+		subjectID   string
+		wantType    types.SubjectType
+	}{
+		{
+			name:        "legacy default",
+			profileName: "default",
+			allowAll:    true,
+			subjectType: types.SubjectTypeGroup,
+			subjectID:   types.GroupAdmin,
+			wantType:    types.SubjectTypeObotGroup,
+		},
+		{
+			name:        "custom profile",
+			profileName: "custom",
+			allowAll:    true,
+			subjectType: types.SubjectTypeGroup,
+			subjectID:   types.GroupAdmin,
+			wantType:    types.SubjectTypeGroup,
+		},
+		{
+			name:        "restricted default",
+			profileName: "default",
+			subjectType: types.SubjectTypeGroup,
+			subjectID:   types.GroupAdmin,
+			wantType:    types.SubjectTypeGroup,
+		},
+		{
+			name:        "other group",
+			profileName: "default",
+			allowAll:    true,
+			subjectType: types.SubjectTypeGroup,
+			subjectID:   "other",
+			wantType:    types.SubjectTypeGroup,
+		},
+		{
+			name:        "admin user",
+			profileName: "default",
+			allowAll:    true,
+			subjectType: types.SubjectTypeUser,
+			subjectID:   types.GroupAdmin,
+			wantType:    types.SubjectTypeUser,
+		},
+		{
+			name:        "already migrated",
+			profileName: "default",
+			allowAll:    true,
+			subjectType: types.SubjectTypeObotGroup,
+			subjectID:   types.GroupAdmin,
+			wantType:    types.SubjectTypeObotGroup,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vmcp := &v1.VMCP{
+				Name:      "vmcp",
+				Namespace: system.DefaultNamespace,
+				Spec: v1.VMCPSpec{Manifest: types.VMCPManifest{
+					Profiles: []types.VMCPProfile{{
+						Name: tc.profileName,
+						Subjects: []types.Subject{
+							{Type: types.SubjectTypeUser, ID: "other"},
+							{Type: tc.subjectType, ID: tc.subjectID},
+						},
+						Permissions: types.VMCPProfilePermissions{AllowAllComponents: tc.allowAll},
+					}},
+				}},
+			}
+			client := newFakeClient(t, vmcp)
+			want := vmcp.DeepCopy()
+			want.Spec.Manifest.Profiles[0].Subjects[1].Type = tc.wantType
+			for range 2 {
+				require.NoError(t, migrateVMCPDefaultAdminGroups(t.Context(), client))
+				var got v1.VMCP
+				require.NoError(t, client.Get(t.Context(), kclient.ObjectKeyFromObject(vmcp), &got))
+				assert.Equal(t, want.Spec, got.Spec)
+			}
+		})
+	}
+}
+
 func TestDeleteToolReferenceOwnedModels(t *testing.T) {
 	ctx := t.Context()
 	client := newFakeClient(t,
@@ -322,80 +407,4 @@ func TestDeleteToolReferenceOwnedModels(t *testing.T) {
 		Namespace: system.DefaultNamespace,
 		Name:      "unowned",
 	}, &model))
-}
-
-func TestExtractAndClearMCPServerConfigValues(t *testing.T) {
-	manifest := types.MCPServerManifest{
-		Env: []types.MCPEnv{
-			{
-				Key:   "TOKEN",
-				Value: "secret-token",
-			},
-			{
-				Key: "EMPTY",
-			},
-			{
-				Value: "missing-key",
-			},
-		},
-		RemoteConfig: &types.RemoteRuntimeConfig{
-			Headers: []types.MCPHeader{
-				{
-					Key:   "Authorization",
-					Value: "Bearer secret",
-				},
-				{
-					Key: "X-Empty",
-				},
-			},
-		},
-	}
-
-	values, changed := extractAndClearMCPServerConfigValues(&manifest)
-
-	assert.True(t, changed)
-	assert.Equal(t, map[string]string{
-		"TOKEN":         "secret-token",
-		"Authorization": "Bearer secret",
-	}, values)
-	assert.Empty(t, manifest.Env[0].Value)
-	assert.Empty(t, manifest.Env[1].Value)
-	assert.Empty(t, manifest.Env[2].Value)
-	assert.Empty(t, manifest.RemoteConfig.Headers[0].Value)
-	assert.Empty(t, manifest.RemoteConfig.Headers[1].Value)
-}
-
-func TestExtractAndClearMCPServerConfigValuesNoValues(t *testing.T) {
-	manifest := types.MCPServerManifest{
-		Env: []types.MCPEnv{
-			{
-				Key: "TOKEN",
-			},
-		},
-	}
-
-	values, changed := extractAndClearMCPServerConfigValues(&manifest)
-
-	assert.False(t, changed)
-	assert.Empty(t, values)
-}
-
-func TestMCPServerCredentialContext(t *testing.T) {
-	assert.Equal(t, "default-server-1", mcpServerCredentialContext(v1.MCPServer{
-		Name: "server-1",
-		Spec: v1.MCPServerSpec{
-			MCPCatalogID: "default",
-		},
-	}))
-
-	assert.Equal(t, "workspace-1-server-2", mcpServerCredentialContext(v1.MCPServer{
-		Name: "server-2",
-		Spec: v1.MCPServerSpec{
-			PowerUserWorkspaceID: "workspace-1",
-		},
-	}))
-
-	assert.Empty(t, mcpServerCredentialContext(v1.MCPServer{
-		Name: "server-3",
-	}))
 }

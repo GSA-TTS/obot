@@ -72,10 +72,10 @@ If the key is valid, you should receive a response with your user information.
 Once you have an API key, you can configure various MCP clients to connect to your Obot MCP servers. The MCP endpoint URL follows this pattern:
 
 ```
-https://<obot-host>/mcp-connect/<server-name>/mcp
+https://<obot-host>/mcp-connect/<server-id>
 ```
 
-Where `<server-name>` is the name of the MCP server you want to connect to.
+Where `<server-id>` is the ID of the MCP server you want to connect to.
 
 #### VS Code
 
@@ -203,7 +203,7 @@ MCP server access is independent of the optional capabilities. For example, you 
 
 ## Creating an Agent Authorization Scope with the CLI
 
-The `obot login` command creates an agent authorization scope through the browser-based login flow and stores its API key. By default, it requests API access:
+The `obot login` command creates an agent authorization scope through the browser-based login flow and stores its API key. By default, it requests the `llm`, `skills`, and `device-scans` scopes. The generated key therefore cannot call general Obot API endpoints unless you request the `api` scope explicitly:
 
 ```bash
 obot login --url https://obot.example.com
@@ -216,7 +216,7 @@ obot login --url https://obot.example.com --scope llm --print-token
 obot login --url https://obot.example.com --scope all-mcp --scope skills --print-token
 ```
 
-Valid values for `--scope` are `api`, `llm`, `all-mcp`, and `skills`. You can also set a recognizable name and description for the generated authorization scope:
+Valid values for `--scope` are `api`, `llm`, `skills`, `device-scans`, and `all-mcp`. Passing `--scope` replaces the defaults rather than adding to them, so list every scope the key needs. You can also set a recognizable name and description for the generated authorization scope:
 
 ```bash
 obot login \

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { tooltip } from '$lib/actions/tooltip.svelte';
 	import Select from '$lib/components/Select.svelte';
 	import SensitiveInput from '$lib/components/SensitiveInput.svelte';
@@ -199,7 +200,7 @@
 {/snippet}
 
 <dialog bind:this={sourceDialog} class="dialog">
-	<div class="dialog-container w-full max-w-md p-4 h-91.5 max-h-dvh flex flex-col">
+	<div class="dialog-container w-full max-w-md p-4 h-96 max-h-dvh flex flex-col">
 		{#if editingSource}
 			<h3 class="dialog-title">
 				{editingSource.index === -1 ? 'Add Source URL' : 'Edit Source URL'}
@@ -274,6 +275,12 @@
 						}
 					}}
 				/>
+				<p class="text-xs text-muted-content font-light">
+					Need to add or modify a credential? <a
+						class="text-blue-500 hover:underline"
+						href={resolve('/admin/platform?view=settings#git-credentials')}>Manage Credentials</a
+					>
+				</p>
 			</div>
 
 			{#if editingSource.credentialType === 'shared'}

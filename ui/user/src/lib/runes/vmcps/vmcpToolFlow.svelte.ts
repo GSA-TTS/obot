@@ -1,20 +1,27 @@
-import { DEFAULT_MCP_CATALOG_ID } from '$lib/constants';
+import { hasSeenTimestamp, markSeenTimestamp } from '$lib/localstate';
 import {
-	AdminService,
-	type CatalogComponentServer,
+	UserService,
 	type CompositeServerToolRow,
 	type MCPCatalogEntry,
-	type MCPCatalogServer
+	type ToolOverride,
+	type VMCP,
+	type VMCPComponent,
+	type VMCPConfigurationPolicy
 } from '$lib/services';
 import { compositeEffectiveToolNames, toolOverridesFromRows } from '$lib/services/user/mcp';
-import { errors, mcpServersAndEntries } from '$lib/stores';
+import {
+	catalogConfigurationFields,
+	vmcpComponentId,
+	vmcpManifest
+} from '$lib/services/vmcps/utils';
+import { errors, profile } from '$lib/stores';
 import { success } from '$lib/stores/success';
 
-export type VMcpToolDialog = 'added-confirm' | 'added-create' | 'setup' | 'edit' | 'actions';
+export type VMcpToolDialog = 'added-create' | 'setup' | 'edit' | 'actions' | 'configure';
 
 interface PendingAddedServer {
 	component: MCPCatalogEntry;
-	vmcp: MCPCatalogEntry;
+	vmcp: VMCP;
 }
 
 interface PendingRemoval {
@@ -24,73 +31,95 @@ interface PendingRemoval {
 		description?: string;
 		icon?: string;
 	};
-	vmcp: MCPCatalogEntry;
+	vmcp: VMCP;
 }
 
-function componentId(component: { catalogEntryID?: string; mcpServerID?: string }) {
-	return component.catalogEntryID || component.mcpServerID || '';
+/**
+ * Handover from the page that creates a vMCP to the page that shows it. Creating navigates to the
+ * new vMCP, which unmounts the flow that would have opened the tool dialogs, so the id is parked
+ * here for the next flow to claim once it is mounted.
+ */
+let vmcpAwaitingToolSetup: string | undefined;
+let vmcpAwaitingCreationHint: string | undefined;
+let vmcpCreateHandoffPending = $state(false);
+
+export const VMCP_CREATION_HINT_STORAGE_KEY = '@obot/seen-vmcp-creation-hint';
+
+export function hasSeenVMcpCreationHint(storageKey = VMCP_CREATION_HINT_STORAGE_KEY): boolean {
+	return hasSeenTimestamp(storageKey, profile.current?.created);
 }
 
-function catalogEntryForComponent(component: CatalogComponentServer) {
-	if (component.catalogEntryID) {
-		return mcpServersAndEntries.current.entries.find(
-			(entry) => entry.id === component.catalogEntryID
-		);
-	}
-
-	if (!component.mcpServerID) return undefined;
-	const server = mcpServersAndEntries.current.servers.find(
-		(candidate) => candidate.id === component.mcpServerID
-	);
-	if (!server?.catalogEntryID) return undefined;
-	return mcpServersAndEntries.current.entries.find((entry) => entry.id === server.catalogEntryID);
+export function markVMcpCreationHintSeen(storageKey = VMCP_CREATION_HINT_STORAGE_KEY) {
+	markSeenTimestamp(storageKey);
 }
 
-function resolveConfiguringEntry(
-	component: CatalogComponentServer
-): MCPCatalogEntry | MCPCatalogServer | undefined {
-	if (component.mcpServerID) {
-		return mcpServersAndEntries.current.servers.find(
-			(server) => server.id === component.mcpServerID
-		);
-	}
+export function queueToolSetupForCreatedVMcp(id: string) {
+	vmcpAwaitingToolSetup = id;
+	vmcpCreateHandoffPending = true;
+}
 
-	if (component.catalogEntryID) {
-		const entry = mcpServersAndEntries.current.entries.find(
-			(candidate) => candidate.id === component.catalogEntryID
-		);
-		if (entry) return component.manifest ? { ...entry, manifest: component.manifest } : entry;
-	}
+/** Claims the queued setup, if it is for this vMCP. Only ever succeeds once per creation. */
+export function claimToolSetupForVMcp(id: string) {
+	if (!id || vmcpAwaitingToolSetup !== id) return false;
+	vmcpAwaitingToolSetup = undefined;
+	return true;
+}
 
-	const id = componentId(component);
-	if (!id || !component.manifest) return undefined;
+export function peekQueuedToolSetupVMcp() {
+	return vmcpAwaitingToolSetup;
+}
+
+export function isVMcpCreateHandoffPending() {
+	return vmcpCreateHandoffPending;
+}
+
+export function finishVMcpCreateHandoff() {
+	vmcpCreateHandoffPending = false;
+}
+
+export function queueCreationHintForCreatedVMcp(id: string) {
+	if (hasSeenVMcpCreationHint()) return;
+	vmcpAwaitingCreationHint = id;
+}
+
+export function claimCreationHintForVMcp(id: string) {
+	if (hasSeenVMcpCreationHint()) return false;
+	if (!id || vmcpAwaitingCreationHint !== id) return false;
+	vmcpAwaitingCreationHint = undefined;
+	return true;
+}
+
+function catalogEntryForComponent(component: VMCPComponent): MCPCatalogEntry | undefined {
+	const manifest = component.catalogEntry?.manifest;
+	if (!manifest) return undefined;
 	return {
-		id,
-		created: new Date().toISOString(),
-		manifest: component.manifest,
-		sourceURL: undefined,
-		userCount: undefined,
+		id: component.mcpServerCatalogEntryID,
+		created: new Date(0).toISOString(),
+		manifest,
+		isCatalogEntry: true,
 		type: 'catalog-entry',
-		isCatalogEntry: !component.mcpServerID,
-		needsUpdate: false
+		unsupportedTools: component.catalogEntry?.unsupportedTools
 	};
 }
 
-function toolRowsFromComponent(component: CatalogComponentServer): CompositeServerToolRow[] {
-	const id = componentId(component);
-	const previewByName = new Map(
-		(component.manifest?.toolPreview ?? []).map((tool) => [tool.name, tool])
-	);
-	return (component.toolOverrides ?? []).map((override) => {
+function toolRowsFromComponent(component: VMCPComponent): CompositeServerToolRow[] {
+	const id = vmcpComponentId(component);
+	const preview = component.catalogEntry?.manifest?.toolPreview ?? [];
+	const previewByName = new Map(preview.map((tool) => [tool.name, tool]));
+	const overrides = component.toolOverrides ?? [];
+	const sourceTools: ToolOverride[] =
+		overrides.length > 0 ? overrides : preview.map((tool) => ({ name: tool.name }));
+
+	return sourceTools.map((override) => {
 		const previewTool = previewByName.get(override.name);
-		const baseDescription = override.description ?? previewTool?.description;
+		const description = override.description ?? previewTool?.description;
 		return {
 			id: `${id}-${override.name}`,
 			name: override.name,
 			overrideName: (override.overrideName || '').trim() || override.name,
-			description: baseDescription,
-			overrideDescription: (override.overrideDescription || '').trim() || baseDescription,
-			enabled: override.enabled !== false
+			description,
+			overrideDescription: (override.overrideDescription || '').trim() || description,
+			enabled: overrides.length === 0 || override.enabled === true
 		};
 	});
 }
@@ -104,34 +133,39 @@ export function createVMcpToolFlow() {
 	let addedServer = $state<PendingAddedServer>();
 	let pendingRemoval = $state<PendingRemoval>();
 	let removing = $state(false);
-	let modifyingVMcp = $state<MCPCatalogEntry>();
-	let configuringEntry = $state<MCPCatalogEntry | MCPCatalogServer>();
+	let modifyingVMcp = $state<VMCP>();
+	let configuringEntry = $state<MCPCatalogEntry>();
 	let configuringComponentId = $state<string>();
-	let configuringComponent = $state<CatalogComponentServer>();
+	let configuringComponent = $state<VMCPComponent>();
 	let tools = $state<CompositeServerToolRow[]>([]);
 	let toolPrefix = $state<string>();
 	let modifyingExistingComponent = $state(false);
+	let refreshToolsRequested = $state(false);
+	let collecting = $state(false);
+	let collectTools: ((config: VMCPComponent) => void) | undefined;
+	let onVMcpChanged: ((vmcp: VMCP) => void) | undefined;
+	let postCreateConfiguration = $state(false);
 
 	const otherEffectiveNames = $derived(
 		compositeEffectiveToolNames(
-			(modifyingVMcp?.manifest.compositeConfig?.componentServers ?? []).filter(
-				(component) => componentId(component) !== configuringComponentId
+			(modifyingVMcp?.components ?? []).filter(
+				(component) => vmcpComponentId(component) !== configuringComponentId
 			)
 		)
 	);
 	const otherToolPrefixes = $derived(
-		(modifyingVMcp?.manifest.compositeConfig?.componentServers ?? [])
-			.filter((component) => componentId(component) !== configuringComponentId)
+		(modifyingVMcp?.components ?? [])
+			.filter((component) => vmcpComponentId(component) !== configuringComponentId)
 			.map((component) => (component.toolPrefix ?? '').trim())
 			.filter(Boolean)
 	);
 	const existingToolPrefix = $derived(
-		(modifyingVMcp?.manifest.compositeConfig?.componentServers ?? []).find(
-			(component) => componentId(component) === configuringComponentId
+		(modifyingVMcp?.components ?? []).find(
+			(component) => vmcpComponentId(component) === configuringComponentId
 		)?.toolPrefix
 	);
 	const excludedComponentIds = $derived([
-		...(modifyingVMcp?.manifest.compositeConfig?.componentServers ?? []).map(componentId),
+		...(modifyingVMcp?.components ?? []).map(vmcpComponentId),
 		...(modifyingVMcp ? [modifyingVMcp.id] : [])
 	]);
 
@@ -143,6 +177,10 @@ export function createVMcpToolFlow() {
 		toolPrefix = undefined;
 		tools = [];
 		modifyingExistingComponent = false;
+		refreshToolsRequested = false;
+		collecting = false;
+		collectTools = undefined;
+		postCreateConfiguration = false;
 	}
 
 	function close() {
@@ -151,13 +189,14 @@ export function createVMcpToolFlow() {
 		clearConfiguration();
 	}
 
-	function configure(vmcp: MCPCatalogEntry, component: CatalogComponentServer, existing: boolean) {
-		const id = componentId(component);
-		const entry = resolveConfiguringEntry(component);
+	function configure(vmcp: VMCP, component: VMCPComponent, existing: boolean, refresh = false) {
+		const id = vmcpComponentId(component);
+		const entry = catalogEntryForComponent(component);
 		if (!id || !entry) {
 			errors.append('Could not load this server to modify its tools.');
 			return false;
 		}
+		refreshToolsRequested = refresh;
 		modifyingExistingComponent = existing;
 		modifyingVMcp = vmcp;
 		configuringEntry = entry;
@@ -168,36 +207,41 @@ export function createVMcpToolFlow() {
 		return true;
 	}
 
-	function openSetup(vmcp: MCPCatalogEntry, component: CatalogComponentServer, existing = false) {
-		if (configure(vmcp, component, existing)) dialog = 'setup';
+	function openSetup(vmcp: VMCP, component: VMCPComponent, existing = false, refresh = false) {
+		if (configure(vmcp, component, existing, refresh)) dialog = 'setup';
 	}
 
-	function openEdit(vmcp: MCPCatalogEntry, component: CatalogComponentServer) {
+	function openEdit(vmcp: VMCP, component: VMCPComponent) {
 		if (configure(vmcp, component, true)) dialog = 'edit';
 	}
 
-	function findComponent(vmcp: MCPCatalogEntry, id?: string) {
-		return (vmcp.manifest.compositeConfig?.componentServers ?? []).find(
-			(candidate) => componentId(candidate) === id
-		);
+	function findComponent(vmcp: VMCP, id?: string) {
+		return (vmcp.components ?? []).find((candidate) => vmcpComponentId(candidate) === id);
 	}
 
-	function openComponent(component: { id?: string }, vmcp: MCPCatalogEntry) {
+	/**
+	 * Fetches this component's tools, opens the tool editor, and returns the chosen
+	 * overrides without writing them onto the vMCP.
+	 */
+	function collectComponentTools(
+		component: VMCPComponent,
+		vmcp: VMCP,
+		onCollected: (config: VMCPComponent) => void
+	) {
+		if (!configure(vmcp, component, true)) return;
+		collecting = true;
+		collectTools = onCollected;
+		dialog = 'setup';
+	}
+
+	function openComponent(component: { id?: string }, vmcp: VMCP) {
 		const raw = findComponent(vmcp, component.id);
 		if (!raw) return;
-
-		if (raw.toolOverrides?.length) {
-			openEdit(vmcp, raw);
-			return;
-		}
-		if (configure(vmcp, raw, true)) {
-			tools = [];
-			dialog = 'actions';
-		}
+		if (configure(vmcp, raw, true)) dialog = 'actions';
 	}
 
 	/** Skip the actions chooser: setup when there are no stored overrides, otherwise edit them. */
-	function editComponent(component: { id?: string }, vmcp: MCPCatalogEntry) {
+	function editComponent(component: { id?: string }, vmcp: VMCP) {
 		const raw = findComponent(vmcp, component.id);
 		if (!raw) return;
 		if (raw.toolOverrides?.length) {
@@ -210,31 +254,40 @@ export function createVMcpToolFlow() {
 	/** Skip the actions chooser and prompt to remove this component from the vMCP. */
 	function promptRemoveComponent(
 		component: { id?: string; name?: string; description?: string; icon?: string },
-		vmcp: MCPCatalogEntry
+		vmcp: VMCP
 	) {
-		if (!component.id) return;
+		if (!component.id || (vmcp.components ?? []).length <= 1) return;
 		pendingRemoval = { component, vmcp };
 		dialog = undefined;
 	}
 
-	function offerToolSelection(
-		component: MCPCatalogEntry,
-		vmcp: MCPCatalogEntry,
-		fromCreate = false
-	) {
+	function offerToolSelection(component: MCPCatalogEntry, vmcp: VMCP) {
 		addedServer = { component, vmcp };
-		dialog = fromCreate ? 'added-create' : 'added-confirm';
+		dialog = 'added-create';
 	}
 
-	function handleVMcpCreated(vmcp: MCPCatalogEntry) {
-		const firstComponent = vmcp.manifest.compositeConfig?.componentServers?.[0];
+	function offerToolsAfterCreate(vmcp: VMCP, component: VMCPComponent, entry?: MCPCatalogEntry) {
+		if (entry) {
+			offerToolSelection(entry, vmcp);
+			return;
+		}
+		openSetup(vmcp, component);
+	}
+
+	function handleVMcpCreated(vmcp: VMCP) {
+		const firstComponent = vmcp.components?.[0];
 		if (!firstComponent) return;
 		const entry = catalogEntryForComponent(firstComponent);
-		if (entry) {
-			offerToolSelection(entry, vmcp, true);
-		} else {
-			openSetup(vmcp, firstComponent);
+		if (
+			entry &&
+			catalogConfigurationFields(entry).length > 0 &&
+			configure(vmcp, firstComponent, false)
+		) {
+			postCreateConfiguration = true;
+			dialog = 'configure';
+			return;
 		}
+		offerToolsAfterCreate(vmcp, firstComponent, entry);
 	}
 
 	function selectToolsForAdded() {
@@ -243,15 +296,11 @@ export function createVMcpToolFlow() {
 		dialog = undefined;
 		if (!pending) return;
 
-		const components = pending.vmcp.manifest.compositeConfig?.componentServers ?? [];
-		const component =
-			components.find((candidate) => candidate.catalogEntryID === pending.component.id) ??
-			components.find((candidate) => {
-				const server = mcpServersAndEntries.current.servers.find(
-					(item) => item.id === candidate.mcpServerID
-				);
-				return server?.catalogEntryID === pending.component.id;
-			});
+		const component = (pending.vmcp.components ?? []).find(
+			(candidate) =>
+				candidate.mcpServerCatalogEntryID === pending.component.id ||
+				vmcpComponentId(candidate) === pending.component.id
+		);
 		if (!component) {
 			errors.append('Could not find that server on the vMCP.');
 			return;
@@ -259,32 +308,32 @@ export function createVMcpToolFlow() {
 		openSetup(pending.vmcp, component);
 	}
 
-	function modifyToolsFromActions() {
-		const vmcp = modifyingVMcp;
-		const component = configuringComponent;
-		if (vmcp && component) openSetup(vmcp, component, true);
+	function editConfiguration() {
+		if (!configuringEntry) return;
+		dialog = 'configure';
 	}
 
-	function refreshTools() {
-		const vmcp = modifyingVMcp;
-		const component = configuringComponent;
-		if (vmcp && component) openSetup(vmcp, component, true);
-	}
-
-	async function saveEditedTools() {
-		const component = configuringComponent;
-		if (!component || !configuringEntry) {
+	function returnToActions() {
+		if (postCreateConfiguration) {
 			close();
 			return;
 		}
-		await saveTools({
-			...component,
-			toolPrefix,
-			toolOverrides: toolOverridesFromRows(tools)
-		});
+		if (configuringComponent && modifyingVMcp) {
+			dialog = 'actions';
+			return;
+		}
+		close();
 	}
 
-	async function saveTools(componentConfig: CatalogComponentServer) {
+	async function saveConfiguration(
+		configuration: VMCPConfigurationPolicy[],
+		forceSingleUser: boolean
+	) {
+		const component = configuringComponent;
+		if (!component) {
+			close();
+			return;
+		}
 		const vmcpId = modifyingVMcp?.id;
 		if (!vmcpId) {
 			close();
@@ -292,50 +341,154 @@ export function createVMcpToolFlow() {
 		}
 
 		try {
-			const latest = await AdminService.getMCPCatalogEntry(DEFAULT_MCP_CATALOG_ID, vmcpId);
-			if (!latest.manifest.compositeConfig) {
+			const latest = await UserService.getVMCP(vmcpId);
+			const id = vmcpComponentId(component);
+			const components = latest.components ?? [];
+			const index = components.findIndex((candidate) => vmcpComponentId(candidate) === id);
+			if (index < 0) {
 				close();
 				return;
 			}
-
-			const id = componentId(componentConfig);
-			const components = latest.manifest.compositeConfig.componentServers ?? [];
-			const index = components.findIndex((candidate) => componentId(candidate) === id);
-			const nextComponents =
-				index >= 0
-					? [
-							...components.slice(0, index),
-							{ ...components[index], ...componentConfig },
-							...components.slice(index + 1)
-						]
-					: [...components, componentConfig];
-			const updated = await AdminService.updateMCPCatalogEntry(DEFAULT_MCP_CATALOG_ID, latest.id, {
-				...latest.manifest,
-				compositeConfig: {
-					...latest.manifest.compositeConfig,
-					componentServers: nextComponents
-				}
+			const nextComponents = components.map((candidate, componentIndex) =>
+				componentIndex === index
+					? {
+							...candidate,
+							...component,
+							configuration,
+							forceSingleUser,
+							id: candidate.id ?? component.id
+						}
+					: candidate
+			);
+			const updated = await UserService.updateVMCP(latest.id, {
+				...vmcpManifest(latest),
+				components: nextComponents
 			});
-			mcpServersAndEntries.current.entries = mcpServersAndEntries.current.entries.map(
-				(candidate) => (candidate.id === updated.id ? updated : candidate)
-			);
+			modifyingVMcp = updated;
 			success.add(
-				`Tools updated for ${componentConfig.manifest?.name ?? 'this server'} on ${updated.manifest.name}.`
+				`Configuration updated for ${component.catalogEntry?.manifest?.name ?? component.name ?? 'this server'} on ${updated.displayName}.`
 			);
+			onVMcpChanged?.(updated);
+			if (postCreateConfiguration) {
+				const entry = configuringEntry;
+				const saved = findComponent(updated, vmcpComponentId(component));
+				postCreateConfiguration = false;
+				if (saved) {
+					offerToolsAfterCreate(updated, saved, entry);
+					return;
+				}
+				close();
+				return;
+			}
+			close();
 		} catch {
-			errors.append('Failed to update tools for this server.');
+			errors.append('Failed to update configuration for this vMCP.');
+			throw new Error('Failed to update configuration for this vMCP.');
+		}
+	}
+
+	function modifyToolsFromActions() {
+		const vmcp = modifyingVMcp;
+		const component = configuringComponent;
+		if (!vmcp || !component) return;
+		if (component.toolOverrides?.length) {
+			openEdit(vmcp, component);
+			return;
+		}
+		openSetup(vmcp, component, true);
+	}
+
+	function refreshTools(
+		component?: VMCPComponent,
+		vmcp?: VMCP,
+		onCollected?: (config: VMCPComponent) => void
+	) {
+		if (vmcp && onCollected && component?.catalogEntry) {
+			if (!configure(vmcp, component, true, true)) return;
+			collecting = true;
+			collectTools = onCollected;
+			dialog = 'setup';
+			return;
+		}
+		const currentVMcp = modifyingVMcp;
+		const currentComponent = configuringComponent;
+		if (currentVMcp && currentComponent) openSetup(currentVMcp, currentComponent, true, true);
+	}
+
+	async function saveEditedTools() {
+		const component = configuringComponent;
+		if (!component) {
+			close();
+			return false;
+		}
+		return saveTools({
+			...component,
+			toolPrefix,
+			toolOverrides: toolOverridesFromRows(tools)
+		});
+	}
+
+	async function saveTools(componentConfig: VMCPComponent) {
+		if (collectTools) {
+			const done = collectTools;
+			collectTools = undefined;
+			done(componentConfig);
+			close();
+			return false;
+		}
+
+		const vmcpId = modifyingVMcp?.id;
+		if (!vmcpId) {
+			close();
+			return false;
+		}
+
+		try {
+			const latest = await UserService.getVMCP(vmcpId);
+			const id = vmcpComponentId(componentConfig);
+			const components = latest.components ?? [];
+			const index = components.findIndex((candidate) => vmcpComponentId(candidate) === id);
+			if (index < 0) {
+				close();
+				return false;
+			}
+			const nextComponents = components.map((component, componentIndex) =>
+				componentIndex === index
+					? {
+							...component,
+							...componentConfig,
+							toolOverrides: componentConfig.toolOverrides?.filter((tool) => !tool.removed),
+							id: component.id ?? componentConfig.id
+						}
+					: component
+			);
+			const updated = await UserService.updateVMCP(latest.id, {
+				...vmcpManifest(latest),
+				components: nextComponents
+			});
+			modifyingVMcp = updated;
+			success.add(
+				`Tools updated for ${componentConfig.catalogEntry?.manifest?.name ?? componentConfig.name ?? 'this server'} on ${updated.displayName}.`
+			);
+			onVMcpChanged?.(updated);
+			return true;
+		} catch {
+			errors.append('Failed to update tools for this vMCP.');
+			return false;
 		} finally {
 			close();
 		}
 	}
 
 	function promptRemove() {
-		if (!modifyingVMcp || !configuringEntry) return;
+		if (!modifyingVMcp || !configuringComponent || !configuringEntry) return;
+		if ((modifyingVMcp.components ?? []).length <= 1) return;
 		pendingRemoval = {
 			component: {
-				id: configuringComponentId ?? configuringEntry.id,
-				name: configuringEntry.manifest.name,
-				description: configuringEntry.manifest.shortDescription,
+				id: configuringComponentId,
+				name: configuringComponent.name || configuringEntry.manifest.name,
+				description:
+					configuringEntry.manifest.shortDescription || configuringEntry.manifest.description,
 				icon: configuringEntry.manifest.icon
 			},
 			vmcp: modifyingVMcp
@@ -351,33 +504,37 @@ export function createVMcpToolFlow() {
 	async function removeComponent() {
 		if (!pendingRemoval) return;
 		const { component, vmcp } = pendingRemoval;
-		if (!vmcp.manifest.compositeConfig) return;
+		const lastComponentWarning =
+			'Cannot remove the last remaining component. Connecting to a vMCP requires at least one component.';
+		if ((vmcp.components ?? []).length <= 1) {
+			errors.append(lastComponentWarning);
+			pendingRemoval = undefined;
+			return;
+		}
 
 		removing = true;
 		try {
-			const latest = await AdminService.getMCPCatalogEntry(DEFAULT_MCP_CATALOG_ID, vmcp.id);
-			if (!latest.manifest.compositeConfig) {
-				close();
+			const latest = await UserService.getVMCP(vmcp.id);
+			if ((latest.components ?? []).length <= 1) {
+				errors.append(lastComponentWarning);
 				return;
 			}
-			await AdminService.updateMCPCatalogEntry(DEFAULT_MCP_CATALOG_ID, vmcp.id, {
-				...latest.manifest,
-				compositeConfig: {
-					...latest.manifest.compositeConfig,
-					componentServers: latest.manifest.compositeConfig.componentServers?.filter(
-						(candidate) =>
-							candidate.catalogEntryID !== component.id && candidate.mcpServerID !== component.id
-					)
-				}
+			const updated = await UserService.updateVMCP(latest.id, {
+				...vmcpManifest(latest),
+				components: (latest.components ?? []).filter(
+					(candidate) =>
+						vmcpComponentId(candidate) !== component.id &&
+						candidate.mcpServerCatalogEntryID !== component.id
+				)
 			});
-			success.add(`${component.name} removed from ${latest.manifest.name}.`);
+			success.add(`${component.name} removed from ${updated.displayName}.`);
+			onVMcpChanged?.(updated);
 		} catch {
 			errors.append('Failed to remove MCP server from vMCP.');
 		} finally {
 			removing = false;
 			pendingRemoval = undefined;
 			close();
-			mcpServersAndEntries.refreshEntries();
 		}
 	}
 
@@ -403,6 +560,9 @@ export function createVMcpToolFlow() {
 		get configuringComponentId() {
 			return configuringComponentId;
 		},
+		get configuringComponent() {
+			return configuringComponent;
+		},
 		get tools() {
 			return tools;
 		},
@@ -414,6 +574,12 @@ export function createVMcpToolFlow() {
 		},
 		get modifyingExistingComponent() {
 			return modifyingExistingComponent;
+		},
+		get refresh() {
+			return refreshToolsRequested;
+		},
+		get collecting() {
+			return collecting;
 		},
 		get existingToolPrefix() {
 			return existingToolPrefix;
@@ -427,13 +593,28 @@ export function createVMcpToolFlow() {
 		get excludedComponentIds() {
 			return excludedComponentIds;
 		},
+		get canConfigureComponent() {
+			return Boolean(configuringEntry);
+		},
+		get postCreateConfiguration() {
+			return postCreateConfiguration;
+		},
+		setOnVMcpChanged(handler: ((vmcp: VMCP) => void) | undefined) {
+			onVMcpChanged = handler;
+		},
 		close,
+		collectComponentTools,
+		openSetup,
+		openEdit,
 		openComponent,
 		editComponent,
 		promptRemoveComponent,
 		offerToolSelection,
 		handleVMcpCreated,
 		selectToolsForAdded,
+		editConfiguration,
+		returnToActions,
+		saveConfiguration,
 		modifyToolsFromActions,
 		refreshTools,
 		saveEditedTools,

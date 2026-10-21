@@ -12,6 +12,7 @@ import (
 	types2 "github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/gateway/db"
 	"github.com/obot-platform/obot/pkg/gateway/types"
+	"golang.org/x/sync/singleflight"
 	"k8s.io/apiserver/pkg/server/options/encryptionconfig"
 	kclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -57,9 +58,9 @@ type Client struct {
 	auditLogDeleteBatchSize   int
 	deviceScanCleanupInterval time.Duration
 	deviceScanDeleteBatchSize int
-	oktaGroupMigrationMu      sync.Mutex
-	oktaGroupMigrationDone    bool
 	mcpOAuthTokenTrigger      func(context.Context, string) error
+	groupRefresh              singleflight.Group
+	groupCooldown             groupRefreshCooldown
 }
 
 func New(ctx context.Context, db *db.DB, storageClient kclient.Client, encryptionConfig *encryptionconfig.EncryptionConfiguration, mcpOAuthTokenTrigger func(context.Context, string) error, ownerEmails, adminEmails []string, auditLogPersistenceInterval time.Duration, auditLogBatchSize, auditLogRetentionDays, llmAuditLogRetentionDays, deviceScanRetentionDays int, llmAuditEnabled bool) *Client {

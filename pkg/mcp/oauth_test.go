@@ -54,10 +54,6 @@ func TestRequiresStaticOAuth(t *testing.T) {
 	server.Status.UserHasAuthenticated = false
 	server.Spec.Manifest.RemoteConfig.StaticOAuthRequired = false
 	require.False(t, RequiresStaticOAuth(server))
-
-	server.Spec.Manifest.Runtime = types.RuntimeComposite
-	server.Spec.Manifest.RemoteConfig.StaticOAuthRequired = true
-	require.False(t, RequiresStaticOAuth(server))
 }
 
 func TestServerConfigHeadersCanonicalizesNames(t *testing.T) {
@@ -233,7 +229,7 @@ func TestResolveClientInfoUsesClientIDMetadataDocument(t *testing.T) {
 		clientLookup:             lookup,
 	}
 
-	clientInfo, err := o.resolveClientInfo(t.Context(), "test-server", oauthMetadataDiscovery{
+	clientInfo, staticClient, err := o.resolveClientInfo(t.Context(), "test-server", oauthMetadataDiscovery{
 		ProtectedResourceMetadata: protectedResourceMetadata{
 			AuthorizationServers: []string{"https://issuer.example"},
 		},
@@ -244,6 +240,7 @@ func TestResolveClientInfoUsesClientIDMetadataDocument(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, o.clientIDMetadataDocument, clientInfo.ClientID)
 	require.Empty(t, clientInfo.ClientSecret)
+	require.False(t, staticClient)
 	require.Zero(t, lookup.calls)
 }
 
@@ -254,7 +251,7 @@ func TestResolveClientInfoUsesStaticClientLookup(t *testing.T) {
 	}
 	o := &oauth{clientLookup: lookup}
 
-	clientInfo, err := o.resolveClientInfo(t.Context(), "test-server", oauthMetadataDiscovery{
+	clientInfo, staticClient, err := o.resolveClientInfo(t.Context(), "test-server", oauthMetadataDiscovery{
 		ProtectedResourceMetadata: protectedResourceMetadata{
 			AuthorizationServers: []string{"https://issuer.example"},
 		},
@@ -263,6 +260,24 @@ func TestResolveClientInfoUsesStaticClientLookup(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, lookup.clientID, clientInfo.ClientID)
 	require.Equal(t, lookup.clientSecret, clientInfo.ClientSecret)
+	require.True(t, staticClient)
+	require.Equal(t, 1, lookup.calls)
+}
+
+func TestResolveClientInfoUsesPublicStaticClientLookup(t *testing.T) {
+	lookup := &oauthTestClientCredLookup{clientID: "public-client-id"}
+	o := &oauth{clientLookup: lookup}
+
+	clientInfo, staticClient, err := o.resolveClientInfo(t.Context(), "test-server", oauthMetadataDiscovery{
+		ProtectedResourceMetadata: protectedResourceMetadata{
+			AuthorizationServers: []string{"https://issuer.example"},
+		},
+		AuthorizationServerMetadata: AuthorizationServerMetadata{},
+	})
+	require.NoError(t, err)
+	require.Equal(t, lookup.clientID, clientInfo.ClientID)
+	require.Empty(t, clientInfo.ClientSecret)
+	require.True(t, staticClient)
 	require.Equal(t, 1, lookup.calls)
 }
 
@@ -288,13 +303,14 @@ func TestResolveClientInfoNilLookupFallsThroughToDynamicRegistration(t *testing.
 	}
 
 	var (
-		clientInfo clientRegistrationResponse
-		err        error
-		panicValue any
+		clientInfo   clientRegistrationResponse
+		staticClient bool
+		err          error
+		panicValue   any
 	)
 	func() {
 		defer func() { panicValue = recover() }()
-		clientInfo, err = o.resolveClientInfo(t.Context(), "test-server", discovery)
+		clientInfo, staticClient, err = o.resolveClientInfo(t.Context(), "test-server", discovery)
 	}()
 	if panicValue != nil {
 		t.Fatalf("resolveClientInfo panicked with nil client lookup: %v", panicValue)
@@ -302,6 +318,7 @@ func TestResolveClientInfoNilLookupFallsThroughToDynamicRegistration(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, "dynamic-client-id", clientInfo.ClientID)
 	require.Equal(t, "dynamic-client-secret", clientInfo.ClientSecret)
+	require.False(t, staticClient)
 }
 
 func TestTokenEndpointAuthStyle(t *testing.T) {
@@ -309,27 +326,41 @@ func TestTokenEndpointAuthStyle(t *testing.T) {
 		name            string
 		method          string
 		hasClientSecret bool
+		staticClient    bool
 		want            oauth2.AuthStyle
 	}{
 		{
-			name:   "no client secret",
+			name:            "static confidential client",
+			method:          "client_secret_basic",
+			hasClientSecret: true,
+			staticClient:    true,
+			want:            oauth2.AuthStyleAutoDetect,
+		},
+		{
+			name:         "static public client",
+			method:       "client_secret_basic",
+			staticClient: true,
+			want:         oauth2.AuthStyleAutoDetect,
+		},
+		{
+			name:   "dynamic client without secret",
 			method: "client_secret_basic",
 			want:   oauth2.AuthStyleInParams,
 		},
 		{
-			name:            "basic",
+			name:            "dynamic basic client",
 			method:          "client_secret_basic",
 			hasClientSecret: true,
 			want:            oauth2.AuthStyleInHeader,
 		},
 		{
-			name:            "post",
+			name:            "dynamic post client",
 			method:          "client_secret_post",
 			hasClientSecret: true,
 			want:            oauth2.AuthStyleInParams,
 		},
 		{
-			name:            "unknown",
+			name:            "dynamic client with unknown method",
 			method:          "",
 			hasClientSecret: true,
 			want:            oauth2.AuthStyleAutoDetect,
@@ -337,7 +368,7 @@ func TestTokenEndpointAuthStyle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, tokenEndpointAuthStyle(tt.method, tt.hasClientSecret))
+			require.Equal(t, tt.want, tokenEndpointAuthStyle(tt.method, tt.hasClientSecret, tt.staticClient))
 		})
 	}
 }

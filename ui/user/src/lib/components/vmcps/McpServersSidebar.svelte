@@ -4,7 +4,7 @@
 	import Select from '$lib/components/Select.svelte';
 	import McpDeprecatedNotice from '$lib/components/mcp/McpDeprecatedNotice.svelte';
 	import type { EntryDrag } from '$lib/runes/vmcps/entryDrag.svelte';
-	import type { MCPCatalogEntry } from '$lib/services';
+	import { type MCPCatalogEntry } from '$lib/services';
 	import { isDeprecatedMCPServer } from '$lib/services/user/mcp';
 	import {
 		ESTIMATED_ROW_HEIGHT,
@@ -14,9 +14,9 @@
 	import {
 		buildMcpServerFilterOptions,
 		filterMcpServersByCategories,
-		isWorkspaceOwned,
 		matchesQuery,
 		MCP_SERVER_SORT_OPTIONS,
+		mcpServerNeedsStaticOAuthConfiguration,
 		sortMcpServers,
 		type McpServerSortBy
 	} from '$lib/services/vmcps/utils';
@@ -24,7 +24,14 @@
 	import { mcpServersAndEntries, responsive } from '$lib/stores';
 	import McpServerIcon from './McpServerIcon.svelte';
 	import McpServersSettings from './McpServersSettings.svelte';
-	import { ChevronsRight, GripVertical, Plus, TriangleAlert } from '@lucide/svelte';
+	import {
+		ChevronLeft,
+		ChevronsRight,
+		CircleAlert,
+		GripVertical,
+		Plus,
+		TriangleAlert
+	} from '@lucide/svelte';
 	import { untrack } from 'svelte';
 	import type { Attachment } from 'svelte/attachments';
 	import { SvelteMap } from 'svelte/reactivity';
@@ -37,7 +44,6 @@
 		drag: EntryDrag;
 		query?: string;
 		onSearch: (value: string) => void;
-		showAllConnectors?: boolean;
 		canCreateEntry?: boolean;
 	}
 
@@ -47,7 +53,6 @@
 		drag,
 		query = '',
 		onSearch,
-		showAllConnectors = false,
 		canCreateEntry = false
 	}: Props = $props();
 
@@ -56,14 +61,14 @@
 		showDeprecatedServers: false,
 		filterBy: ''
 	});
+	const staticOAuthHelp =
+		'An administrator must finish configuring this MCP server on the MCP Servers page before it can be added to a vMCP.';
 
 	let eligibleEntries = $derived(
 		mcpServersAndEntries.current.entries.filter(
 			(entry) =>
-				entry.manifest.runtime !== 'composite' &&
-				entry.manifest.serverUserType !== 'multiUser' &&
-				(settings.showDeprecatedServers || !isDeprecatedMCPServer(entry)) &&
-				(showAllConnectors || !isWorkspaceOwned(entry))
+				entry.manifest.runtime !== 'vmcp' &&
+				(settings.showDeprecatedServers || !isDeprecatedMCPServer(entry))
 		)
 	);
 	let filterOptions = $derived(buildMcpServerFilterOptions(eligibleEntries));
@@ -72,7 +77,8 @@
 			filterMcpServersByCategories(eligibleEntries, settings.filterBy).filter((entry) =>
 				query ? matchesQuery(entry, query) : true
 			),
-			sortBy
+			sortBy,
+			query
 		)
 	);
 
@@ -176,36 +182,38 @@
 <div
 	bind:this={panelEl}
 	class={twMerge(
-		'bg-base-100 dark:bg-base-300 border-base-300 overflow-y-auto border-l flex',
+		'bg-base-100 dark:bg-base-200 border-base-300 overflow-y-auto border-l flex',
 		responsive.isMobile
 			? 'fixed z-40 h-[calc(100dvh-4rem)] w-dvw top-16 right-0'
 			: 'static max-h-dvh',
-		open ? (responsive.isMobile ? 'w-dvw' : 'w-4xl') : 'w-10'
+		open ? (responsive.isMobile ? 'w-dvw' : 'w-4xl') : 'w-11'
 	)}
 >
-	<button
-		class="group h-full w-8 flex flex-col items-center justify-center gap-16 hover:bg-base-200 dark:hover:bg-base-400/50 transition-colors"
-		onclick={() => (open = !open)}
-		aria-label={open ? 'Hide MCP Servers' : 'Show MCP Servers'}
-	>
-		<ChevronsRight
-			class={twMerge(
-				'size-3 rotate-0 transition-all opacity-0 group-hover:opacity-100',
-				!open && 'rotate-180'
-			)}
-		/>
-		<p class="rotate-90 text-xs font-mono shrink-0 text-nowrap">
-			<span class="group-hover:hidden">MCP Servers</span>
-			<span class="hidden group-hover:inline">{open ? 'Hide' : 'Show'} MCP Servers</span>
-		</p>
-		<ChevronsRight
-			class={twMerge(
-				'size-3 rotate-0 transition-all opacity-0 group-hover:opacity-100',
-				!open && 'rotate-180'
-			)}
-		/>
-	</button>
-	<div class="h-full flex flex-col grow" in:fly={{ x: 100 }}>
+	{#if !responsive.isMobile}
+		<button
+			class="group h-full w-8 flex flex-col items-center justify-center gap-16 hover:bg-base-200 dark:hover:bg-base-400/50 transition-colors"
+			onclick={() => (open = !open)}
+			aria-label={open ? 'Hide MCP Servers' : 'Show MCP Servers'}
+		>
+			<ChevronsRight
+				class={twMerge(
+					'size-3 rotate-0 transition-all opacity-0 group-hover:opacity-100',
+					!open && 'rotate-180'
+				)}
+			/>
+			<p class="rotate-90 text-xs font-mono shrink-0 text-nowrap">
+				<span class="group-hover:hidden">MCP Servers</span>
+				<span class="hidden group-hover:inline">{open ? 'Hide' : 'Show'} MCP Servers</span>
+			</p>
+			<ChevronsRight
+				class={twMerge(
+					'size-3 rotate-0 transition-all opacity-0 group-hover:opacity-100',
+					!open && 'rotate-180'
+				)}
+			/>
+		</button>
+	{/if}
+	<div class="h-full flex flex-col grow" in:fly={{ x: 100, duration: 150 }}>
 		{#if open}
 			{@render selectionScreen()}
 		{/if}
@@ -215,15 +223,24 @@
 {#snippet selectionScreen()}
 	<div
 		id="mcp-server-selection-screen"
-		class="flex w-full min-w-0 flex-col overflow-y-auto pl-2 pr-4 pb-4"
+		class="flex w-full min-w-0 flex-col overflow-y-auto pl-2 pr-2 pb-4"
 	>
-		<div class="sticky z-10 top-0 left-0 w-full bg-base-100 dark:bg-base-300 px-0 py-4">
-			<Search
-				value={query}
-				class="text-sm"
-				placeholder="Search MCP servers..."
-				onChange={onSearch}
-			/>
+		<div class="md:sticky z-10 top-0 left-0 w-full bg-base-100 dark:bg-base-200 px-0 py-4">
+			{#if responsive.isMobile}
+				<div class="fixed p-2 bottom-0 left-0 w-full mb-2 justify-center flex">
+					<button class="btn btn-primary" onclick={() => (open = false)}>
+						<ChevronLeft class="size-4" /> Return to Designer
+					</button>
+				</div>
+			{/if}
+			<div class="flex items-center gap-4">
+				<Search
+					value={query}
+					class="text-sm dark:bg-base-100 shadow-inner"
+					placeholder="Search MCP servers..."
+					onChange={onSearch}
+				/>
+			</div>
 			<div class="flex items-center gap-2 mt-2">
 				<label
 					id="mcp-server-sort-by-label"
@@ -231,7 +248,7 @@
 					class="flex grow items-center"
 				>
 					<span
-						class="text-sm font-light h-10 shrink-0 px-4 border border-base-300 dark:border-base-200 borded-r-none rounded-l-sm flex items-center justify-center"
+						class="text-sm font-light h-10 shrink-0 px-4 border border-base-300 dark:border-base-100 borded-r-none rounded-l-sm flex items-center justify-center"
 					>
 						Sort by
 					</span>
@@ -241,7 +258,7 @@
 						bind:selected={sortBy}
 						placeholder="Sort by"
 						ariaLabelledby="mcp-server-sort-by-label"
-						class="text-sm bg-base-200 dark:bg-base-200 shadow-inner! rounded-l-none rounded-r-sm"
+						class="text-sm bg-base-200 dark:bg-base-100 shadow-inner! rounded-l-none rounded-r-sm"
 						classes={{ root: 'w-full', option: 'text-sm' }}
 					/>
 				</label>
@@ -262,14 +279,28 @@
 					{@attach trackList}
 				>
 					{#each visibleEntries as entry (entry.id)}
-						<div class="pb-1 w-full" {@attach measureRow(entry.id)}>
-							{@render serverCard(entry)}
+						<div
+							class="pb-1 w-full"
+							use:tooltip={mcpServerNeedsStaticOAuthConfiguration(entry)
+								? { text: staticOAuthHelp, placement: 'left' }
+								: undefined}
+							{@attach measureRow(entry.id)}
+						>
+							{#if responsive.isMobile}
+								{@render mobileServerCard(entry)}
+							{:else}
+								{@render serverCard(entry)}
+							{/if}
 						</div>
 					{/each}
 				</div>
 			</div>
+		{:else if eligibleEntries.length === 0 && canCreateEntry}
+			<div class="flex flex-col">
+				{@render createEntryButton()}
+			</div>
 		{:else}
-			<p class="text-muted-content text-xs italic">No MCP servers available.</p>
+			<p class="text-muted-content text-xs italic" role="status">No MCP servers available.</p>
 		{/if}
 	</div>
 {/snippet}
@@ -279,15 +310,13 @@
 		id="mcp-create-catalog-entry-button"
 		type="button"
 		class={twMerge(
-			'group w-full bg-base-100 dark:bg-base-300 border-dashed flex touch-none cursor-grab items-center rounded-lg border border-base-300 dark:border-base-400 transition-[transform,box-shadow,opacity] duration-150 select-none',
-			'hover:bg-base-300 dark:hover:bg-base-200 border-base-300 dark:border-base-400',
-			drag.isDraggingNewEntry && 'cursor-grabbing opacity-30'
+			'group w-full bg-base-100 dark:bg-base-200 border-dashed flex touch-none cursor-grab items-center rounded-lg border border-base-300 dark:border-base-400 transition-[transform,box-shadow,opacity] duration-150 select-none',
+			'hover:bg-base-300 dark:hover:bg-base-100 border-base-300 dark:border-base-400',
+			drag.isDraggingNewEntry && 'cursor-grabbing opacity-30',
+			drag.disabled && 'cursor-default'
 		)}
 		aria-label="Create a new entry, or drag it onto a vMCP or Create vMCP"
 		onpointerdown={(event) => drag.pointerDown(event)}
-		onpointermove={drag.pointerMove}
-		onpointerup={drag.pointerUp}
-		onpointercancel={drag.cancel}
 		onkeydown={(event) => {
 			if (event.key !== 'Enter' && event.key !== ' ') return;
 			event.preventDefault();
@@ -304,13 +333,72 @@
 			<p
 				class="inline items-center gap-0.5 text-center text-xs font-medium text-muted-content group-hover:text-base-content"
 			>
-				Create New Entry
+				Add New MCP Server
 			</p>
 		</div>
 	</button>
 {/snippet}
 
+{#snippet mobileServerCard(entry: MCPCatalogEntry)}
+	{@const needsConfiguration = mcpServerNeedsStaticOAuthConfiguration(entry)}
+	<button
+		id={`mcp-server-card-${entry.id}`}
+		type="button"
+		class={twMerge(
+			'w-full bg-base-100 dark:bg-base-200 flex cursor-pointer items-center rounded-lg border border-base-300 dark:border-base-400 transition-[transform,box-shadow,opacity] duration-150 select-none',
+			'hover:bg-base-300 dark:hover:bg-base-100 border-base-300 dark:border-base-400',
+			needsConfiguration && 'cursor-not-allowed hover:bg-base-100 dark:hover:bg-base-200'
+		)}
+		disabled={needsConfiguration}
+		aria-label={needsConfiguration
+			? `${entry.manifest.name ?? 'MCP server'} requires administrator configuration`
+			: `Click to view ${entry.manifest.name ?? 'server'}`}
+		onclick={() => drag.activate(entry)}
+	>
+		<div class="flex gap-2 grow h-full px-3 py-2 items-center relative">
+			{#if isDeprecatedMCPServer(entry)}
+				<div
+					class="badge badge-xs absolute top-1 right-1 badge-warning badge-soft bg-warning/10 border-transparent rounded-sm p-1"
+					aria-label="This MCP server is deprecated"
+				>
+					<TriangleAlert class="size-3" />
+				</div>
+			{/if}
+			<div class="relative shrink-0">
+				<McpServerIcon
+					icon={entry.manifest.icon}
+					classes={{ root: needsConfiguration ? 'opacity-50' : '' }}
+				/>
+				{#if needsConfiguration}
+					<span
+						class="absolute -bottom-1 -right-1 rounded-full bg-base-100 dark:bg-base-200"
+						aria-label="Administrator configuration required"
+					>
+						<CircleAlert class="size-4 text-warning" aria-hidden="true" />
+					</span>
+				{/if}
+			</div>
+			<div class={twMerge('flex flex-col gap-0.5 text-left', needsConfiguration && 'opacity-50')}>
+				<p class="line-clamp-1 text-xs font-medium">
+					{entry.manifest.name}
+					{#each entry.manifest.metadata?.categories?.split(',') as category (category)}
+						<span
+							class="badge badge-xs badge-outline border-base-300 bg-base-300/30 dark:bg-base-400/30 dark:border-base-400 rounded-sm p-1 font-light mx-0.5"
+						>
+							{category}
+						</span>
+					{/each}
+				</p>
+				<p class="text-muted-content text-xs font-light line-clamp-2 tracking-tight">
+					{entry.manifest.shortDescription || entry.manifest.description || 'No description'}
+				</p>
+			</div>
+		</div>
+	</button>
+{/snippet}
+
 {#snippet serverCard(entry: MCPCatalogEntry)}
+	{@const needsConfiguration = mcpServerNeedsStaticOAuthConfiguration(entry)}
 	{@const dragging = drag.isDragging(entry)}
 	{@const previewTools = (entry.manifest.toolPreview ?? []).slice(0, 3)}
 	{#snippet previewPopover()}
@@ -361,12 +449,17 @@
 		id={`mcp-server-card-${entry.id}`}
 		type="button"
 		class={twMerge(
-			'w-full bg-base-100 dark:bg-base-300 flex touch-none cursor-grab items-center rounded-lg border border-base-300 dark:border-base-400 transition-[transform,box-shadow,opacity] duration-150 select-none',
-			'hover:bg-base-300 dark:hover:bg-base-200 border-base-300 dark:border-base-400',
-			dragging && 'cursor-grabbing opacity-30'
+			'w-full bg-base-100 dark:bg-base-200 flex touch-none cursor-grab items-center rounded-lg border border-base-300 dark:border-base-400 transition-[transform,box-shadow,opacity] duration-150 select-none',
+			'hover:bg-base-300 dark:hover:bg-base-100 border-base-300 dark:border-base-400',
+			dragging && 'cursor-grabbing opacity-30',
+			drag.disabled && 'cursor-default',
+			needsConfiguration && 'cursor-not-allowed hover:bg-base-100 dark:hover:bg-base-200'
 		)}
-		aria-label={`View ${entry.manifest.name ?? 'server'} details, or drag it onto a vMCP or Create vMCP`}
-		use:tooltip={dragging
+		disabled={needsConfiguration}
+		aria-label={needsConfiguration
+			? `${entry.manifest.name ?? 'MCP server'} requires administrator configuration`
+			: `View ${entry.manifest.name ?? 'server'} details, or drag it onto a vMCP or Create vMCP`}
+		use:tooltip={dragging || needsConfiguration
 			? undefined
 			: (entry.manifest.toolPreview?.length ?? 0) > 0
 				? {
@@ -376,16 +469,13 @@
 					}
 				: undefined}
 		onpointerdown={(event) => drag.pointerDown(event, entry)}
-		onpointermove={drag.pointerMove}
-		onpointerup={drag.pointerUp}
-		onpointercancel={drag.cancel}
 		onkeydown={(event) => {
 			if (event.key !== 'Enter' && event.key !== ' ') return;
 			event.preventDefault();
 			drag.activate(entry);
 		}}
 	>
-		<div class="shrink-0 pl-3">
+		<div class={twMerge('shrink-0 pl-3', needsConfiguration && 'opacity-50')}>
 			<GripVertical class="size-3" />
 		</div>
 		<div class="flex gap-2 grow h-full px-3 py-2 items-center relative">
@@ -397,8 +487,21 @@
 					<TriangleAlert class="size-3" />
 				</div>
 			{/if}
-			<McpServerIcon icon={entry.manifest.icon} />
-			<div class="flex flex-col gap-0.5 text-left">
+			<div class="relative shrink-0">
+				<McpServerIcon
+					icon={entry.manifest.icon}
+					classes={{ root: needsConfiguration ? 'opacity-50' : '' }}
+				/>
+				{#if needsConfiguration}
+					<span
+						class="absolute -bottom-1 -right-1 rounded-full bg-base-100 dark:bg-base-200"
+						aria-label="Administrator configuration required"
+					>
+						<CircleAlert class="size-4 text-warning" aria-hidden="true" />
+					</span>
+				{/if}
+			</div>
+			<div class={twMerge('flex flex-col gap-0.5 text-left', needsConfiguration && 'opacity-50')}>
 				<p class="line-clamp-1 text-xs font-medium">
 					{entry.manifest.name}
 					{#each entry.manifest.metadata?.categories?.split(',') as category (category)}

@@ -1,83 +1,103 @@
 import { dev } from '$app/environment';
+import { getHttpStatusCode } from '$lib/errors';
 import {
+	AdminService,
+	Group,
 	UserService,
 	type AppNotification,
 	type AppPreferences,
 	type DefaultModelAlias,
 	type License,
 	type Model,
+	type ProductTelemetryConsent,
 	type Profile,
 	type Version
 } from '$lib/services';
 import { compileAppPreferences } from '$lib/stores/appPreferences.svelte';
 import type { LayoutLoad } from './$types';
+import { redirect } from '@sveltejs/kit';
 
 export const prerender = 'auto';
 export const ssr = dev;
 
-export const load: LayoutLoad = async ({ fetch }) => {
-	let appPreferences: AppPreferences | undefined;
-	let profile: Profile | undefined;
-	let version: Version | undefined;
-	let license: License | undefined;
+export const load: LayoutLoad = async ({ fetch, url }) => {
+	const [versionResult, licenseResult, appPreferencesResult, profileResult] =
+		await Promise.allSettled([
+			UserService.getVersion({ fetch }),
+			UserService.getLicense({ fetch }),
+			UserService.listAppPreferences({ fetch }),
+			UserService.getProfile({ fetch })
+		]);
+
+	const version: Version | undefined =
+		versionResult.status === 'fulfilled' ? versionResult.value : undefined;
+	const license: License | undefined =
+		licenseResult.status === 'fulfilled' ? licenseResult.value : undefined;
+	const appPreferences: AppPreferences =
+		appPreferencesResult.status === 'fulfilled'
+			? compileAppPreferences(appPreferencesResult.value)
+			: compileAppPreferences();
+	const profile: Profile =
+		profileResult.status === 'fulfilled'
+			? profileResult.value
+			: {
+					id: '',
+					email: '',
+					iconURL: '',
+					role: 0,
+					effectiveRole: 0,
+					groups: [],
+					unauthorized: true,
+					username: ''
+				};
+
+	if (
+		profile.requirePasswordChange &&
+		url.pathname !== '/change-password' &&
+		url.pathname !== '/activate'
+	) {
+		throw redirect(303, `/change-password?rd=${encodeURIComponent(url.pathname + url.search)}`);
+	}
+
 	let defaultModelAliases: DefaultModelAlias[] | undefined;
 	let models: Model[] | undefined;
 	let appNotification: AppNotification | undefined;
+	let productTelemetryConsent: ProductTelemetryConsent | undefined;
+	let productTelemetryConsentAvailable: boolean | undefined;
 
-	try {
-		version = await UserService.getVersion({ fetch });
-	} catch {
-		version = undefined;
-	}
+	// A restricted session is refused these requests, and the password page renders without them,
+	// so avoid guaranteed 403s on every load.
+	if (!profile.unauthorized && !profile.requirePasswordChange) {
+		const isAdmin = profile.groups.includes(Group.ADMIN);
+		const [
+			defaultModelAliasesResult,
+			modelsResult,
+			appNotificationResult,
+			productTelemetryConsentResult
+		] = await Promise.allSettled([
+			UserService.listDefaultModelAliases({ fetch }),
+			UserService.listModels({ fetch }),
+			UserService.getAppNotification({ fetch }),
+			isAdmin
+				? AdminService.getProductTelemetryConsent({ fetch, dontLogErrors: true })
+				: Promise.resolve(undefined)
+		]);
+		defaultModelAliases =
+			defaultModelAliasesResult.status === 'fulfilled'
+				? defaultModelAliasesResult.value
+				: undefined;
+		models = modelsResult.status === 'fulfilled' ? modelsResult.value : undefined;
+		appNotification =
+			appNotificationResult.status === 'fulfilled' ? appNotificationResult.value : undefined;
 
-	try {
-		license = await UserService.getLicense({ fetch });
-	} catch {
-		license = undefined;
-	}
-
-	try {
-		const response = await UserService.listAppPreferences({ fetch });
-		const response2 = await UserService.getProfile({ fetch });
-		appPreferences = compileAppPreferences(response);
-		profile = response2;
-	} catch {
-		// If the request fails, use default preferences
-		appPreferences = compileAppPreferences();
-	}
-
-	try {
-		profile = await UserService.getProfile({ fetch });
-	} catch {
-		profile = {
-			id: '',
-			email: '',
-			iconURL: '',
-			role: 0,
-			effectiveRole: 0,
-			groups: [],
-			unauthorized: true,
-			username: ''
-		};
-	}
-
-	if (!profile.unauthorized) {
-		try {
-			defaultModelAliases = await UserService.listDefaultModelAliases({ fetch });
-		} catch {
-			defaultModelAliases = undefined;
-		}
-
-		try {
-			models = await UserService.listModels({ fetch });
-		} catch {
-			models = undefined;
-		}
-
-		try {
-			appNotification = await UserService.getAppNotification({ fetch });
-		} catch {
-			appNotification = undefined;
+		if (isAdmin) {
+			if (productTelemetryConsentResult.status === 'fulfilled') {
+				productTelemetryConsent = productTelemetryConsentResult.value;
+				productTelemetryConsentAvailable = true;
+			} else {
+				productTelemetryConsentAvailable =
+					getHttpStatusCode(productTelemetryConsentResult.reason) === 404 ? false : undefined;
+			}
 		}
 	}
 
@@ -88,6 +108,8 @@ export const load: LayoutLoad = async ({ fetch }) => {
 		license,
 		defaultModelAliases,
 		models,
-		appNotification
+		appNotification,
+		productTelemetryConsent,
+		productTelemetryConsentAvailable
 	};
 };

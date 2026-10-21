@@ -10,6 +10,7 @@
 		type MCPCatalogServer,
 		type MCPServerInstance
 	} from '$lib/services';
+	import type { MCPServerOAuthCredentialStatus } from '$lib/services/admin/types';
 	import { MCP_CONNECTION_INVALID_LICENSE_MESSAGE } from '$lib/services/user/constants';
 	import {
 		deleteMcpServerDeployment,
@@ -96,8 +97,8 @@
 
 	let oauthConfigModal = $state<ReturnType<typeof StaticOAuthConfigureModal>>();
 	let oauthConfigPromptHandled = $state(false);
-	let isInitialOAuthConfig = $state(false);
 	let oauthConfiguredOverride = $state<boolean | undefined>(undefined);
+	let oauthStatus = $state<MCPServerOAuthCredentialStatus>();
 	let debugOauthDialog = $state<ReturnType<typeof DebugOauthDialog>>();
 
 	let disconnecting = $state(false);
@@ -121,15 +122,15 @@
 	let restartableConfiguredServers = $derived(
 		configuredServers.filter((server) => supportsMCPBackendDetails(server))
 	);
-
 	// Connecting from a multi-user catalog entry row always starts a new shared server deployment.
 	let isMultiUserCatalogEntryRow = $derived(isMultiUserCatalogEntry(entry) && !server);
 	let requiresUpdate = $derived(server && requiresUserUpdate(server));
 	let canReauthenticate = $derived(
-		server?.manifest.runtime === 'remote' && Object.keys(server.oauthMetadata ?? {}).length > 0
+		server?.manifest.runtime === 'remote' &&
+			Object.keys(server.oauthMetadata ?? {}).length > 0 &&
+			!hasEditableConfiguration(server)
 	);
 	let canDebugOauth = $derived(canReauthenticate && profile.current?.hasAdminAccess?.());
-	let belongsToComposite = $derived(Boolean(server && server.compositeName));
 	let deprecated = $derived(isDeprecatedMCPServer(entry) || isDeprecatedMCPServer(server));
 	let configurableItem = $derived(server ?? entry);
 	// True when the user can manage the server deployment (restart, rename, edit config).
@@ -140,10 +141,7 @@
 			(server?.powerUserWorkspaceID && server?.userID === profile.current.id)
 	);
 	let canConfigure = $derived(
-		configurableItem &&
-			(configurableItem.manifest.runtime === 'composite' ||
-				hasEditableConfiguration(configurableItem)) &&
-			isServerOwner
+		configurableItem && hasEditableConfiguration(configurableItem) && isServerOwner
 	);
 	let canEditMultiUserServerConfiguration = $derived(
 		Boolean(
@@ -152,7 +150,9 @@
 			!readonly &&
 			allowMultiUserServerConfigurationEdit &&
 			instance &&
-			(server.manifest.multiUserConfig?.userDefinedHeaders?.length ?? 0) > 0
+			((server.manifest.config ?? []).filter(
+				(field) => field.usage === 'header' && field.userAllowed
+			)?.length ?? 0) > 0
 		)
 	);
 	let canDeleteMultiUserServer = $derived(
@@ -225,7 +225,6 @@
 			true;
 		return entryCanConnect && serverCanConnect;
 	});
-
 	let requiresStaticOAuth = $derived(
 		entry?.manifest?.runtime === 'remote' && entry?.manifest?.remoteConfig?.staticOAuthRequired
 	);
@@ -235,6 +234,25 @@
 		oauthConfiguredOverride !== undefined
 			? oauthConfiguredOverride
 			: !requiresStaticOAuth || entry?.oauthCredentialConfigured
+	);
+	let showConnectButton = $derived(
+		!hideActions &&
+			Boolean(
+				(entry && !server) ||
+				(server &&
+					(isMultiUserServer(server) ||
+						!server.catalogEntryID ||
+						(server.catalogEntryID && server.userID === profile.current.id)))
+			)
+	);
+	let connectionDisabled = $derived(
+		Boolean(
+			loading ||
+			hasLicenseEntitlementViolations ||
+			(isMultiUserCatalogEntryRow && !catalogID && !workspaceID) ||
+			!canConnect ||
+			(requiresStaticOAuth && oauthConfigured === false)
+		)
 	);
 
 	function refresh() {
@@ -280,8 +298,7 @@
 	$effect(() => {
 		if (promptOAuthConfig && !oauthConfigPromptHandled) {
 			oauthConfigPromptHandled = true;
-			isInitialOAuthConfig = true;
-			oauthConfigModal?.open();
+			void openOAuthConfig();
 
 			// clear out the configure-oauth param
 			const url = new URL(page.url);
@@ -289,6 +306,21 @@
 			goto(url, { replaceState: true });
 		}
 	});
+
+	async function openOAuthConfig() {
+		if (!entry) return;
+		try {
+			oauthStatus = entry.powerUserWorkspaceID
+				? await UserService.getWorkspaceMCPCatalogEntryOAuthCredentials(
+						entry.powerUserWorkspaceID,
+						entry.id
+					)
+				: await AdminService.getMCPCatalogEntryOAuthCredentials('default', entry.id);
+		} catch {
+			oauthStatus = { configured: Boolean(entry.oauthCredentialConfigured) };
+		}
+		oauthConfigModal?.open();
+	}
 
 	function handleShowSelectServerDialog(
 		mode: ServerSelectMode = 'connect',
@@ -307,16 +339,10 @@
 </script>
 
 <!-- Use class:hidden to avoid Svelte 5 production build with conditional DOM cleanup -->
-<div class="contents" class:hidden={belongsToComposite || hideActions}>
+<div class="contents" class:hidden={hideActions}>
 	<button
 		class="btn btn-primary flex w-full items-center gap-1 text-sm disabled:cursor-not-allowed disabled:opacity-50 md:w-fit"
-		class:hidden={!(
-			(entry && !server) ||
-			(server &&
-				(isMultiUserServer(server) ||
-					!server.catalogEntryID ||
-					(server.catalogEntryID && server.userID === profile.current.id)))
-		)}
+		class:hidden={!showConnectButton}
 		use:tooltip={{
 			text: hasLicenseEntitlementViolations
 				? MCP_CONNECTION_INVALID_LICENSE_MESSAGE
@@ -359,11 +385,7 @@
 				});
 			}
 		}}
-		disabled={loading ||
-			hasLicenseEntitlementViolations ||
-			(isMultiUserCatalogEntryRow && !catalogID && !workspaceID) ||
-			!canConnect ||
-			(requiresStaticOAuth && oauthConfigured === false)}
+		disabled={connectionDisabled}
 	>
 		{#if loading}
 			<Loading class="size-4" />
@@ -483,7 +505,7 @@
 		{#if isMultiUserCatalogEntry(entry) || isMultiUserServer(server)}
 			<p class="text-center">
 				{#if entry}
-					Your catalog entry has been configured.
+					Your MCP server has been configured.
 				{:else}
 					Your server has been configured.
 				{/if}
@@ -817,25 +839,32 @@
 <StaticOAuthConfigureModal
 	bind:this={oauthConfigModal}
 	{deprecated}
+	{oauthStatus}
 	onSave={async (credentials) => {
 		if (!entry) return;
+		oauthStatus = entry.powerUserWorkspaceID
+			? await UserService.setWorkspaceMCPCatalogEntryOAuthCredentials(
+					entry.powerUserWorkspaceID,
+					entry.id,
+					credentials
+				)
+			: await AdminService.setMCPCatalogEntryOAuthCredentials('default', entry.id, credentials);
+		oauthConfiguredOverride = oauthStatus.configured;
+		onOAuthConfigured?.();
+	}}
+	onDelete={async () => {
+		if (!entry) return;
 		if (entry.powerUserWorkspaceID) {
-			await UserService.setWorkspaceMCPCatalogEntryOAuthCredentials(
+			await UserService.deleteWorkspaceMCPCatalogEntryOAuthCredentials(
 				entry.powerUserWorkspaceID,
-				entry.id,
-				credentials
+				entry.id
 			);
 		} else {
-			await AdminService.setMCPCatalogEntryOAuthCredentials('default', entry.id, credentials);
+			await AdminService.deleteMCPCatalogEntryOAuthCredentials('default', entry.id);
 		}
-		oauthConfiguredOverride = true;
+		oauthConfiguredOverride = false;
+		oauthStatus = { configured: false };
 		onOAuthConfigured?.();
-
-		// Show the connect dialog if this was part of the initial creation flow
-		if (isInitialOAuthConfig) {
-			isInitialOAuthConfig = false;
-			launchDialog?.open();
-		}
 	}}
 />
 

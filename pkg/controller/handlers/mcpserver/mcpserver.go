@@ -2,7 +2,6 @@ package mcpserver
 
 import (
 	"cmp"
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,13 +16,11 @@ import (
 	"github.com/obot-platform/obot/pkg/mcp"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	"github.com/obot-platform/obot/pkg/system"
-	"github.com/obot-platform/obot/pkg/utils"
 	"gorm.io/gorm"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/util/retry"
 	kclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -82,7 +79,7 @@ func (h *Handler) DetectDrift(req router.Request, _ router.Response) error {
 		return err
 	}
 
-	drifted, err := ConfigurationHasDrifted(req.Ctx, h.gatewayClient, server, entry.Spec.Manifest, h.defaultDenyAllEgress)
+	drifted, err := configurationHasDrifted(server.Spec.Manifest, entry.Spec.Manifest, h.defaultDenyAllEgress)
 	if err != nil {
 		return err
 	}
@@ -258,66 +255,16 @@ func (h *Handler) DetectK8sSettingsDrift(req router.Request, _ router.Response) 
 	return nil
 }
 
-// ConfigurationHasDrifted compares runtime config, env, resources, and multi-user config between a server
-// and a catalog entry manifest. Static values omitted from the persisted server manifest are restored from
-// its gateway credential before comparison.
-func ConfigurationHasDrifted(ctx context.Context, gatewayClient *gateway.Client, server *v1.MCPServer, entryManifest types.MCPServerCatalogEntryManifest, defaultDenyAllEgress bool) (bool, error) {
-	staticKeys := make(map[string]struct{})
-	for _, env := range entryManifest.Env {
-		if env.Value != "" {
-			staticKeys[env.Key] = struct{}{}
-		}
-	}
-	if entryManifest.RemoteConfig != nil {
-		for _, header := range entryManifest.RemoteConfig.Headers {
-			if header.Value != "" {
-				staticKeys[header.Key] = struct{}{}
-			}
-		}
-	}
-
-	serverManifest := server.Spec.Manifest
-	if len(staticKeys) > 0 {
-		credentialContext := server.Spec.UserID
-		if server.Spec.MCPCatalogID != "" {
-			credentialContext = server.Spec.MCPCatalogID
-		} else if server.Spec.PowerUserWorkspaceID != "" {
-			credentialContext = server.Spec.PowerUserWorkspaceID
-		}
-
-		credential, err := gatewayClient.RevealCredential(ctx, []string{fmt.Sprintf("%s-%s", credentialContext, server.Name)}, server.Name)
-		if err != nil && !errors.As(err, &gateway.CredentialNotFoundError{}) {
-			return false, err
-		}
-
-		serverManifest.Env = slices.Clone(serverManifest.Env)
-		for i, env := range serverManifest.Env {
-			if _, ok := staticKeys[env.Key]; ok && env.Value == "" {
-				serverManifest.Env[i].Value = credential.Secrets[env.Key]
-			}
-		}
-
-		if serverManifest.RemoteConfig != nil {
-			remoteConfig := *serverManifest.RemoteConfig
-			remoteConfig.Headers = slices.Clone(remoteConfig.Headers)
-			serverManifest.RemoteConfig = &remoteConfig
-			for i, header := range serverManifest.RemoteConfig.Headers {
-				if _, ok := staticKeys[header.Key]; ok && header.Value == "" {
-					serverManifest.RemoteConfig.Headers[i].Value = credential.Secrets[header.Key]
-				}
-			}
-		}
-	}
-
-	return configurationHasDrifted(serverManifest, entryManifest, defaultDenyAllEgress)
-}
-
 // configurationHasDrifted compares only the fields common to MCPServerManifest and
-// MCPServerCatalogEntryManifest. It is also used for nested composite components,
-// which do not have their own MCPServer object or credential context.
+// MCPServerCatalogEntryManifest.
 func configurationHasDrifted(serverManifest types.MCPServerManifest, entryManifest types.MCPServerCatalogEntryManifest, defaultDenyAllEgress bool) (bool, error) {
 	// Check if runtime types differ
 	if serverManifest.Runtime != entryManifest.Runtime {
+		return true, nil
+	}
+
+	// A new revision means the entry's static configuration values changed.
+	if serverManifest.StaticConfigurationRevision != entryManifest.StaticConfigurationRevision {
 		return true, nil
 	}
 
@@ -332,12 +279,6 @@ func configurationHasDrifted(serverManifest types.MCPServerManifest, entryManife
 		drifted = containerizedConfigHasDrifted(serverManifest.ContainerizedConfig, entryManifest.ContainerizedConfig, defaultDenyAllEgress)
 	case types.RuntimeRemote:
 		drifted = remoteConfigHasDrifted(serverManifest.RemoteConfig, entryManifest.RemoteConfig)
-	case types.RuntimeComposite:
-		var err error
-		drifted, err = compositeConfigHasDrifted(serverManifest.CompositeConfig, entryManifest.CompositeConfig, defaultDenyAllEgress)
-		if err != nil {
-			return false, err
-		}
 	default:
 		return false, fmt.Errorf("unknown runtime type: %s", serverManifest.Runtime)
 	}
@@ -346,16 +287,12 @@ func configurationHasDrifted(serverManifest types.MCPServerManifest, entryManife
 		return true, nil
 	}
 
-	// Check multi-user configuration
-	if multiUserConfigHasDrifted(serverManifest.MultiUserConfig, entryManifest.MultiUserConfig) {
-		return true, nil
-	}
-
 	// Check environment. Secret binding selections are deployment configuration,
 	// not source catalog drift.
-	serverEnv := withoutAdminManagedSecretBoundEnvFields(serverManifest.Env, entryManifest.Env)
-	entryEnv := withoutAdminManagedSecretBoundEnvFields(entryManifest.Env, serverManifest.Env)
-	if fieldSlicesHaveDrifted(serverEnv, entryEnv, mcpEnvMatchesCatalog) {
+	entryEnv := entryManifest.Config
+	serverEnv := withoutAdminManagedSecretBoundConfigFields(serverManifest.Config, entryEnv)
+	entryEnv = withoutAdminManagedSecretBoundConfigFields(entryEnv, serverManifest.Config)
+	if fieldSlicesHaveDrifted(serverEnv, entryEnv, mcpConfigMatchesCatalog) {
 		return true, nil
 	}
 
@@ -370,16 +307,6 @@ func resourcesHasDrifted(serverResources, entryResources *types.MCPResourceRequi
 		return true
 	}
 	return !reflect.DeepEqual(serverResources, entryResources)
-}
-
-func multiUserConfigHasDrifted(serverConfig, entryConfig *types.MultiUserConfig) bool {
-	if serverConfig == nil && entryConfig == nil {
-		return false
-	}
-	if serverConfig == nil || entryConfig == nil {
-		return true
-	}
-	return fieldSlicesHaveDrifted(serverConfig.UserDefinedHeaders, entryConfig.UserDefinedHeaders, mcpHeaderMatchesCatalog)
 }
 
 // uvxConfigHasDrifted checks if UVX configuration has drifted
@@ -457,47 +384,23 @@ func remoteConfigHasDrifted(serverConfig *types.RemoteRuntimeConfig, entryConfig
 		}
 	}
 
-	// Check if headers have drifted
-	serverHeaders := withoutAdminManagedSecretBoundHeaderFields(serverConfig.Headers, entryConfig.Headers)
-	entryHeaders := withoutAdminManagedSecretBoundHeaderFields(entryConfig.Headers, serverConfig.Headers)
-	return fieldSlicesHaveDrifted(serverHeaders, entryHeaders, mcpHeaderMatchesCatalog)
+	return false
 }
 
-// withoutAdminManagedSecretBoundEnvFields removes env fields that exist only on
+// withoutAdminManagedSecretBoundConfigFields removes env fields that exist only on
 // serverFields because an admin selected a deployment-level secret binding.
 // Catalog-owned fields are kept so pinned catalog bindings still participate in
 // drift detection.
-func withoutAdminManagedSecretBoundEnvFields(serverFields, entryFields []types.MCPEnv) []types.MCPEnv {
+func withoutAdminManagedSecretBoundConfigFields(serverFields, entryFields []types.MCPConfig) []types.MCPConfig {
 	entryKeys := make(map[string]struct{}, len(entryFields))
 	for _, field := range entryFields {
 		entryKeys[field.Key] = struct{}{}
 	}
 
-	result := make([]types.MCPEnv, 0, len(serverFields))
+	result := make([]types.MCPConfig, 0, len(serverFields))
 	for _, field := range serverFields {
 		_, entryHasField := entryKeys[field.Key]
-		if !entryHasField && adminAddedSecretBinding(field.SecretBinding) {
-			continue
-		}
-		result = append(result, field)
-	}
-	return result
-}
-
-// withoutAdminManagedSecretBoundHeaderFields removes header fields that exist
-// only on serverFields because an admin selected a deployment-level secret
-// binding. Catalog-owned fields are kept so pinned catalog bindings still
-// participate in drift detection.
-func withoutAdminManagedSecretBoundHeaderFields(serverFields, entryFields []types.MCPHeader) []types.MCPHeader {
-	entryKeys := make(map[string]struct{}, len(entryFields))
-	for _, field := range entryFields {
-		entryKeys[field.Key] = struct{}{}
-	}
-
-	result := make([]types.MCPHeader, 0, len(serverFields))
-	for _, field := range serverFields {
-		_, entryHasField := entryKeys[field.Key]
-		if !entryHasField && adminAddedSecretBinding(field.SecretBinding) {
+		if !entryHasField && (field.UserAllowed || adminAddedSecretBinding(field.SecretBinding)) {
 			continue
 		}
 		result = append(result, field)
@@ -529,7 +432,10 @@ func fieldSlicesHaveDrifted[T any](serverFields, entryFields []T, matches func(T
 	return false
 }
 
-func mcpEnvMatchesCatalog(serverField, entryField types.MCPEnv) bool {
+func mcpConfigMatchesCatalog(serverField, entryField types.MCPConfig) bool {
+	// Per-user access is deployment policy, not catalog schema drift.
+	serverField.UserAllowed = false
+	entryField.UserAllowed = false
 	if oneSidedAdminAddedSecretBinding(serverField.SecretBinding, entryField.SecretBinding) {
 		serverField.SecretBinding = nil
 		serverField.Value = entryField.Value
@@ -539,18 +445,6 @@ func mcpEnvMatchesCatalog(serverField, entryField types.MCPEnv) bool {
 		entryField.Value = serverField.Value
 	}
 
-	return reflect.DeepEqual(serverField, entryField)
-}
-
-func mcpHeaderMatchesCatalog(serverField, entryField types.MCPHeader) bool {
-	if oneSidedAdminAddedSecretBinding(serverField.SecretBinding, entryField.SecretBinding) {
-		serverField.SecretBinding = nil
-		serverField.Value = entryField.Value
-	}
-	if oneSidedAdminAddedSecretBinding(entryField.SecretBinding, serverField.SecretBinding) {
-		entryField.SecretBinding = nil
-		entryField.Value = serverField.Value
-	}
 	return reflect.DeepEqual(serverField, entryField)
 }
 
@@ -562,53 +456,6 @@ func oneSidedAdminAddedSecretBinding(left, right *types.MCPSecretBinding) bool {
 
 func adminAddedSecretBinding(binding *types.MCPSecretBinding) bool {
 	return binding != nil && binding.AdminAdded
-}
-
-// compositeConfigHasDrifted checks if the composite configuration has drifted
-func compositeConfigHasDrifted(serverConfig *types.CompositeRuntimeConfig, entryConfig *types.CompositeCatalogConfig, defaultDenyAllEgress bool) (bool, error) {
-	if serverConfig == nil && entryConfig == nil {
-		return false, nil
-	}
-	if serverConfig == nil || entryConfig == nil {
-		return true, nil
-	}
-
-	// Fast length check
-	if len(serverConfig.ComponentServers) != len(entryConfig.ComponentServers) {
-		return true, nil
-	}
-
-	entryComponents := make(map[string]types.CatalogComponentServer, len(entryConfig.ComponentServers))
-	for _, entryComponent := range entryConfig.ComponentServers {
-		if id := entryComponent.ComponentID(); id != "" {
-			entryComponents[id] = entryComponent
-		}
-	}
-
-	for _, serverComponent := range serverConfig.ComponentServers {
-		entryComponent, ok := entryComponents[serverComponent.ComponentID()]
-		if !ok {
-			return true, nil
-		}
-
-		// Compare tool prefix
-		if serverComponent.ToolPrefix != entryComponent.ToolPrefix {
-			return true, nil
-		}
-
-		// Compare tool overrides
-		if utils.Digest(serverComponent.ToolOverrides) != utils.Digest(entryComponent.ToolOverrides) {
-			return true, nil
-		}
-
-		// Compare manifests
-		drifted, err := configurationHasDrifted(serverComponent.Manifest, entryComponent.Manifest, defaultDenyAllEgress)
-		if err != nil || drifted {
-			return drifted, err
-		}
-	}
-
-	return false, nil
 }
 
 // EnsureMCPServerInstanceUserCount ensures that mcp server instance user count for multi-user MCP servers is up to date.
@@ -681,7 +528,18 @@ func (h *Handler) EnsureMCPCatalogID(req router.Request, _ router.Response) erro
 			return kclient.IgnoreNotFound(err)
 		}
 
-		server.Status.MCPCatalogID = mcpCatalogEntry.Spec.MCPCatalogName
+		// Workspace-scoped entries carry no catalog name, so fall back to the workspace
+		// they belong to. Recording the scope while the entry still exists is what keeps
+		// it available to snapshot-backed servers after the entry is deleted.
+		catalogID := mcpCatalogEntry.Spec.MCPCatalogName
+		if catalogID == "" {
+			catalogID = mcpCatalogEntry.Spec.PowerUserWorkspaceID
+		}
+		if catalogID == "" || catalogID == server.Status.MCPCatalogID {
+			return nil
+		}
+
+		server.Status.MCPCatalogID = catalogID
 		slog.Info("Resolved MCP catalog ID for server", "server", server.Name, "catalogEntry", server.Spec.MCPServerCatalogEntryName, "catalogID", server.Status.MCPCatalogID)
 		return req.Client.Status().Update(req.Ctx, server)
 	}
@@ -702,228 +560,14 @@ func (h *Handler) MigrateSharedWithinMCPCatalogName(req router.Request, _ router
 	return nil
 }
 
-// CleanupNestedCompositeServers removes component servers with composite runtimes from composite MCP servers.
-// This handler cleans up servers that were created before API validation to prevent nested composite servers.
-func (h *Handler) CleanupNestedCompositeServers(req router.Request, _ router.Response) error {
-	var (
-		server   = req.Object.(*v1.MCPServer)
-		manifest = server.Spec.Manifest
-	)
-
-	if manifest.Runtime != types.RuntimeComposite ||
-		manifest.CompositeConfig == nil {
-		return nil
-	}
-
-	// Delete component servers with composite runtimes
-	if server.Spec.CompositeName != "" {
-		slog.Info("Deleting nested composite component server", "server", server.Name, "parentComposite", server.Spec.CompositeName)
-		return kclient.IgnoreNotFound(req.Client.Delete(req.Ctx, server))
-	}
-	// Remove all composite components from the server's manifest
-	var (
-		components    = manifest.CompositeConfig.ComponentServers
-		numComponents = len(components)
-	)
-	components = slices.DeleteFunc(components, func(component types.ComponentServer) bool {
-		return component.Manifest.Runtime == types.RuntimeComposite
-	})
-
-	if numComponents == len(components) {
-		return nil
-	}
-
-	server.Spec.Manifest.CompositeConfig.ComponentServers = components
-	slog.Info("Pruned nested composite components from MCP server manifest", "server", server.Name, "removedComponents", numComponents-len(components))
-	return kclient.IgnoreNotFound(req.Client.Update(req.Ctx, server))
-}
-
-func (h *Handler) EnsureCompositeComponents(req router.Request, _ router.Response) error {
-	var (
-		compositeServer = req.Object.(*v1.MCPServer)
-		manifest        = compositeServer.Spec.Manifest
-	)
-
-	if manifest.Runtime != types.RuntimeComposite ||
-		manifest.CompositeConfig == nil ||
-		len(manifest.CompositeConfig.ComponentServers) < 1 {
-		return nil
-	}
-
-	// Load all existing component servers
-	var componentServers v1.MCPServerList
-	if err := req.List(&componentServers, &kclient.ListOptions{
-		FieldSelector: fields.OneTermEqualSelector("spec.compositeName", compositeServer.Name),
-		Namespace:     compositeServer.Namespace,
-	}); err != nil {
-		return fmt.Errorf("failed to list component servers: %w", err)
-	}
-
-	// Load all existing component instances (for multi-user components)
-	var componentInstances v1.MCPServerInstanceList
-	if err := req.List(&componentInstances, &kclient.ListOptions{
-		FieldSelector: fields.OneTermEqualSelector("spec.compositeName", compositeServer.Name),
-		Namespace:     compositeServer.Namespace,
-	}); err != nil {
-		return fmt.Errorf("failed to list component instances: %w", err)
-	}
-
-	// Create index of existing catalog entry components by ID
-	existingServers := make(map[string]v1.MCPServer, len(componentServers.Items))
-	for _, existing := range componentServers.Items {
-		if id := existing.Spec.MCPServerCatalogEntryName; id != "" {
-			existingServers[id] = existing
-		}
-	}
-
-	// Create index of existing multi-user component instances by MCPServerID
-	existingInstances := make(map[string]v1.MCPServerInstance, len(componentInstances.Items))
-	for _, existing := range componentInstances.Items {
-		if id := existing.Spec.MCPServerName; id != "" {
-			existingInstances[existing.Spec.MCPServerName] = existing
-		}
-	}
-
-	// withNeedsURL returns the given MCP server with a NeedsURL field set according to its hostname constraint and url.
-	// If the server is not remote, or does not have a hostname constraint, it returns the unmodified server.
-	withNeedsURL := func(server v1.MCPServer) v1.MCPServer {
-		remoteConfig := compositeServer.Spec.Manifest.RemoteConfig
-		if compositeServer.Spec.Manifest.Runtime != types.RuntimeRemote || remoteConfig == nil || remoteConfig.Hostname == "" {
-			return server
-		}
-
-		server.Spec.NeedsURL = types.ValidateURLHostname(remoteConfig.URL, remoteConfig.Hostname) != nil
-		return server
-	}
-
-	// Ensuring a composite server is up-to-date has 3 steps:
-	// 1. Create new component servers and instances
-	// 2. Update existing component servers (no-op on existing instances, since there's nothing to change)
-	// 3. Delete removed component servers and instances
-	for _, component := range manifest.CompositeConfig.ComponentServers {
-		if component.MCPServerID != "" {
-			// Multi-user component
-			if _, exists := existingInstances[component.MCPServerID]; !exists {
-				// New instance, create it
-				var multiUserServer v1.MCPServer
-				if err := req.Get(&multiUserServer, compositeServer.Namespace, component.MCPServerID); err != nil {
-					return fmt.Errorf("failed to get multi-user server %s: %w", component.MCPServerID, err)
-				}
-
-				if err := req.Client.Create(req.Ctx, &v1.MCPServerInstance{
-					GenerateName: system.MCPServerInstancePrefix,
-					Namespace:    compositeServer.Namespace,
-					Finalizers:   []string{v1.MCPServerInstanceFinalizer},
-					Spec: v1.MCPServerInstanceSpec{
-						MCPServerName:        component.MCPServerID,
-						MCPCatalogName:       multiUserServer.Spec.MCPCatalogID,
-						PowerUserWorkspaceID: multiUserServer.Spec.PowerUserWorkspaceID,
-						MultiUserConfig:      multiUserServer.Spec.Manifest.MultiUserConfig,
-						UserID:               compositeServer.Spec.UserID,
-						CompositeName:        compositeServer.Name,
-					},
-				}); err != nil {
-					return fmt.Errorf("failed to create instance for multi-user component: %w", err)
-				}
-				slog.Info("Created component MCPServerInstance for composite server", "composite", compositeServer.Name, "componentServer", component.MCPServerID, "userID", compositeServer.Spec.UserID)
-			} else {
-				existingInstance := existingInstances[component.MCPServerID]
-				var multiUserServer v1.MCPServer
-				if err := req.Get(&multiUserServer, compositeServer.Namespace, component.MCPServerID); err != nil {
-					return fmt.Errorf("failed to get multi-user server %s: %w", component.MCPServerID, err)
-				}
-
-				if utils.Digest(existingInstance.Spec.MultiUserConfig) != utils.Digest(multiUserServer.Spec.Manifest.MultiUserConfig) {
-					existingInstance.Spec.MultiUserConfig = multiUserServer.Spec.Manifest.MultiUserConfig
-					if err := req.Client.Update(req.Ctx, &existingInstance); err != nil {
-						return fmt.Errorf("failed to update instance for multi-user component: %w", err)
-					}
-				}
-			}
-
-			// Remove the instance to build the list of existing instances to delete
-			delete(existingInstances, component.MCPServerID)
-			continue
-		}
-
-		// Catalog entry component
-		if existingServer, exists := existingServers[component.CatalogEntryID]; !exists {
-			// New server, create it
-			newServer := withNeedsURL(v1.MCPServer{
-				GenerateName: system.MCPServerPrefix,
-				Namespace:    compositeServer.Namespace,
-				Finalizers:   []string{v1.MCPServerFinalizer},
-				Spec: v1.MCPServerSpec{
-					Manifest:                  component.Manifest,
-					MCPServerCatalogEntryName: component.CatalogEntryID,
-					UserID:                    compositeServer.Spec.UserID,
-					CompositeName:             compositeServer.Name,
-				},
-			})
-
-			if err := req.Client.Create(req.Ctx, &newServer); err != nil {
-				return fmt.Errorf("failed to create new component server: %w", err)
-			}
-			slog.Info("Created component MCP server for composite server", "composite", compositeServer.Name, "catalogEntry", component.CatalogEntryID)
-		} else if utils.Digest(existingServer.Spec.Manifest) != utils.Digest(component.Manifest) {
-			slog.Info("Updating component MCP server manifest for composite server", "composite", compositeServer.Name, "componentServer", existingServer.Name)
-			// Ensure the server is shut down before updating it
-			if err := h.mcpSessionManager.ShutdownServer(req.Ctx, existingServer.Name); err != nil {
-				return err
-			}
-
-			if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-				var latestServer v1.MCPServer
-				if err := req.Get(&latestServer, compositeServer.Namespace, existingServer.Name); err != nil {
-					return err
-				}
-
-				latestServer.Spec.Manifest = component.Manifest
-				latestServer = withNeedsURL(latestServer)
-				return req.Client.Update(req.Ctx, &latestServer)
-			}); err != nil {
-				return fmt.Errorf("failed to update existing component server: %w", err)
-			}
-		}
-
-		// Remove the server to build the list of existing servers to delete
-		delete(existingServers, component.CatalogEntryID)
-	}
-
-	// Delete existing instances that were not in the updated manifest
-	for _, instance := range existingInstances {
-		slog.Info("Deleting stale component MCPServerInstance", "composite", compositeServer.Name, "instance", instance.Name)
-		if err := req.Delete(&instance); kclient.IgnoreNotFound(err) != nil {
-			return fmt.Errorf("failed to delete instance %s: %w", instance.Name, err)
-		}
-	}
-
-	// Delete existing servers that were not in the updated manifest
-	for _, server := range existingServers {
-		slog.Info("Deleting stale component MCP server", "composite", compositeServer.Name, "server", server.Name)
-		if err := req.Delete(&server); kclient.IgnoreNotFound(err) != nil {
-			return fmt.Errorf("failed to delete server %s: %w", server.Name, err)
-		}
-	}
-
-	// All of the component MCP servers should now match the manifest of the composite.
-	// Update the status hash to reflect the observed state.
-	if manifestHash := utils.Digest(manifest); compositeServer.Status.ObservedCompositeManifestHash != manifestHash {
-		compositeServer.Status.ObservedCompositeManifestHash = manifestHash
-		slog.Info("Updated observed composite manifest hash", "composite", compositeServer.Name, "hash", manifestHash)
-		if err := req.Client.Status().Update(req.Ctx, compositeServer); err != nil {
-			return fmt.Errorf("failed to update composite server status: %w", err)
-		}
-	}
-
-	return nil
-}
-
 // SyncOAuthCredentialStatus syncs the OAuthCredentialConfigured status from the catalog entry.
 // This replaces the push-based propagation logic with a pull-based approach where each MCP server
 // is responsible for syncing its own status from its parent catalog entry.
 func (h *Handler) SyncOAuthCredentialStatus(req router.Request, _ router.Response) error {
 	server := req.Object.(*v1.MCPServer)
+	if server.Spec.VMCPID != "" || server.Spec.VMCPInstanceID != "" {
+		return h.syncVMCPOAuthCredentialStatus(req, server)
+	}
 
 	// Only relevant for servers created from catalog entries
 	if server.Spec.MCPServerCatalogEntryName == "" {
@@ -984,20 +628,17 @@ func (h *Handler) SyncOAuthMetadata(req router.Request, _ router.Response) error
 		return nil
 	}
 
-	var credCtxs []string
-	if server.Spec.IsCatalogServer() {
-		credCtxs = []string{fmt.Sprintf("%s-%s", server.Spec.MCPCatalogID, server.Name)}
-	} else if server.Spec.IsPowerUserWorkspaceServer() {
-		credCtxs = []string{fmt.Sprintf("%s-%s", server.Spec.PowerUserWorkspaceID, server.Name)}
-	} else {
-		credCtxs = []string{fmt.Sprintf("%s-%s", server.Spec.UserID, server.Name)}
-	}
-	cred, err := h.gatewayClient.RevealCredential(req.Ctx, credCtxs, server.Name)
+	cred, err := h.gatewayClient.RevealCredential(req.Ctx, []string{server.CredentialContext(server.Spec.UserID)}, server.Name)
 	if err != nil && !errors.As(err, &gateway.CredentialNotFoundError{}) {
 		return fmt.Errorf("failed to reveal credential: %w", err)
 	}
 
-	serverConfig, missingConfig, err := mcp.ServerToServerConfig(*server, server.ValidConnectURLs(h.baseURL), server.Spec.UserID, server.Name, server.Status.MCPCatalogID, cred.Secrets)
+	resolvedServer, err := mcp.ResolveServerStaticConfiguration(req.Ctx, h.gatewayClient, *server)
+	if err != nil {
+		return err
+	}
+
+	serverConfig, missingConfig, err := mcp.ServerToServerConfig(resolvedServer, server.ValidConnectURLs(h.baseURL), server.Spec.UserID, server.Name, server.Status.MCPCatalogID, cred.Secrets)
 	if err != nil {
 		return fmt.Errorf("failed to convert MCP server to server config: %w", err)
 	} else if len(missingConfig) > 0 {
@@ -1027,6 +668,13 @@ func (h *Handler) SyncOAuthMetadata(req router.Request, _ router.Response) error
 func (h *Handler) SyncThirdPartyAuthStatus(req router.Request, _ router.Response) error {
 	server := req.Object.(*v1.MCPServer)
 	if server.Spec.Manifest.Runtime != types.RuntimeRemote || server.Spec.Manifest.RemoteConfig == nil {
+		return nil
+	}
+
+	if server.Spec.VMCPComponentID != "" && server.Spec.VMCPInstanceID == "" {
+		// A shared component server backs every user of a multi-user VMCP, each of whom
+		// authenticates separately, so a single flag cannot describe it. Spec.UserID is only
+		// the VMCP's creator.
 		return nil
 	}
 
@@ -1134,7 +782,7 @@ func (h *Handler) ShutdownIdleServers(req router.Request, resp router.Response) 
 // SetNonDeployServerStatus sets the deployment status for servers that don't have a corresponding deployment.
 func (h *Handler) SetNonDeployServerStatus(req router.Request, _ router.Response) error {
 	mcpServer := req.Object.(*v1.MCPServer)
-	if mcpServer.Spec.Manifest.Runtime == types.RuntimeRemote || mcpServer.Spec.Manifest.Runtime == types.RuntimeComposite {
+	if mcpServer.Spec.Manifest.Runtime == types.RuntimeRemote {
 		mcpServer.Status.DeploymentStatus = "Available"
 		mcpServer.Status.DeploymentAvailableReplicas = nil
 		mcpServer.Status.DeploymentReadyReplicas = nil

@@ -1,14 +1,91 @@
 package safehttp
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 )
+
+func TestClientRetriesConnectionFailuresWithoutReplayingRequest(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		retryTimeout time.Duration
+		dialErrors   []error
+		wantDials    int
+		wantRequests int32
+		wantErr      error
+	}{
+		{
+			name:         "transient routing failures",
+			retryTimeout: time.Second,
+			dialErrors:   []error{syscall.ECONNREFUSED, syscall.EHOSTUNREACH, syscall.ENETUNREACH},
+			wantDials:    4,
+			wantRequests: 1,
+		},
+		{
+			name:       "retries disabled by default",
+			dialErrors: []error{syscall.ECONNREFUSED},
+			wantDials:  1,
+			wantErr:    syscall.ECONNREFUSED,
+		},
+		{
+			name:         "permanent failure is not retried",
+			retryTimeout: time.Second,
+			dialErrors:   []error{syscall.EPERM},
+			wantDials:    1,
+			wantErr:      syscall.EPERM,
+		},
+		{
+			name:         "retry budget expires",
+			retryTimeout: 10 * time.Millisecond,
+			dialErrors:   []error{syscall.ECONNREFUSED},
+			wantDials:    1,
+			wantErr:      context.DeadlineExceeded,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.Method != http.MethodPost {
+					t.Errorf("method = %s, want POST", r.Method)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			client := NewClient(Options{DialRetryTimeout: tt.retryTimeout})
+			transport := client.Transport.(checkingTransport)
+			defer transport.base.(*http.Transport).CloseIdleConnections()
+			var dials atomic.Int32
+			transport.dialer.dialer.Control = func(string, string, syscall.RawConn) error {
+				attempt := int(dials.Add(1))
+				if attempt <= len(tt.dialErrors) {
+					return tt.dialErrors[attempt-1]
+				}
+				return nil
+			}
+			resp, err := client.Post(server.URL, "application/json", strings.NewReader(`{"method":"initialize"}`))
+			if resp != nil {
+				resp.Body.Close()
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Post() error = %v, want %v", err, tt.wantErr)
+			}
+			if int(dials.Load()) != tt.wantDials || requests.Load() != tt.wantRequests {
+				t.Fatalf("dials = %d, requests = %d; want %d dials and %d requests", dials.Load(), requests.Load(), tt.wantDials, tt.wantRequests)
+			}
+		})
+	}
+}
 
 func TestClientBlocksLoopbackLiteralIP(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -323,6 +400,84 @@ func TestAllowListMatchesExactAndSuffixHosts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := dialer.isAllowed(tt.host, tt.port); got != tt.want {
 				t.Fatalf("isAllowed(%q, %q) = %v, want %v", tt.host, tt.port, got, tt.want)
+			}
+		})
+	}
+}
+
+// HostAllowed is the exported entry point that pre-dial validators use. It must
+// agree with the dialer's own isAllowed for every input, since the entire point
+// of exporting it is to prevent a second matching implementation from drifting.
+func TestHostAllowedMatchesDialerDecision(t *testing.T) {
+	allowList := []string{
+		"api.example.com",
+		"*.apps.internal:8080",
+		"db.example.com:8443",
+	}
+	dialer := safeDialer{allowList: parseAllowList(allowList)}
+
+	tests := []struct {
+		name string
+		host string
+		port string
+		want bool
+	}{
+		{name: "exact host", host: "api.example.com", port: "443", want: true},
+		{name: "cf internal route", host: "mcp-cdc-places.apps.internal", port: "8080", want: true},
+		{name: "cf internal route other port", host: "mcp-nih-reporter.apps.internal", port: "443", want: false},
+		{name: "cf internal apex is not matched", host: "apps.internal", port: "8080", want: false},
+		{name: "lookalike suffix rejected", host: "evil-apps.internal", port: "8080", want: false},
+		{name: "unrelated host", host: "metadata.google.internal", port: "80", want: false},
+		{name: "cloud metadata ip", host: "169.254.169.254", port: "80", want: false},
+		{name: "trailing dot normalized", host: "mcp.apps.internal.", port: "8080", want: true},
+		{name: "uppercase normalized", host: "MCP.APPS.INTERNAL", port: "8080", want: true},
+		{name: "port-scoped entry matches", host: "db.example.com", port: "8443", want: true},
+		{name: "port-scoped entry rejects other port", host: "db.example.com", port: "443", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exported := HostAllowed(allowList, tt.host, tt.port)
+			internal := dialer.isAllowed(tt.host, tt.port)
+
+			if exported != tt.want {
+				t.Errorf("HostAllowed(%q, %q) = %v, want %v", tt.host, tt.port, exported, tt.want)
+			}
+			if exported != internal {
+				t.Errorf("HostAllowed and dialer.isAllowed disagree for %q:%q (%v vs %v)", tt.host, tt.port, exported, internal)
+			}
+		})
+	}
+}
+
+func TestHostAllowedEmptyAllowList(t *testing.T) {
+	if HostAllowed(nil, "mcp.apps.internal", "8080") {
+		t.Error("nil allow list must not allow anything")
+	}
+	if HostAllowed([]string{}, "mcp.apps.internal", "8080") {
+		t.Error("empty allow list must not allow anything")
+	}
+}
+
+func TestPortForURLDefaultsByScheme(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "http://mcp.apps.internal:8080/mcp", want: "8080"},
+		{raw: "http://mcp.apps.internal/mcp", want: "80"},
+		{raw: "https://mcp.apps.internal/mcp", want: "443"},
+		{raw: "ftp://mcp.apps.internal/mcp", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			u, err := url.Parse(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := PortForURL(u); got != tt.want {
+				t.Errorf("PortForURL(%q) = %q, want %q", tt.raw, got, tt.want)
 			}
 		})
 	}

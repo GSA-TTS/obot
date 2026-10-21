@@ -105,7 +105,7 @@
 		...mcpEntries.map((entry) => ({
 			id: entry.id,
 			name: entry.manifest?.name || entry.id,
-			detail: entry.manifest?.serverUserType === 'multiUser' ? 'Multi-user' : 'Single-user'
+			detail: 'Catalog entry'
 		})),
 		...mcpCatalogServers.map((server) => ({
 			id: server.id,
@@ -245,8 +245,7 @@
 					bind:value={agent.description}
 					class="text-input-filled"
 					rows="3"
-					disabled={readonly}
-				></textarea>
+					disabled={readonly}></textarea>
 			</div>
 
 			<div class="flex flex-col gap-2">
@@ -612,7 +611,7 @@
 		>
 			<div class="flex w-full justify-end gap-2">
 				{#if !agent.id}
-					<button class="btn btn-secondary text-sm" onclick={() => goto('/admin/hosted-agents')}>
+					<button class="btn btn-secondary text-sm" onclick={() => goto('/hosted-agents')}>
 						Cancel
 					</button>
 					<button
@@ -698,7 +697,7 @@
 		if (!agent.id) return;
 		saving = true;
 		await AdminService.deleteHostedAgent(agent.id);
-		goto('/admin/hosted-agents');
+		goto('/hosted-agents');
 	}}
 	oncancel={() => (deleting = false)}
 />

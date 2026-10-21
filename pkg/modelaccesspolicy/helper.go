@@ -10,6 +10,7 @@ import (
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/alias"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
+	"github.com/obot-platform/obot/pkg/subjectgroups"
 	"github.com/obot-platform/obot/pkg/system"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -22,6 +23,7 @@ import (
 const (
 	mapUserIndex       = "user-id"
 	mapGroupIndex      = "group-id"
+	mapObotGroupIndex  = "obot-group-id"
 	mapSelectorIndex   = "selector-id"
 	dmaModelIndex      = "model-id"
 	modelProviderIndex = "model-provider"
@@ -44,9 +46,10 @@ func NewHelper(ctx context.Context, backend backend.Backend) (*Helper, error) {
 	}
 
 	if err := mapInformer.AddIndexers(gocache.Indexers{
-		mapUserIndex:     mapSubjectIndexFunc(types.SubjectTypeUser),
-		mapGroupIndex:    mapSubjectIndexFunc(types.SubjectTypeGroup),
-		mapSelectorIndex: mapSubjectIndexFunc(types.SubjectTypeSelector),
+		mapUserIndex:      mapSubjectIndexFunc(types.SubjectTypeUser),
+		mapGroupIndex:     mapSubjectIndexFunc(types.SubjectTypeGroup),
+		mapObotGroupIndex: mapSubjectIndexFunc(types.SubjectTypeObotGroup),
+		mapSelectorIndex:  mapSubjectIndexFunc(types.SubjectTypeSelector),
 	}); err != nil {
 		return nil, err
 	}
@@ -179,8 +182,20 @@ func (h *Helper) GetUserAllowedModels(user kuser.Info) (map[string]bool, bool, e
 	}
 
 	// Check policies based on group membership
-	for groupID := range authGroupSet(user) {
+	groups, obotGroups := subjectgroups.Sets(user)
+	for groupID := range groups {
 		groupPolicies, err := h.getGroupPolicies(groupID)
+		if err != nil {
+			return nil, false, err
+		}
+
+		for _, policy := range groupPolicies {
+			addResources(policy.Spec.Manifest.Models)
+		}
+	}
+
+	for groupID := range obotGroups {
+		groupPolicies, err := h.getIndexedPolicies(mapObotGroupIndex, groupID)
 		if err != nil {
 			return nil, false, err
 		}
@@ -467,16 +482,4 @@ func modelProviderIndexFunc(obj any) ([]string, error) {
 // unambiguous encoding even when targetModel itself contains "/".
 func modelProviderTargetKey(provider, targetModel string) string {
 	return fmt.Sprintf("%s/%s", provider, targetModel)
-}
-
-// authGroupSet returns a set of auth provider groups for a given user.
-func authGroupSet(user kuser.Info) map[string]struct{} {
-	var (
-		groups = user.GetExtra()["auth_provider_groups"]
-		set    = make(map[string]struct{}, len(groups))
-	)
-	for _, group := range groups {
-		set[group] = struct{}{}
-	}
-	return set
 }

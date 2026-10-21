@@ -51,7 +51,7 @@
 	interface Props {
 		form?: LaunchFormData | CompositeLaunchFormData;
 		name?: string;
-		icon?: string;
+		icon?: string | Snippet;
 		onSave?: () => void;
 		onCancel?: () => void;
 		onClose?: () => void;
@@ -73,6 +73,7 @@
 		secretBindingTargets?: MCPAllowedSecretBindingTarget[];
 		disableEnvSecretBindings?: boolean;
 		deprecated?: boolean;
+		showComponentToggle?: boolean;
 	}
 	let {
 		form = $bindable(),
@@ -92,6 +93,7 @@
 		disableOutsideClick,
 		displayDescriptionInline,
 		configurationTitle,
+		showComponentToggle = true,
 		secretBindingTargets,
 		disableEnvSecretBindings,
 		deprecated,
@@ -403,7 +405,7 @@
 			isOpen = false;
 		}
 	}}
-	class={isCompositeForm(form) ? 'bg-base-200 dark:bg-base-100' : ''}
+	class={isCompositeForm(form) ? 'bg-base-200' : ''}
 	disableClickOutside={loading}
 	hideClose={loading}
 	classes={{
@@ -413,8 +415,10 @@
 	{#snippet titleContent()}
 		<div class="flex items-center gap-2">
 			<div class="bg-base-200 rounded-sm p-1 dark:bg-base-300">
-				{#if icon}
+				{#if typeof icon === 'string'}
 					<img src={icon} alt={name} class="size-8" />
+				{:else if icon}
+					{@render icon()}
 				{:else}
 					<Server class="size-8" />
 				{/if}
@@ -480,19 +484,21 @@
 								{/if}
 								<div class="grow font-medium">{comp.name || compId}</div>
 								<McpDeprecatedNotice deprecated={comp.deprecated} child />
-								<Toggle
-									checked={!form.componentConfigs[compId].disabled}
-									onChange={(checked) => (form.componentConfigs[compId].disabled = !checked)}
-									label="Enable"
-									labelInline
-									classes={{ label: 'text-sm gap-2' }}
-								/>
+								{#if showComponentToggle}
+									<Toggle
+										checked={!form.componentConfigs[compId].disabled}
+										onChange={(checked) => (form.componentConfigs[compId].disabled = !checked)}
+										label="Enable"
+										labelInline
+										classes={{ label: 'text-sm gap-2' }}
+									/>
+								{/if}
 							</div>
 							{#if componentHasConfig(comp)}
 								{@const headers = getNonStaticServerFields(comp.headers)}
 								{@const envs = getNonStaticServerFields(comp.envs)}
 
-								<div class="border-t border-base-300 p-3">
+								<div class="border-t border-base-300 p-3 flex flex-col gap-2">
 									<McpDeprecatedNotice
 										deprecated={comp.deprecated}
 										variant="notification"
@@ -577,8 +583,7 @@
 																'border-error bg-error/20 ring-error focus:ring-1'
 														)}
 														onpointerdown={startTextareaResize}
-														onmousedown={startTextareaResize}
-													></textarea>
+														onmousedown={startTextareaResize}></textarea>
 												{:else}
 													<input
 														type="text"
@@ -798,8 +803,7 @@
 											highlightRequired && 'border-error bg-error/20 ring-error focus:ring-1'
 										)}
 										onpointerdown={startTextareaResize}
-										onmousedown={startTextareaResize}
-									></textarea>
+										onmousedown={startTextareaResize}></textarea>
 								{:else}
 									<input
 										type="text"

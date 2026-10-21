@@ -1,9 +1,37 @@
 # Wind-Down Notes — GSA-TTS fork of Obot
 
-> **Status:** The GSA-TTS MCP Server Hub effort is being **wound down.** This
-> file explains what this fork of [Obot](https://github.com/obot-platform/obot)
-> customizes and how to resume it. It is a snapshot for developers, not GSA
-> policy.
+> **⚠️ SUPERSEDED (2026-10-05): this work has RESUMED.**
+>
+> A credited cloud.gov space with **40 GB of memory and 150 routes** removed the
+> memory quota that blocked deployment, and cloud.gov's automatic HTTPS removed
+> the blocker on login.gov. Work resumed on branch **`cloudgov-phase1`**
+> (rebased onto upstream `v0.26.2`).
+>
+> **What changed since wind-down:**
+> - The Cloud Foundry backend was **rebased** onto `v0.26.2` (the fork had
+>   drifted 193 commits) and an `upstream` remote now exists.
+> - A **latent bug was found and fixed**: the backend tested for
+>   `RuntimeComposite`, which upstream retains only for legacy migration. The
+>   live gateway-served runtime is `RuntimeVMCP`. See the Amendment in
+>   [`adr/2026-09-03-cloud-foundry-mcp-runtime-backend.md`](adr/2026-09-03-cloud-foundry-mcp-runtime-backend.md).
+> - **Unit tests were added** (`pkg/mcp/cloudfoundry_test.go`) — their absence
+>   is how the bug above survived wind-down.
+> - A **Cloud Foundry entrypoint** (`cf-entrypoint.sh`), image build workflow
+>   (`.github/workflows/cloudgov-image.yml`), and **deployment kit** (in
+>   `GSA-TTS/mcp-server-hub` → `cloudgov/`) now exist.
+> - New ADR: [`adr/2026-10-05-cloud-foundry-deployment-packaging.md`](adr/2026-10-05-cloud-foundry-deployment-packaging.md).
+>
+> The §4 gap table below is **historical** — most entries are now closed. For
+> current status see `GSA-TTS/mcp-server-hub` → `cloudgov/README.md`.
+>
+> The rest of this file is preserved as the wind-down-era record.
+
+---
+
+> **Status (wind-down era):** The GSA-TTS MCP Server Hub effort is being
+> **wound down.** This file explains what this fork of
+> [Obot](https://github.com/obot-platform/obot) customizes and how to resume
+> it. It is a snapshot for developers, not GSA policy.
 >
 > **This repo is one of four.** See the cross-repo map in the
 > [`GSA-TTS/mcp-server-hub`](https://github.com/GSA-TTS/mcp-server-hub) repo
@@ -46,6 +74,9 @@ with no divergence.
 - **Supports only gateway-served runtimes:** `RuntimeRemote` and
   `RuntimeComposite`. These need no workload deployment — Obot's own process
   serves them.
+  > **Corrected 2026-10-05:** the second runtime is **`RuntimeVMCP`**, not
+  > `RuntimeComposite`. Upstream retains `RuntimeComposite` only to identify
+  > legacy resources during migration. See the Amendment in the ADR.
 - **Everything else returns `ErrNotSupportedByBackend`** (→ HTTP 404):
   `uvx`, `npx`, `containerized`. This backend does **not** deploy MCP server
   workloads.
@@ -62,21 +93,27 @@ The driver was moving Obot onto cloud.gov to shorten the ATO path.
 
 | Gap | Notes |
 |-----|-------|
-| **No CF `manifest.yml`** | There is no Cloud Foundry manifest to actually deploy Obot as a CF app. Planned, not built. |
-| **No deploy pipeline** | No CI/automation for the cloud.gov deployment. |
-| **`containerized`/`uvx`/`npx` unsupported on this backend** | Such servers must be deployed as their own CF app and registered as `remote` catalog entries, or the three stub seams must be implemented against Cloud Controller v3. |
-| **Not validated in production** | The backend builds (`go build ./pkg/mcp/`) but has not been run on a live cloud.gov deployment end to end. |
-| **No unit tests added** | The backend is stubs + trivial passthroughs; behavior is documented in the ADR and doc-comments. |
+| **No CF `manifest.yml`** | ~~There is no Cloud Foundry manifest to actually deploy Obot as a CF app. Planned, not built.~~ **CLOSED 2026-10-05** — `mcp-server-hub` → `cloudgov/manifest.yml`. |
+| **No deploy pipeline** | **PARTIAL 2026-10-05** — image build is automated (`.github/workflows/cloudgov-image.yml`); `cf push` is still run by hand via `cloudgov/scripts/03-push.sh`. |
+| **`containerized`/`uvx`/`npx` unsupported on this backend** | **STILL OPEN.** Phase 2 deploys such servers as their own CF apps on `apps.internal` and registers them as `remote` (see `cloudgov/scripts/06-mcp-apps.sh`). Implementing the three stub seams against Cloud Controller v3 is Phase 3, tracked separately. |
+| **Not validated in production** | **STILL OPEN.** All local gates now pass, but no script has been run against a live cloud.gov space. |
+| **No unit tests added** | ~~The backend is stubs + trivial passthroughs; behavior is documented in the ADR and doc-comments.~~ **CLOSED 2026-10-05** — `pkg/mcp/cloudfoundry_test.go`. Their absence is precisely how the `RuntimeComposite`/`RuntimeVMCP` bug survived to wind-down. |
 
 The full cloud.gov plan (externalized Postgres/S3, memory-footprint testing,
 egress tiers, phased validation) lives in the `mcp-server-hub` repo:
-`planning/cloud_gov_plan.md` and `planning/cloud_gov_roadmap.md`.
+`planning/cloud_gov_plan.md` and `planning/cloud_gov_roadmap.md`. Current
+implementation status lives in `mcp-server-hub` → `cloudgov/README.md`.
 
 ## 5. Verification (as of wind-down)
 
 - `go build ./pkg/mcp/` — **passes** (confirmed 2026-09-03).
 - No behavior change to existing backends; `docker` remains the default runtime
   backend, so existing (EC2) deployments are unaffected.
+
+> **Updated 2026-10-05** (branch `cloudgov-phase1`, rebased onto `v0.26.2`):
+> `go build ./...`, `go test ./pkg/mcp/...`, `go test ./pkg/services/...`,
+> `make lint-go` (0 issues), and `pnpm check` (0 errors) all pass. "It builds"
+> was never a sufficient gate — it is what let the runtime-set bug through.
 
 ## 6. If you resume this work — start here
 

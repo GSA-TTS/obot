@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -54,7 +55,10 @@ func (s *Server) getCurrentUser(apiContext api.Context) error {
 		effectiveRole = user.Role
 	}
 
-	return apiContext.Write(types.ConvertUserWithEffectiveRole(user, apiContext.GatewayClient.HasExplicitRole(user.Email) != types2.RoleUnknown, name, effectiveRole))
+	result := types.ConvertUserWithEffectiveRole(user, apiContext.GatewayClient.HasExplicitRole(user.Email) != types2.RoleUnknown, name, effectiveRole)
+	result.AuthProviderGroups = authGroupStrs
+	result.RequirePasswordChange = cmp.Or(apiContext.User.GetExtra()["password_change_required"]...) == "true"
+	return apiContext.Write(result)
 }
 
 func (s *Server) getUsers(apiContext api.Context) error {
@@ -105,7 +109,9 @@ func (s *Server) getUsers(apiContext api.Context) error {
 			effectiveRole = role
 		}
 
-		items = append(items, *types.ConvertUserWithEffectiveRole(&user, apiContext.GatewayClient.HasExplicitRole(user.Email) != types2.RoleUnknown, "", effectiveRole))
+		result := types.ConvertUserWithEffectiveRole(&user, apiContext.GatewayClient.HasExplicitRole(user.Email) != types2.RoleUnknown, "", effectiveRole)
+		result.AuthProviderGroups = userGroupMemberships[user.ID]
+		items = append(items, *result)
 	}
 
 	return apiContext.Write(types2.UserList{Items: items})
@@ -161,7 +167,9 @@ func (s *Server) getUser(apiContext api.Context) error {
 		effectiveRole = user.Role
 	}
 
-	return apiContext.Write(types.ConvertUserWithEffectiveRole(user, apiContext.GatewayClient.HasExplicitRole(user.Email) != types2.RoleUnknown, "", effectiveRole))
+	result := types.ConvertUserWithEffectiveRole(user, apiContext.GatewayClient.HasExplicitRole(user.Email) != types2.RoleUnknown, "", effectiveRole)
+	result.AuthProviderGroups = groupIDs
+	return apiContext.Write(result)
 }
 
 func (s *Server) updateUser(apiContext api.Context) error {
@@ -300,7 +308,7 @@ func (s *Server) deleteUser(apiContext api.Context) (err error) {
 	}
 
 	status := http.StatusInternalServerError
-	_, err = apiContext.GatewayClient.DeleteUser(apiContext.Context(), userID)
+	err = apiContext.GatewayClient.DeleteUser(apiContext.Context(), userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			status = http.StatusNotFound

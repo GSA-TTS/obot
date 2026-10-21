@@ -57,14 +57,13 @@ func (h *Handler) deleteUnauthorizedServersForUser(ctx context.Context, client k
 			continue
 		}
 
-		// Skip composite servers that don't need access checks
-		if server.Spec.CompositeName != "" {
-			// Legacy project-scoped servers, anonymous servers, and composite servers
+		// Components are owned by their composite or vMCP instance, not live catalog access.
+		if server.Spec.CompositeName != "" || server.Spec.VMCPComponentID != "" {
 			continue
 		}
 
-		// Skip multi-user servers - we only care about a user's own single-user servers
-		if !server.Spec.IsSingleUser() {
+		// This cleanup handles legacy personal servers; IsSingleUser identifies vMCP instances.
+		if server.Spec.MCPCatalogID != "" || server.Spec.PowerUserWorkspaceID != "" {
 			continue
 		}
 

@@ -8,8 +8,6 @@ import {
 	type UVXRuntimeConfig,
 	type NPXRuntimeConfig,
 	type ContainerizedRuntimeConfig,
-	type CompositeRuntimeConfig,
-	type ToolOverride,
 	type Schedule,
 	ModelAlias,
 	type AccessControlRuleSubject,
@@ -261,6 +259,13 @@ export interface BaseProvider {
 }
 export interface AuthProvider extends BaseProvider {
 	type: 'authprovider';
+	// Settings saved as a replacement while another provider still serves logins.
+	staged?: boolean;
+	// The address that signed in through this staged provider to prove it works, and the address
+	// that will hold Owner once the switch completes. Absent until a verification succeeds.
+	verifiedEmail?: string;
+	// A provisioned initial owner has not opened their setup link yet, so nobody can sign in.
+	requiresActivation?: boolean;
 }
 
 // A user of the built-in local auth provider. Passwords are never returned by the API.
@@ -268,6 +273,7 @@ export interface LocalAuthUser {
 	id: string;
 	email: string;
 	created: string;
+	requirePasswordChange: boolean;
 }
 
 // Devices
@@ -558,13 +564,6 @@ export interface K8sSettings {
 	setViaHelm?: boolean;
 }
 
-export interface AppK8sSettings {
-	affinity?: string;
-	tolerations?: string;
-	resources?: string;
-	runtimeClassName?: string;
-}
-
 export interface K8sSettingsManifest {
 	affinity?: string;
 	maxCpuLimit?: string;
@@ -696,8 +695,11 @@ export interface MCPCatalogEntryFieldManifest {
 	required: boolean;
 	sensitive: boolean;
 	value: string;
+	/** The value is stored by Obot and omitted from the manifest; reveal it to edit it. */
+	static?: boolean;
 	file?: boolean;
 	dynamicFile?: boolean;
+	interpolated?: boolean;
 	prefix?: string;
 	secretBinding?: MCPSecretBinding;
 }
@@ -708,26 +710,24 @@ export interface RemoteRuntimeConfigAdmin {
 }
 export interface RemoteCatalogConfigAdmin {
 	fixedURL?: string;
-	headers?: MCPCatalogEntryFieldManifest[];
 	hostname?: string;
 	staticOAuthRequired?: boolean;
 	tunnelName?: string;
 	urlTemplate?: string;
 }
-export interface CompositeCatalogConfig {
-	componentServers: CatalogComponentServer[];
+export interface LegacyRemoteCatalogConfigAdmin extends RemoteCatalogConfigAdmin {
+	headers?: MCPCatalogEntryFieldManifest[];
 }
-export interface CatalogComponentServer {
-	catalogEntryID?: string;
-	mcpServerID?: string;
-	manifest?: MCPCatalogEntryServerManifest;
-	toolOverrides?: ToolOverride[];
-	toolPrefix?: string;
-}
+export type MCPConfigUsage = 'env' | 'header' | 'file' | 'dynamicFile' | 'interpolated';
+export type MCPConfig = Omit<
+	MCPCatalogEntryFieldManifest,
+	'file' | 'dynamicFile' | 'interpolated'
+> & { usage: MCPConfigUsage; userAllowed?: boolean };
 export interface MCPCatalogEntryServerManifest {
+	entryKey?: string;
 	upgradeNote?: string;
 	icon?: string;
-	env?: MCPCatalogEntryFieldManifest[];
+	config?: MCPConfig[];
 	repoURL?: string;
 	name?: string;
 	shortDescription?: string;
@@ -740,20 +740,19 @@ export interface MCPCatalogEntryServerManifest {
 	};
 
 	runtime: Runtime;
-	serverUserType: 'singleUser' | 'multiUser';
 	uvxConfig?: UVXRuntimeConfig;
 	npxConfig?: NPXRuntimeConfig;
 	containerizedConfig?: ContainerizedRuntimeConfig;
 	remoteConfig?: RemoteCatalogConfigAdmin;
-	compositeConfig?: CompositeCatalogConfig;
-	multiUserConfig?: MultiUserConfig;
 	resources?: MCPResourceRequirements;
+	staticConfigurationRevision?: string;
 }
 export interface MCPCatalogEntry {
 	id: string;
 	created: string;
 	deleted?: string;
 	manifest: MCPCatalogEntryServerManifest;
+	unsupportedTools?: string[];
 	editable?: boolean;
 	detached?: boolean;
 	sourceURL?: string;
@@ -770,14 +769,6 @@ export interface MCPCatalogEntry {
 	userID?: string;
 }
 
-// Matches the backend compositeDeletionDependency struct used when preventing
-// deletion of multi-user MCP servers that are still referenced by composites.
-export interface MCPCompositeDeletionDependency {
-	name: string;
-	icon: string;
-	mcpServerID?: string;
-	catalogEntryID: string;
-}
 export type MCPCatalogEntryFormData = Omit<MCPCatalogEntryServerManifest, 'metadata'> & {
 	categories: string[];
 	url?: string;
@@ -794,6 +785,7 @@ export interface RuntimeFormData {
 	metadata?: MCPCatalogEntryServerManifest['metadata'];
 	serverUserType: 'singleUser' | 'multiUser';
 	env: MCPCatalogEntryFieldManifest[];
+	config?: MCPConfig[];
 
 	// Runtime selection
 	runtime: Runtime;
@@ -802,20 +794,17 @@ export interface RuntimeFormData {
 	npxConfig?: NPXRuntimeConfig;
 	uvxConfig?: UVXRuntimeConfig;
 	containerizedConfig?: ContainerizedRuntimeConfig;
-	remoteConfig?: RemoteCatalogConfigAdmin; // For catalog entries
+	remoteConfig?: LegacyRemoteCatalogConfigAdmin; // Form state; flattened when saving catalog entries
 	remoteServerConfig?: RemoteRuntimeConfigAdmin; // For servers
-	compositeConfig?: CompositeCatalogConfig; // For catalog entries
-	compositeServerConfig?: CompositeRuntimeConfig; // For servers
-	multiUserConfig?: MultiUserConfig; // For servers
+	multiUserConfig?: MultiUserConfig; // Form state; flattened into config when saving servers
 	resources?: MCPResourceRequirements;
 
 	startupTimeoutSeconds?: number;
 }
 export interface MCPCatalogServerManifest {
 	catalogEntryID?: string;
-	manifest: Omit<MCPCatalogEntryServerManifest, 'remoteConfig' | 'serverUserType'> & {
-		remoteConfig?: RemoteRuntimeConfigAdmin;
-		multiUserConfig?: MultiUserConfig;
+	manifest: Omit<MCPCatalogEntryServerManifest, 'remoteConfig'> & {
+		remoteConfig?: Omit<RemoteRuntimeConfigAdmin, 'headers'>;
 	};
 }
 export interface MCPHeaderManifest {
@@ -836,17 +825,8 @@ export type CompositeServerToolRow = {
 	description?: string;
 	overrideDescription?: string;
 	enabled: boolean;
+	removed?: boolean;
 };
-export class MCPCompositeDeletionDependencyError extends Error {
-	constructor(
-		message: string,
-		public dependencies: MCPCompositeDeletionDependency[]
-	) {
-		super(message);
-		this.name = 'MCPDeleteConflictError';
-		this.dependencies = dependencies;
-	}
-}
 
 // MCP filters
 
@@ -855,12 +835,12 @@ export interface MCPFilterRemoteRuntimeConfig {
 	isTemplate?: boolean;
 	urlTemplate?: string;
 	hostname?: string;
-	headers?: MCPHeaderManifest[];
 	staticOAuthRequired?: boolean;
 }
 export interface MCPEnvManifest extends MCPHeaderManifest {
 	file?: boolean;
 	dynamicFile?: boolean;
+	interpolated?: boolean;
 }
 export interface MCPFilterServerManifest {
 	metadata?: Record<string, string>;
@@ -874,7 +854,7 @@ export interface MCPFilterServerManifest {
 	npxConfig?: NPXRuntimeConfig;
 	containerizedConfig?: ContainerizedRuntimeConfig;
 	remoteConfig?: MCPFilterRemoteRuntimeConfig;
-	env?: MCPEnvManifest[];
+	config?: MCPConfig[];
 }
 export interface MCPFilterManifest {
 	name?: string;
@@ -913,7 +893,7 @@ export type MCPFilterInput = Omit<MCPFilter, 'id'> & { id?: string };
 
 export interface MCPServerOAuthCredentialRequest {
 	clientID: string;
-	clientSecret: string;
+	clientSecret?: string;
 }
 export interface MCPServerOAuthCredentialStatus {
 	configured: boolean;
@@ -1072,6 +1052,28 @@ export interface ModelAccessPolicy extends Omit<ModelAccessPolicyManifest, 'id'>
 	metadata?: Record<string, string>;
 }
 
+// Model proxy
+
+export interface ModelProxySettings {
+	enabled: boolean;
+	url: string;
+}
+
+export interface ModelProxySettingsUpdateManifest {
+	enabled: boolean;
+}
+
+export interface ModelProxyTokenUsage {
+	max: number;
+	used: number;
+}
+
+export interface ModelProxyUsage {
+	input: ModelProxyTokenUsage;
+	output: ModelProxyTokenUsage;
+	resetAt: string;
+}
+
 // Models
 
 export const ModelUsage = {
@@ -1109,6 +1111,12 @@ export const ModelAliasToUsageMap = {
 	[ModelAlias.ImageGeneration]: ModelUsage.ImageGeneration,
 	[ModelAlias.Vision]: ModelUsage.Vision
 } as const;
+
+// Product analytics
+
+export interface ProductTelemetryConsent {
+	consent?: boolean;
+}
 
 // Setup
 
@@ -1480,7 +1488,7 @@ export interface SystemMCPServerCatalogEntryManifest {
 	npxConfig?: NPXRuntimeConfig;
 	containerizedConfig?: ContainerizedRuntimeConfig;
 	remoteConfig?: RemoteCatalogConfigAdmin;
-	env?: MCPEnvManifest[];
+	config?: MCPConfig[];
 }
 export interface SystemMCPServerCatalogEntry {
 	id: string;
@@ -1517,7 +1525,7 @@ export interface SystemMCPServerManifest {
 		hostname?: string;
 		staticOAuthRequired?: boolean;
 	};
-	env?: MCPEnvManifest[];
+	config?: MCPConfig[];
 }
 export interface SystemMCPServer {
 	id: string;

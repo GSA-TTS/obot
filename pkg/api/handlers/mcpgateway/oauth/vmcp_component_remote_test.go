@@ -1,0 +1,289 @@
+package oauth
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/obot-platform/obot/apiclient/types"
+	"github.com/obot-platform/obot/pkg/mcp"
+	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
+	"github.com/obot-platform/obot/pkg/system"
+	vmcpconfig "github.com/obot-platform/obot/pkg/vmcp"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/watch"
+	kuser "k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/client-go/rest"
+	kclient "sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// This fixture only watches objects already created by the test.
+type vmcpOAuthInitialEventsClient struct{ kclient.WithWatch }
+
+func TestCheckVMCPComponentAuthProbesOnlySelectedRemote(t *testing.T) {
+	var selectedCalls, otherCalls atomic.Int32
+	var fail atomic.Bool
+	server := gomcp.NewServer(&gomcp.Implementation{Name: "selected", Version: "test"}, nil)
+	transport := gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return server }, nil)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/other" {
+			otherCalls.Add(1)
+			http.Error(w, "unrelated server must not be probed", http.StatusServiceUnavailable)
+			return
+		}
+		selectedCalls.Add(1)
+		if fail.Load() {
+			http.Error(w, "selected server is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		transport.ServeHTTP(w, r)
+	}))
+	t.Cleanup(remote.Close)
+	vmcp := vmcpComponentVMCP(true)
+	vmcp.Spec.Manifest.Components = append(vmcp.Spec.Manifest.Components, types.VMCPComponent{ID: "other"})
+	instance := vmcpComponentInstance("vmcpi1selected", vmcp.Name)
+	component := vmcpComponentServer("ms1selected", instance.Name, "")
+	component.Spec.Manifest.Runtime = types.RuntimeRemote
+	component.Spec.Manifest.RemoteConfig = &types.RemoteRuntimeConfig{URL: remote.URL + "/selected"}
+	other := component.DeepCopy()
+	other.Name = "ms1other"
+	other.Spec.VMCPComponentID = "other"
+	other.Spec.Manifest.RemoteConfig.URL = remote.URL + "/other"
+	storage := vmcpConsentStorage(vmcp, instance, component, other)
+	gateway := vmcpConsentGateway(t)
+	tokens := mcp.NewGlobalTokenStore(gateway)
+	// The fake Kubernetes client lets remote OAuth run without a runtime daemon.
+	manager, err := mcp.NewSessionManager(t.Context(), false, tokens, nil, "http://obot.example", 8080,
+		mcp.Options{MCPRuntimeBackend: mcp.RuntimeBackendKubernetes, MCPNamespace: "mcp"}, nil,
+		&rest.Config{Host: "http://kubernetes.invalid"}, storage, storage, storage, gateway, system.DefaultNamespace, nil)
+	require.NoError(t, err)
+	h := &handler{oauthChecker: NewMCPOAuthHandlerFactory("http://obot.example", manager, storage, gateway, tokens, "", false)}
+	req := vmcpComponentRequest(storage, instance.Name, component.Name)
+	req.GatewayClient = gateway
+	recorder := httptest.NewRecorder()
+	req.ResponseWriter = recorder
+	require.NoError(t, h.checkVMCPComponentAuth(req))
+	var response componentAuthStatus
+	require.NoError(t, json.NewDecoder(recorder.Body).Decode(&response))
+	require.Empty(t, response.AuthURL)
+	require.Positive(t, selectedCalls.Load())
+	require.Zero(t, otherCalls.Load())
+
+	fail.Store(true)
+	recorder = httptest.NewRecorder()
+	req.ResponseWriter = recorder
+	require.Error(t, h.checkVMCPComponentAuth(req))
+	require.Empty(t, recorder.Body.String())
+	require.Zero(t, otherCalls.Load())
+}
+
+func TestVMCPReconnectDoesNotReuseSharedServerTokens(t *testing.T) {
+	var authenticated, anonymous atomic.Int32
+	server := gomcp.NewServer(&gomcp.Implementation{Name: "component", Version: "test"}, nil)
+	transport := gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return server }, nil)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			anonymous.Add(1)
+		} else {
+			authenticated.Add(1)
+		}
+		transport.ServeHTTP(w, r)
+	}))
+	t.Cleanup(remote.Close)
+	vmcp := vmcpComponentVMCP(false)
+	component := vmcpComponentServer("ms1shared", "", vmcp.Name)
+	component.Spec.Manifest.Runtime = types.RuntimeRemote
+	component.Spec.Manifest.RemoteConfig = &types.RemoteRuntimeConfig{URL: remote.URL}
+	vmcp.Spec.Manifest.Components[0].CatalogEntry.Manifest = types.MCPServerCatalogEntryManifest{
+		Runtime:      types.RuntimeRemote,
+		RemoteConfig: &types.RemoteCatalogConfig{FixedURL: remote.URL},
+	}
+	storage := &vmcpOAuthInitialEventsClient{WithWatch: vmcpConsentStorage(vmcp, component)}
+	gateway := vmcpConsentGateway(t)
+	tokens := mcp.NewGlobalTokenStore(gateway)
+	// Leave a legacy token under the shared server ID: no connection may reuse it.
+	require.NoError(t, tokens.ForUserAndMCP("42", component.Name, remote.URL).SetTokenConfig(t.Context(),
+		&oauth2.Config{ClientID: "legacy"}, &oauth2.Token{AccessToken: "legacy-token", TokenType: "Bearer"}))
+	manager, err := mcp.NewSessionManager(t.Context(), false, tokens, nil, "http://obot.example", 8080,
+		mcp.Options{MCPRuntimeBackend: mcp.RuntimeBackendKubernetes, MCPNamespace: "mcp"}, nil,
+		&rest.Config{Host: "http://kubernetes.invalid"}, storage, storage, storage, gateway, system.DefaultNamespace, nil)
+	require.NoError(t, err)
+	h := &handler{oauthChecker: NewMCPOAuthHandlerFactory("http://obot.example", manager, storage, gateway, tokens, "", false)}
+	for _, suffix := range []string{"old", "new"} {
+		instance := syncedVMCPInstance(vmcpComponentInstance("vmcpi1"+suffix, vmcp.Name), vmcp)
+		connection := syncedVMCPConnection(&v1.MCPServerInstance{
+			Name:      "msi1" + suffix,
+			Namespace: system.DefaultNamespace,
+			Spec: v1.MCPServerInstanceSpec{
+				VMCPInstanceID:  instance.Name,
+				VMCPComponentID: "component",
+				MCPServerName:   component.Name,
+				UserID:          "42",
+			},
+		}, vmcp, instance)
+		require.NoError(t, storage.Create(t.Context(), instance))
+		require.NoError(t, storage.Create(t.Context(), connection))
+		if suffix == "old" {
+			require.NoError(t, tokens.ForUserAndMCP("42", connection.Name, remote.URL).SetTokenConfig(t.Context(),
+				&oauth2.Config{ClientID: "connection"}, &oauth2.Token{AccessToken: "connection-token", TokenType: "Bearer"}))
+		}
+		req := vmcpComponentRequest(storage, instance.Name, component.Name)
+		req.GatewayClient = gateway
+		_, config, err := manager.ServerForAction(t.Context(), connection.Name, &kuser.DefaultInfo{UID: "42"})
+		require.NoError(t, err)
+		require.Equal(t, connection.Name, config.MCPServerInstanceID, "gateway must select the connection's token")
+		aggregate, aggregateConfig, err := manager.ServerForAction(t.Context(), instance.Name, &kuser.DefaultInfo{UID: "42"})
+		require.NoError(t, err)
+		for _, check := range []func() error{
+			func() error { return h.checkVMCPComponentAuth(req) },
+			func() error { return h.checkVMCPAuth(req) },
+			func() error {
+				_, err := h.oauthChecker.CheckForMCPAuth(req, aggregate, aggregateConfig, "42", instance.Name, "")
+				return err
+			},
+		} {
+			authenticated.Store(0)
+			anonymous.Store(0)
+			require.NoError(t, check())
+			if suffix == "old" {
+				require.Positive(t, authenticated.Load())
+				require.Zero(t, anonymous.Load())
+			} else {
+				require.Zero(t, authenticated.Load(), "recreated connection reused an old token")
+				require.Positive(t, anonymous.Load())
+			}
+		}
+		// Simulate cascading deletion and the connection's token finalizer.
+		require.NoError(t, storage.Delete(t.Context(), instance))
+		require.NoError(t, storage.Delete(t.Context(), connection))
+		require.NoError(t, gateway.DeleteMCPOAuthTokenForAllUsers(t.Context(), connection.Name))
+		var remaining v1.MCPServer
+		require.NoError(t, storage.Get(t.Context(), kclient.ObjectKeyFromObject(component), &remaining))
+	}
+}
+
+func TestVMCPAuthSkipsDisabledComponents(t *testing.T) {
+	var grantedCalls, disabledCalls atomic.Int32
+	server := gomcp.NewServer(&gomcp.Implementation{Name: "component", Version: "test"}, nil)
+	transport := gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return server }, nil)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/disabled" {
+			disabledCalls.Add(1)
+		} else {
+			grantedCalls.Add(1)
+		}
+		transport.ServeHTTP(w, r)
+	}))
+	t.Cleanup(remote.Close)
+
+	vmcp := vmcpComponentVMCP(false)
+	vmcp.Spec.Manifest.Components = append(vmcp.Spec.Manifest.Components, types.VMCPComponent{ID: "disabled"})
+	vmcp.Spec.Manifest.Profiles[0].Permissions = types.VMCPProfilePermissions{
+		AllowedComponents: map[string]types.VMCPComponentSet{"component": {}},
+	}
+	instance := syncedVMCPInstance(vmcpComponentInstance("vmcpi1user", vmcp.Name), vmcp)
+	objects := []kclient.Object{vmcp, instance}
+	for _, componentID := range []string{"component", "disabled"} {
+		component := vmcpComponentServer("ms1"+componentID, "", vmcp.Name)
+		component.Spec.VMCPComponentID = componentID
+		component.Spec.Manifest.Runtime = types.RuntimeRemote
+		component.Spec.Manifest.RemoteConfig = &types.RemoteRuntimeConfig{URL: remote.URL + "/" + componentID}
+		objects = append(objects, component, syncedVMCPConnection(&v1.MCPServerInstance{
+			Name:      "msi1" + componentID,
+			Namespace: system.DefaultNamespace,
+			Spec: v1.MCPServerInstanceSpec{
+				VMCPInstanceID:  instance.Name,
+				VMCPComponentID: componentID,
+				MCPServerName:   component.Name,
+				UserID:          "42",
+			},
+		}, vmcp, instance))
+	}
+	storage := &vmcpOAuthInitialEventsClient{WithWatch: vmcpConsentStorage(objects...)}
+	gateway := vmcpConsentGateway(t)
+	tokens := mcp.NewGlobalTokenStore(gateway)
+	manager, err := mcp.NewSessionManager(t.Context(), false, tokens, nil, "http://obot.example", 8080,
+		mcp.Options{MCPRuntimeBackend: mcp.RuntimeBackendKubernetes, MCPNamespace: "mcp"}, nil,
+		&rest.Config{Host: "http://kubernetes.invalid"}, storage, storage, storage, gateway, system.DefaultNamespace, nil)
+	require.NoError(t, err)
+	h := &handler{oauthChecker: NewMCPOAuthHandlerFactory("http://obot.example", manager, storage, gateway, tokens, "", false)}
+	req := vmcpComponentRequest(storage, instance.Name, "ms1disabled")
+	req.GatewayClient = gateway
+
+	checks := func(t *testing.T) {
+		t.Helper()
+		aggregate, aggregateConfig, err := manager.ServerForAction(t.Context(), instance.Name, &kuser.DefaultInfo{UID: "42"})
+		require.NoError(t, err)
+		recorder := httptest.NewRecorder()
+		req.ResponseWriter = recorder
+		require.NoError(t, h.checkVMCPAuth(req))
+		var pending []pendingComponentAuth
+		require.NoError(t, json.NewDecoder(recorder.Body).Decode(&pending))
+		require.Empty(t, pending)
+		authURL, err := h.oauthChecker.CheckForMCPAuth(req, aggregate, aggregateConfig, "42", instance.Name, "")
+		require.NoError(t, err)
+		require.Empty(t, authURL)
+	}
+
+	checks(t)
+	require.Positive(t, grantedCalls.Load())
+	require.Zero(t, disabledCalls.Load(), "a disabled component was probed for OAuth")
+	// A disabled component is not part of this connection, so it cannot be authenticated through it.
+	require.Error(t, h.checkVMCPComponentAuth(req))
+	require.Zero(t, disabledCalls.Load())
+
+	// Enabling the component makes it part of the OAuth check.
+	vmcp.Spec.Manifest.Profiles[0].Permissions = types.VMCPProfilePermissions{AllowAllComponents: true}
+	require.NoError(t, storage.Update(t.Context(), vmcp))
+	// The VMCPInstance controller rechecks the instance when the enabled components change.
+	require.NoError(t, storage.Get(t.Context(), kclient.ObjectKeyFromObject(instance), instance))
+	require.NoError(t, storage.Update(t.Context(), syncedVMCPInstance(instance, vmcp)))
+	checks(t)
+	require.Positive(t, disabledCalls.Load())
+}
+
+func (c *vmcpOAuthInitialEventsClient) Watch(ctx context.Context, list kclient.ObjectList, opts ...kclient.ListOption) (watch.Interface, error) {
+	options := &kclient.ListOptions{}
+	options.ApplyOptions(opts)
+	options.Raw = nil
+	if err := c.List(ctx, list, options); err != nil {
+		return nil, err
+	}
+	objects, err := meta.ExtractList(list)
+	if err != nil {
+		return nil, err
+	}
+	w := watch.NewRaceFreeFake()
+	for _, object := range objects {
+		w.Add(object)
+	}
+	return w, nil
+}
+
+// syncedVMCPInstance records the configuration check the VMCPInstance controller
+// performs for an instance without saved configuration. Call it again after
+// changing the vMCP's components or profiles.
+func syncedVMCPInstance(instance *v1.VMCPInstance, vmcp *v1.VMCP) *v1.VMCPInstance {
+	enabled := vmcpconfig.EnabledComponents(&kuser.DefaultInfo{UID: instance.Spec.UserID}, *vmcp, vmcpconfig.ComponentsForInstance(*vmcp, *instance))
+	instance.Status.ConfigurationCheckHash = vmcpconfig.ConfigurationCheckHash(enabled, "")
+	return instance
+}
+
+// syncedVMCPConnection records the configuration sync the MCPServerInstance
+// controller performs for a shared component connection.
+func syncedVMCPConnection(connection *v1.MCPServerInstance, vmcp *v1.VMCP, instance *v1.VMCPInstance) *v1.MCPServerInstance {
+	for _, component := range vmcp.Spec.Manifest.Components {
+		if component.ID != connection.Spec.VMCPComponentID {
+			continue
+		}
+		connection.Spec.Config = vmcpconfig.ConnectionConfiguration(component)
+		connection.Status.VMCPConfigurationHash = vmcpconfig.ConnectionConfigurationHash(connection.Spec.Config, *instance)
+	}
+	return connection
+}

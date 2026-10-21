@@ -123,15 +123,14 @@ func (h *Handler) EnsureMCPServer(req router.Request, resp router.Response) erro
 			needsUpdate = true
 		}
 
-		expectedEnv := []types.MCPEnv{
+		expectedEnv := []types.MCPConfig{
 			{
 				Name:        "NANOBOT_ENV_FILE",
 				Description: "Environment variables file for Nanobot",
 				Key:         "NANOBOT_ENV_FILE",
 				Sensitive:   true,
 				Required:    true,
-				File:        true,
-				DynamicFile: true,
+				Usage:       types.DynamicFile,
 			},
 			{
 				Name:        "NANOBOT_CONFIG_FILE",
@@ -139,8 +138,7 @@ func (h *Handler) EnsureMCPServer(req router.Request, resp router.Response) erro
 				Key:         "NANOBOT_CONFIG_FILE",
 				Sensitive:   true,
 				Required:    true,
-				File:        true,
-				DynamicFile: true,
+				Usage:       types.DynamicFile,
 			},
 		}
 
@@ -156,21 +154,21 @@ func (h *Handler) EnsureMCPServer(req router.Request, resp router.Response) erro
 			}
 		}
 
-		if !reflect.DeepEqual(existing.Spec.Manifest.Env, expectedEnv) {
+		if !reflect.DeepEqual(existing.Spec.Manifest.Config, expectedEnv) {
 			needsUpdate = true
 		}
 
 		if needsUpdate {
 			slog.Debug("Updating nanobot MCP server config", "agent", agent.Name, "mcpServer", mcpServerName)
 			existing.Spec.Manifest.ContainerizedConfig.Args = expectedArgs
-			existing.Spec.Manifest.Env = expectedEnv
+			existing.Spec.Manifest.Config = expectedEnv
 			if err := req.Client.Update(req.Ctx, &existing); err != nil {
 				return fmt.Errorf("failed to update MCPServer: %w", err)
 			}
 		}
 
 		// Ensure credentials are up to date
-		if err := h.ensureCredentials(req.Ctx, req, resp, agent, mcpServerName); err != nil {
+		if err := h.ensureCredentials(req.Ctx, req, resp, agent, &existing); err != nil {
 			return fmt.Errorf("failed to ensure credentials: %w", err)
 		}
 
@@ -199,26 +197,22 @@ func (h *Handler) EnsureMCPServer(req router.Request, resp router.Response) erro
 					Path:        "/mcp",
 					HealthzPath: "/healthz",
 				},
-				Env: []types.MCPEnv{
-					{
-						Name:        "NANOBOT_ENV_FILE",
-						Description: "Environment variables file for Nanobot",
-						Key:         "NANOBOT_ENV_FILE",
-						Sensitive:   true,
-						Required:    true,
-						File:        true,
-						DynamicFile: true,
-					},
+				Config: []types.MCPConfig{{
+					Name:        "NANOBOT_ENV_FILE",
+					Description: "Environment variables file for Nanobot",
+					Key:         "NANOBOT_ENV_FILE",
+					Sensitive:   true,
+					Required:    true,
+					Usage:       types.DynamicFile,
+				},
 					{
 						Name:        "NANOBOT_CONFIG_FILE",
 						Description: "Provider config YAML for Nanobot",
 						Key:         "NANOBOT_CONFIG_FILE",
 						Sensitive:   true,
 						Required:    true,
-						File:        true,
-						DynamicFile: true,
-					},
-				},
+						Usage:       types.DynamicFile,
+					}},
 			},
 		},
 	}
@@ -229,7 +223,7 @@ func (h *Handler) EnsureMCPServer(req router.Request, resp router.Response) erro
 	slog.Info("Created nanobot agent MCP server", "agent", agent.Name, "mcpServer", mcpServerName)
 
 	// Create credentials for the new server
-	if err := h.ensureCredentials(req.Ctx, req, resp, agent, mcpServerName); err != nil {
+	if err := h.ensureCredentials(req.Ctx, req, resp, agent, mcpServer); err != nil {
 		return fmt.Errorf("failed to create credentials: %w", err)
 	}
 
@@ -238,8 +232,9 @@ func (h *Handler) EnsureMCPServer(req router.Request, resp router.Response) erro
 
 // ensureCredentials ensures that the MCP server has credentials with API keys that are valid
 // and refreshes them when they are close to expiration.
-func (h *Handler) ensureCredentials(ctx context.Context, req router.Request, resp router.Response, agent *v1.NanobotAgent, mcpServerName string) error {
-	credCtx := fmt.Sprintf("%s-%s", agent.Spec.UserID, mcpServerName)
+func (h *Handler) ensureCredentials(ctx context.Context, req router.Request, resp router.Response, agent *v1.NanobotAgent, mcpServer *v1.MCPServer) error {
+	mcpServerName := mcpServer.Name
+	credCtx := mcpServer.CredentialContext(agent.Spec.UserID)
 
 	llmModel, err := resolveModel(ctx, req.Client, req.Namespace, types.DefaultModelAliasTypeLLM)
 	if err != nil {
@@ -593,7 +588,9 @@ func preferredModelsForAlias(aliasName types.DefaultModelAliasType) []string {
 
 // deleteTokens revokes the API key and deletes the MCP token associated with the MCP server.
 func (h *Handler) deleteTokens(ctx context.Context, agent *v1.NanobotAgent, mcpServerName string) error {
-	credCtx := fmt.Sprintf("%s-%s", agent.Spec.UserID, mcpServerName)
+	// Agent servers are user-scoped and may already be deleted during cleanup.
+	mcpServer := v1.MCPServer{Name: mcpServerName}
+	credCtx := mcpServer.CredentialContext(agent.Spec.UserID)
 
 	// Retrieve the credential to get the API key ID
 	cred, err := h.gatewayClient.RevealCredential(ctx, []string{credCtx}, mcpServerName)

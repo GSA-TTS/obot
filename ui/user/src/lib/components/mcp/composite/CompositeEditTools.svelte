@@ -1,9 +1,15 @@
 <script lang="ts">
+	import Confirm from '$lib/components/Confirm.svelte';
 	import ResponsiveDialog from '$lib/components/ResponsiveDialog.svelte';
 	import Search from '$lib/components/Search.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
 	import { CATALOG_SERVER_FIELD_IDS } from '$lib/constants';
-	import type { CompositeServerToolRow, MCPCatalogEntry, MCPCatalogServer } from '$lib/services';
+	import type {
+		CompositeServerToolRow,
+		MCPCatalogEntry,
+		MCPCatalogServer,
+		VMCPProfile
+	} from '$lib/services';
 	import {
 		conflictIssue,
 		duplicateToolNames,
@@ -27,24 +33,35 @@
 		onSuccess?: () => void;
 		tools?: CompositeServerToolRow[];
 		toolPrefix?: string;
+		profiles?: VMCPProfile[];
+		componentId?: string;
 		// Effective names of enabled tools from OTHER components of the composite,
 		// so the modal can flag cross-component final-name conflicts live as the
 		// admin edits overrides or the prefix.
 		otherEffectiveNames?: string[];
 		otherToolPrefixes?: string[];
 		additionalActions?: Snippet;
+		readonly?: boolean;
 	}
+
+	type ProfileToolImpact = {
+		name: string;
+		tools: string[];
+	};
 
 	let {
 		configuringEntry,
 		tools = [],
 		toolPrefix = $bindable(),
+		profiles,
+		componentId,
 		otherEffectiveNames,
 		otherToolPrefixes,
 		onClose,
 		onCancel,
 		onSuccess,
-		additionalActions
+		additionalActions,
+		readonly = false
 	}: Props = $props();
 
 	let ownEnabledEffectiveNames = $derived(
@@ -99,22 +116,34 @@
 	let confirmDialog = $state<ReturnType<typeof ResponsiveDialog>>();
 	let search = $state('');
 	let expandedTools = $state<Record<string, boolean>>({});
+	let profileToolImpact = $state<ProfileToolImpact[]>([]);
+	let initiallyEnabledToolNames = new Set<string>();
 
 	// Track initial state to detect changes
 	let initialConfigState = $state<string>('');
 
-	let allToolsEnabled = $derived(tools.every((tool) => tool.enabled));
+	let actionableTools = $derived(tools.filter((tool) => !tool.removed));
+	let allToolsEnabled = $derived(
+		actionableTools.length > 0 && actionableTools.every((tool) => tool.enabled)
+	);
 	let configuringEntryDeprecated = $derived(isDeprecatedMCPServer(configuringEntry));
 
-	let visibleTools = $derived(
-		tools.filter(
+	let visibleTools = $derived.by(() => {
+		const query = search.toLowerCase();
+		const matched = tools.filter(
 			(tool) =>
-				tool.name?.toLowerCase().includes(search.toLowerCase()) ||
-				tool.overrideName?.toLowerCase().includes(search.toLowerCase()) ||
-				tool.description?.toLowerCase().includes(search.toLowerCase()) ||
-				tool.overrideDescription?.toLowerCase().includes(search.toLowerCase())
-		)
-	);
+				tool.name?.toLowerCase().includes(query) ||
+				tool.overrideName?.toLowerCase().includes(query) ||
+				tool.description?.toLowerCase().includes(query) ||
+				tool.overrideDescription?.toLowerCase().includes(query)
+		);
+		const available: CompositeServerToolRow[] = [];
+		const removed: CompositeServerToolRow[] = [];
+		for (const tool of matched) {
+			(tool.removed ? removed : available).push(tool);
+		}
+		return removed.length > 0 ? [...available, ...removed] : matched;
+	});
 
 	// Check if there are any changes compared to initial state
 	let hasChanges = $derived.by(() => {
@@ -125,15 +154,66 @@
 	export function open() {
 		// Capture initial state when dialog opens
 		initialConfigState = JSON.stringify({ tools, toolPrefix: toolPrefix ?? '' });
+		initiallyEnabledToolNames = new Set(
+			tools.filter((tool) => tool.enabled).map((tool) => tool.name)
+		);
+		profileToolImpact = [];
 		dialog?.open();
 	}
 
+	function toolLabel(tool: CompositeServerToolRow) {
+		return (tool.overrideName || '').trim() || tool.name;
+	}
+
+	function profileImpacts(): ProfileToolImpact[] {
+		if (!componentId) return [];
+		const disabling = tools.filter(
+			(tool) => tool.enabled === false && initiallyEnabledToolNames.has(tool.name)
+		);
+		if (disabling.length === 0) return [];
+
+		const impacts: ProfileToolImpact[] = [];
+		for (const profile of profiles ?? []) {
+			const allowed = profile.vmcpPermissions?.allowedComponents?.[componentId]?.allowedTools;
+			if (!Array.isArray(allowed)) continue;
+			const matched = disabling.filter((tool) => allowed.includes(tool.name));
+			if (matched.length === 0) continue;
+			impacts.push({
+				name: profile.name || 'Unnamed profile',
+				tools: matched.map(toolLabel)
+			});
+		}
+		return impacts;
+	}
+
+	function handleSave() {
+		if (readonly) return;
+		const impacts = profileImpacts();
+		if (impacts.length === 0) {
+			onSuccess?.();
+			dialog?.close();
+			return;
+		}
+		profileToolImpact = impacts;
+	}
+
+	function confirmSave() {
+		profileToolImpact = [];
+		onSuccess?.();
+		dialog?.close();
+	}
+
+	function cancelSave() {
+		profileToolImpact = [];
+	}
+
 	export function close() {
+		profileToolImpact = [];
 		dialog?.close();
 	}
 
 	function handleClose() {
-		if (hasChanges) {
+		if (!readonly && hasChanges) {
 			confirmDialog?.open();
 		} else {
 			dialog?.close();
@@ -161,8 +241,8 @@
 	id={CATALOG_SERVER_FIELD_IDS.compositeEntryEditToolsDialog}
 	bind:this={dialog}
 	animate="slide"
-	title={`Configure ${configuringEntry?.manifest?.name ?? 'MCP Server'} Tools`}
-	class="bg-base-200 md:w-2xl"
+	title={`${readonly ? 'View' : 'Configure'} ${configuringEntry?.manifest?.name ?? 'MCP Server'} Tools`}
+	class="bg-base-200 md:max-w-(--breakpoint-xl)"
 	classes={{ content: 'p-0', header: 'p-4 pb-0' }}
 	onClickOutside={handleClose}
 >
@@ -173,10 +253,14 @@
 		class="mx-4 mb-3"
 	/>
 	<p class="text-muted-content px-4 text-xs font-light">
-		Toggle what tools are available to users of this composite server. Or modify the name or
-		description of a tool; this will override the default name or description provided by the
-		server. It may affect the LLM's ability to understand the tool so be careful when adjusting
-		these values.
+		{#if readonly}
+			Tools configured for this server. They cannot be changed here.
+		{:else}
+			Toggle what tools are available to users of this composite server. Or modify the name or
+			description of a tool; this will override the default name or description provided by the
+			server. It may affect the LLM's ability to understand the tool so be careful when adjusting
+			these values.
+		{/if}
 	</p>
 	<div class="relative flex flex-col gap-2 overflow-x-hidden p-4">
 		<div class="flex flex-col gap-1">
@@ -191,16 +275,19 @@
 					class="text-input-filled shadow-none bg-base-100 flex-1 text-sm"
 					placeholder="No prefix"
 					bind:value={toolPrefix}
+					{readonly}
 				/>
-				<button
-					type="button"
-					class="btn btn-secondary btn-sm px-3 py-1"
-					onclick={() => {
-						toolPrefix = '';
-					}}
-				>
-					Clear
-				</button>
+				{#if !readonly}
+					<button
+						type="button"
+						class="btn btn-secondary btn-sm px-3 py-1"
+						onclick={() => {
+							toolPrefix = '';
+						}}
+					>
+						Clear
+					</button>
+				{/if}
 			</div>
 			{#if prefixIssue}
 				<p class={`text-xs ${prefixIssue.severity === 'error' ? 'text-error' : 'text-warning'}`}>
@@ -208,34 +295,44 @@
 				</p>
 			{:else}
 				<p class="text-muted-content text-[11px]">
-					Prepended to every tool name exposed by this component. Clear to remove.
+					{#if readonly}
+						Prepended to every tool name exposed by this component.
+					{:else}
+						Prepended to every tool name exposed by this component. Clear to remove.
+					{/if}
 				</p>
 			{/if}
-		</div>
-		<div
-			class="flex w-full justify-end"
-			id={CATALOG_SERVER_FIELD_IDS.compositeEntryConfigureToolsToggleAll}
-		>
-			<Toggle
-				checked={allToolsEnabled}
-				onChange={(checked) => {
-					tools.forEach((tool) => {
-						tool.enabled = checked;
-					});
-				}}
-				label="Enable All Tools"
-				labelInline
-				classes={{
-					label: 'text-sm gap-2'
-				}}
-				disablePortal
-			/>
 		</div>
 		<Search
 			class="dark:bg-base-200 dark:border-base-400 bg-base-100 border border-transparent shadow-sm"
 			onChange={(val) => (search = val)}
 			placeholder="Search tools..."
 		/>
+
+		<div class="flex w-full justify-end items-center pr-2.5 gap-1">
+			{#if additionalActions && !readonly}
+				<div>
+					{@render additionalActions()}
+				</div>
+				<div class="divider divider-horizontal mx-0"></div>
+			{/if}
+			<div id={CATALOG_SERVER_FIELD_IDS.compositeEntryConfigureToolsToggleAll}>
+				<Toggle
+					checked={allToolsEnabled}
+					disabled={readonly || actionableTools.length === 0}
+					onChange={(checked) => {
+						if (readonly) return;
+						for (const tool of actionableTools) tool.enabled = checked;
+					}}
+					label="Enable All Tools"
+					labelInline
+					classes={{
+						label: 'text-sm gap-2'
+					}}
+					disablePortal
+				/>
+			</div>
+		</div>
 		{#each visibleTools as tool (tool.id)}
 			{@const currentName = (tool.overrideName || '').trim() || tool.name}
 			{@const currentDescription = (tool.overrideDescription || '').trim() || tool.description}
@@ -244,7 +341,7 @@
 			{@const effectiveName = effectiveToolName(tool.name, tool.overrideName, toolPrefix)}
 			{@const conflict = tool.enabled ? conflictIssue(effectiveName, conflictSet) : undefined}
 			<div
-				class="dark:bg-base-300 dark:border-base-400 bg-base-100 flex items-start gap-2 rounded border border-transparent p-2 shadow-sm"
+				class={`dark:bg-base-300 dark:border-base-400 bg-base-100 flex items-start gap-2 rounded border border-transparent p-2 shadow-sm ${tool.removed ? 'opacity-50' : ''}`}
 				id={`edit-tool-${tool.id}`}
 			>
 				<div class="flex min-w-0 grow flex-col gap-2">
@@ -268,33 +365,40 @@
 								</p>
 							{/if}
 						</div>
-						<div class="flex shrink-0 items-center gap-2">
-							<!-- Enabled/disabled toggle for this tool -->
+						<div class="flex shrink-0 items-center gap-1">
+							{#if !tool.removed && !readonly}
+								<!-- Enabled/disabled toggle for this tool -->
+								<button
+									type="button"
+									class="btn btn-secondary btn-xs px-3 py-1"
+									onclick={() => {
+										if (!expandedTools[tool.id]) {
+											tool.overrideName = (tool.overrideName || '').trim() || tool.name;
+											tool.overrideDescription =
+												(tool.overrideDescription || '').trim() || tool.description;
+										}
+										expandedTools[tool.id] = !expandedTools[tool.id];
+									}}
+								>
+									{expandedTools[tool.id] ? 'Hide details' : 'Customize'}
+								</button>
+								<div class="divider divider-horizontal mx-0"></div>
+							{/if}
 							<Toggle
 								checked={tool.enabled}
+								disabled={readonly || tool.removed}
 								onChange={(checked) => {
+									if (readonly || tool.removed) return;
 									tool.enabled = checked;
 								}}
-								label="Enabled"
+								label={`${tool.enabled ? 'Disable Tool' : 'Enable Tool'}`}
 								disablePortal
 							/>
-							<button
-								type="button"
-								class="btn btn-secondary btn-sm px-3 py-1"
-								onclick={() => {
-									// When expanding, initialize inputs with current effective values
-									if (!expandedTools[tool.id]) {
-										tool.overrideName = (tool.overrideName || '').trim() || tool.name;
-										tool.overrideDescription =
-											(tool.overrideDescription || '').trim() || tool.description;
-									}
-									expandedTools[tool.id] = !expandedTools[tool.id];
-								}}
-							>
-								{expandedTools[tool.id] ? 'Hide details' : 'Customize'}
-							</button>
 						</div>
 					</div>
+					{#if tool.removed}
+						<p class="text-muted-content text-[11px] italic">This tool is no longer available.</p>
+					{/if}
 
 					{#if isCustomized}
 						<div class="mt-1 flex items-center gap-1 text-[11px] text-amber-600">
@@ -309,7 +413,11 @@
 						<div class="mt-2 flex flex-col gap-2">
 							<div class="flex flex-col gap-1">
 								<p class="text-xs text-muted-content">Tool name</p>
-								<input class="text-input-filled flex-1 text-sm" bind:value={tool.overrideName} />
+								<input
+									class="text-input-filled flex-1 text-sm"
+									bind:value={tool.overrideName}
+									{readonly}
+								/>
 							</div>
 
 							<div class="flex flex-col gap-1">
@@ -318,44 +426,42 @@
 									class="text-input-filled h-24 resize-none text-xs"
 									bind:value={tool.overrideDescription}
 									placeholder="Enter tool description..."
-								></textarea>
+									{readonly}></textarea>
 							</div>
 
-							<div class="mt-2 flex justify-end">
-								<button
-									type="button"
-									class="btn btn-sm btn-secondary px-3 py-1"
-									onclick={() => {
-										tool.overrideName = tool.name;
-										tool.overrideDescription = tool.description;
-									}}
-								>
-									Reset to default
-								</button>
-							</div>
+							{#if !readonly}
+								<div class="mt-2 flex justify-end">
+									<button
+										type="button"
+										class="btn btn-sm btn-secondary px-3 py-1"
+										onclick={() => {
+											tool.overrideName = tool.name;
+											tool.overrideDescription = tool.description;
+										}}
+									>
+										Reset to default
+									</button>
+								</div>
+							{/if}
 						</div>
 					{/if}
 				</div>
 			</div>
 		{/each}
 	</div>
-	<div class="bg-base-200 sticky bottom-0 left-0 mt-4 flex w-full justify-between gap-2 p-4">
-		<div>
-			{#if additionalActions}
-				{@render additionalActions()}
-			{/if}
-		</div>
+	<div class="bg-base-200 sticky bottom-0 left-0 mt-4 flex w-full justify-end gap-2 p-4">
 		<div class="flex gap-2 items-center">
-			<button class="btn btn-secondary" onclick={handleCancel}>Cancel</button>
-			<button
-				id={CATALOG_SERVER_FIELD_IDS.compositeEntryConfigureToolsConfirmBtn}
-				class="btn btn-primary"
-				disabled={hasBlockingToolNameErrors || prefixIssue?.severity === 'error'}
-				onclick={() => {
-					onSuccess?.();
-					dialog?.close();
-				}}>Confirm</button
+			<button class="btn btn-secondary" onclick={handleCancel}
+				>{readonly ? 'Close' : 'Cancel'}</button
 			>
+			{#if !readonly}
+				<button
+					id={CATALOG_SERVER_FIELD_IDS.compositeEntryConfigureToolsConfirmBtn}
+					class="btn btn-primary"
+					disabled={hasBlockingToolNameErrors || prefixIssue?.severity === 'error'}
+					onclick={handleSave}>Confirm</button
+				>
+			{/if}
 		</div>
 	</div>
 </ResponsiveDialog>
@@ -372,3 +478,34 @@
 		<button class="btn btn-error" onclick={confirmDiscard}> Discard Changes </button>
 	</div>
 </ResponsiveDialog>
+
+<Confirm
+	show={profileToolImpact.length > 0}
+	onsuccess={confirmSave}
+	oncancel={cancelSave}
+	title="Confirm Save"
+	submitText="Save"
+	type="info"
+	msg="Are you sure you want to save these changes?"
+>
+	{#snippet note()}
+		<p>The following profile(s) will be impacted by these changes:</p>
+
+		<table class="table table-xs my-4">
+			<thead class="text-xs">
+				<tr>
+					<th>Name</th>
+					<th>Affected Tool(s)</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each profileToolImpact as profile, index (index)}
+					<tr>
+						<td>{profile.name}</td>
+						<td>{profile.tools.join(', ')}</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/snippet}
+</Confirm>

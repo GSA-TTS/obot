@@ -9,11 +9,14 @@ import (
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/controller/data"
 	"github.com/obot-platform/obot/pkg/controller/handlers/adminworkspace"
+	"github.com/obot-platform/obot/pkg/controller/handlers/catalogmigration"
+	"github.com/obot-platform/obot/pkg/controller/handlers/compositemigration"
 	"github.com/obot-platform/obot/pkg/controller/handlers/deployment"
 	"github.com/obot-platform/obot/pkg/controller/handlers/mcpcatalog"
 	"github.com/obot-platform/obot/pkg/controller/handlers/mdmassetsource"
 	"github.com/obot-platform/obot/pkg/controller/handlers/modelinfosource"
 	"github.com/obot-platform/obot/pkg/controller/handlers/provider"
+	"github.com/obot-platform/obot/pkg/controller/handlers/providerconfigurationchange"
 	"github.com/obot-platform/obot/pkg/controller/handlers/secret"
 	"github.com/obot-platform/obot/pkg/controller/handlers/tunnelpeer"
 	"github.com/obot-platform/obot/pkg/localauth"
@@ -48,6 +51,7 @@ func New(services *services.Services) (*Controller, error) {
 	}
 
 	c.setupRoutes()
+	c.setupEveryReplicaRoutes()
 	c.setupLocalK8sRoutes()
 
 	services.Router.PosStart(c.PostStart)
@@ -122,7 +126,51 @@ func (c *Controller) PreStart(ctx context.Context) error {
 		return fmt.Errorf("failed to ensure auth providers and model providers: %w", err)
 	}
 
+	if err := c.services.GatewayClient.MigrateKinmIfNotRun(ctx, compositemigration.MigrationName, func() error {
+		return compositemigration.New(c.services.GatewayClient).MigrateAll(ctx, c.services.StorageClient)
+	}); err != nil {
+		return fmt.Errorf("failed to migrate composite MCP servers: %w", err)
+	}
+
+	if err := c.services.GatewayClient.MigrateKinmIfNotRun(ctx, catalogmigration.MigrationName, func() error {
+		return catalogmigration.New(c.services.GatewayClient, c.syncCatalogForMigration).MigrateAll(ctx, c.services.StorageClient)
+	}); err != nil {
+		return fmt.Errorf("failed to migrate standalone MCP servers: %w", err)
+	}
+	if err := catalogmigration.Cleanup(ctx, c.services.StorageClient); err != nil {
+		return fmt.Errorf("failed to clean up legacy MCP servers: %w", err)
+	}
+
+	if err := c.services.GatewayClient.MigrateKinmIfNotRun(ctx, "vmcp_default_admin_obot_groups", func() error {
+		return migrateVMCPDefaultAdminGroups(ctx, c.services.StorageClient)
+	}); err != nil {
+		return fmt.Errorf("failed to migrate vMCP default admin groups: %w", err)
+	}
+	if err := c.services.GatewayClient.MigrateKinmIfNotRun(ctx, "everything_acr_admin_obot_group", func() error {
+		return migrateEverythingAccessControlRuleAdminGroup(ctx, c.services.StorageClient)
+	}); err != nil {
+		return fmt.Errorf("failed to migrate everything access control rule admin group: %w", err)
+	}
+
+	if err := c.services.GatewayClient.MigrateKinmIfNotRun(ctx, catalogEntryStaticConfigurationMigrationName, func() error {
+		return migrateCatalogEntryStaticConfiguration(ctx, c.services.StorageClient, c.services.GatewayClient)
+	}); err != nil {
+		return fmt.Errorf("failed to migrate catalog entry static configuration: %w", err)
+	}
+
 	return nil
+}
+
+// syncCatalogForMigration syncs a catalog before the vMCP migration snapshots
+// its entries. The default catalog's source is migrated first; otherwise this
+// would sync the old source and the post-start migration would sync it again.
+func (c *Controller) syncCatalogForMigration(ctx context.Context, key kclient.ObjectKey) error {
+	if key.Namespace == system.DefaultNamespace && key.Name == system.DefaultCatalog {
+		if err := c.mcpCatalogHandler.SetUpDefaultMCPCatalog(ctx, c.services.StorageClient); err != nil {
+			return err
+		}
+	}
+	return c.mcpCatalogHandler.SyncNow(ctx, c.services.StorageClient, key)
 }
 
 func (c *Controller) ensureObotMCPServer(ctx context.Context) error {
@@ -188,21 +236,22 @@ func reconcileObotMCPServer(ctx context.Context, storageClient kclient.Client, a
 
 		// Check OBOT_URL env var
 		var foundOBOTURLEntry bool
-		for i, env := range existing.Spec.Manifest.Env {
+		for i, env := range existing.Spec.Manifest.Config {
 			if env.Key == "OBOT_URL" {
 				foundOBOTURLEntry = true
 				if env.Value != internalURL {
-					existing.Spec.Manifest.Env[i].Value = internalURL
+					existing.Spec.Manifest.Config[i].Value = internalURL
 					needsUpdate = true
 				}
 			}
 		}
 		if !foundOBOTURLEntry {
-			existing.Spec.Manifest.Env = append(existing.Spec.Manifest.Env, types.MCPEnv{
+			existing.Spec.Manifest.Config = append(existing.Spec.Manifest.Config, types.MCPConfig{
 				Name:     "OBOT_URL",
 				Key:      "OBOT_URL",
 				Required: true,
 				Value:    internalURL,
+				Usage:    types.Env,
 			})
 			needsUpdate = true
 		}
@@ -238,14 +287,13 @@ func reconcileObotMCPServer(ctx context.Context, storageClient kclient.Client, a
 					Port:  8080,
 					Path:  "/mcp",
 				},
-				Env: []types.MCPEnv{
-					{
-						Name:     "OBOT_URL",
-						Key:      "OBOT_URL",
-						Required: true,
-						Value:    internalURL,
-					},
-				},
+				Config: []types.MCPConfig{{
+					Name:     "OBOT_URL",
+					Key:      "OBOT_URL",
+					Required: true,
+					Value:    internalURL,
+					Usage:    types.Env,
+				}},
 			},
 		},
 	}
@@ -254,6 +302,23 @@ func reconcileObotMCPServer(ctx context.Context, storageClient kclient.Client, a
 }
 
 func (c *Controller) PostStart(ctx context.Context, client kclient.Client) {
+	// This process was just promoted. As a standby its watches waited on
+	// notifications, and a peer that was not sending them leaves the cache up to a
+	// poll interval behind. Have every watch list again before acting on it.
+	c.services.StorageDB.Refresh()
+
+	if err := providerconfigurationchange.CleanupOrphanedStagedCredentials(
+		ctx,
+		client,
+		c.services.GatewayClient,
+		time.Now(),
+		providerconfigurationchange.OrphanedStagedCredentialGracePeriod,
+	); err != nil {
+		panic(fmt.Errorf("cleanup orphaned staged provider credentials: %w", err))
+	}
+	if err := providerconfigurationchange.EnsureDaemonSync(ctx, client); err != nil {
+		panic(err)
+	}
 	go c.providerHandler.PollRegistries(ctx, client)
 	var err error
 	for range 3 {
@@ -356,9 +421,14 @@ func (c *Controller) Start(ctx context.Context) error {
 	}
 	// Tunnel peers are process-local, so this separate router intentionally has
 	// no leader election and runs its handler on every Obot replica.
+	if c.services.K8SEveryReplicaRouter != nil {
+		if err := c.services.K8SEveryReplicaRouter.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start tunnel peer Kubernetes router: %w", err)
+		}
+	}
 	if c.services.EveryReplicaRouter != nil {
 		if err := c.services.EveryReplicaRouter.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start tunnel peer Kubernetes router: %w", err)
+			return fmt.Errorf("failed to start every replica router: %w", err)
 		}
 	}
 
@@ -687,9 +757,9 @@ func (c *Controller) setupLocalK8sRoutes() {
 		// instead of waiting for the periodic service-account key rotation loop.
 		c.services.LocalRouter.Type(&corev1.Secret{}).Namespace(c.services.ServiceNamespace).Name(serviceaccounts.NetworkPolicySecretName).IncludeRemoved().HandlerFunc(c.reconcileServiceAccountSecretChange)
 	}
-	if c.services.EveryReplicaRouter != nil {
+	if c.services.K8SEveryReplicaRouter != nil {
 		peerHandler := tunnelpeer.New(c.services.TunnelManager.ID, c.services.TunnelManager)
-		c.services.EveryReplicaRouter.Type(&corev1.Service{}).Namespace(c.services.TunnelManager.ServiceNamespace).Name(c.services.TunnelManager.ServiceName).HandlerFunc(peerHandler.Reconcile)
+		c.services.K8SEveryReplicaRouter.Type(&corev1.Service{}).Namespace(c.services.TunnelManager.ServiceNamespace).Name(c.services.TunnelManager.ServiceName).HandlerFunc(peerHandler.Reconcile)
 	}
 }
 

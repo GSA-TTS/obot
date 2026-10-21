@@ -11,7 +11,6 @@ import (
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/api"
 	"github.com/obot-platform/obot/pkg/mcp"
-	"github.com/obot-platform/obot/pkg/storage"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	storagescheme "github.com/obot-platform/obot/pkg/storage/scheme"
 	"github.com/obot-platform/obot/pkg/system"
@@ -26,6 +25,31 @@ type fakeCapacityInfoProvider struct {
 	serverNames []string
 	info        types.MCPCapacityInfo
 	err         error
+}
+
+func TestStaticOAuthCredentialSecrets(t *testing.T) {
+	t.Run("requires client ID", func(t *testing.T) {
+		_, err := staticOAuthCredentialSecrets(types.MCPServerOAuthCredentialRequest{ClientSecret: "secret"})
+		require.ErrorContains(t, err, "clientID is required")
+	})
+
+	t.Run("accepts public client", func(t *testing.T) {
+		secrets, err := staticOAuthCredentialSecrets(types.MCPServerOAuthCredentialRequest{ClientID: " public-client "})
+		require.NoError(t, err)
+		require.Equal(t, map[string]string{"CLIENT_ID": "public-client"}, secrets)
+	})
+
+	t.Run("accepts confidential client", func(t *testing.T) {
+		secrets, err := staticOAuthCredentialSecrets(types.MCPServerOAuthCredentialRequest{
+			ClientID:     " client-id ",
+			ClientSecret: " client-secret ",
+		})
+		require.NoError(t, err)
+		require.Equal(t, map[string]string{
+			"CLIENT_ID":     "client-id",
+			"CLIENT_SECRET": "client-secret",
+		}, secrets)
+	})
 }
 
 func TestAcceptCatalogEntryOwnership(t *testing.T) {
@@ -75,10 +99,13 @@ func TestMCPCatalogHandlerGetEntryCapacity(t *testing.T) {
 			name:             "returns capacity for matching deployments",
 			entryCatalogName: "catalog-1",
 			entryRuntime:     types.RuntimeContainerized,
-			servers: []v1.MCPServer{{
-				Name: "server-1", Namespace: system.DefaultNamespace,
-				Spec: v1.MCPServerSpec{MCPServerCatalogEntryName: "entry-1"},
-			}},
+			servers: []v1.MCPServer{
+				{
+					Name:      "server-1",
+					Namespace: system.DefaultNamespace,
+					Spec:      v1.MCPServerSpec{MCPServerCatalogEntryName: "entry-1"},
+				},
+			},
 			providerInfo:    types.MCPCapacityInfo{Source: types.CapacitySourceDeployments, ActiveDeployments: 1},
 			wantServerNames: []string{"server-1"},
 			wantResponse:    types.MCPCapacityInfo{Source: types.CapacitySourceDeployments, ActiveDeployments: 1},
@@ -88,8 +115,16 @@ func TestMCPCatalogHandlerGetEntryCapacity(t *testing.T) {
 			entryCatalogName: "catalog-1",
 			entryRuntime:     types.RuntimeContainerized,
 			servers: []v1.MCPServer{
-				{Name: "template-server", Namespace: system.DefaultNamespace, Spec: v1.MCPServerSpec{MCPServerCatalogEntryName: "entry-1", Template: true}},
-				{Name: "server-1", Namespace: system.DefaultNamespace, Spec: v1.MCPServerSpec{MCPServerCatalogEntryName: "entry-1"}},
+				{
+					Name:      "template-server",
+					Namespace: system.DefaultNamespace,
+					Spec:      v1.MCPServerSpec{MCPServerCatalogEntryName: "entry-1", Template: true},
+				},
+				{
+					Name:      "server-1",
+					Namespace: system.DefaultNamespace,
+					Spec:      v1.MCPServerSpec{MCPServerCatalogEntryName: "entry-1"},
+				},
 			},
 			providerInfo:    types.MCPCapacityInfo{ActiveDeployments: 1},
 			wantServerNames: []string{"server-1"},
@@ -455,15 +490,17 @@ func TestPrepareTempServerConfigDoesNotUseBoundSecretInURL(t *testing.T) {
 	}).Build()
 	manifest := types.MCPServerManifest{
 		Runtime: types.RuntimeRemote,
-		Env: []types.MCPEnv{{
-			Key: key, Required: true}},
+
 		RemoteConfig: &types.RemoteRuntimeConfig{
 			IsTemplate:  true,
 			URLTemplate: "https://example.com/mcp/${WORKSPACE}",
-			Headers: []types.MCPHeader{{
-				Key: key, SecretBinding: &types.MCPSecretBinding{Name: "remote-secret", Key: "token"},
-			}},
 		},
+		Config: []types.MCPConfig{{
+			Key:           key,
+			Required:      true,
+			SecretBinding: &types.MCPSecretBinding{Name: "remote-secret", Key: "token"},
+			Usage:         types.Header,
+		}},
 	}
 	input := map[string]string{key: "user-value"}
 	options := mcp.ValidationOptions{RemoteMCPURLValidationConfig: mcp.RemoteMCPURLValidationConfig{
@@ -483,10 +520,14 @@ func TestPrepareTempServerConfigDoesNotUseBoundSecretInURL(t *testing.T) {
 func TestPrepareTempServerConfigRejectsUnknownOption(t *testing.T) {
 	manifest := types.MCPServerManifest{
 		Runtime: types.RuntimeRemote,
-		Env: []types.MCPEnv{{
-			Key: "REGION", Required: true,
-			Options: []types.MCPConfigurationOption{{Name: "US", Value: "us"}}}},
+
 		RemoteConfig: &types.RemoteRuntimeConfig{URL: "https://example.com/mcp"},
+		Config: []types.MCPConfig{{
+			Key:      "REGION",
+			Required: true,
+			Options:  []types.MCPConfigurationOption{{Name: "US", Value: "us"}},
+			Usage:    types.Env,
+		}},
 	}
 	_, err := prepareTempServerConfig(t.Context(), fake.NewClientBuilder().Build(), "obot-ns", "allowed", &manifest, map[string]string{"REGION": "forged"}, false, mcp.ValidationOptions{})
 	require.Error(t, err)
@@ -494,86 +535,4 @@ func TestPrepareTempServerConfigRejectsUnknownOption(t *testing.T) {
 	require.ErrorAs(t, err, &httpErr)
 	require.Equal(t, http.StatusBadRequest, httpErr.Code)
 	require.Contains(t, httpErr.Message, "not one of the configured options")
-}
-
-func TestPopulateComponentManifestsHydratesMCPServerID(t *testing.T) {
-	server := &v1.MCPServer{
-		Name: "shared-server", Namespace: system.DefaultNamespace,
-		Spec: v1.MCPServerSpec{
-			MCPCatalogID: "default",
-			Manifest: types.MCPServerManifest{
-				Name:            "Shared Server",
-				Runtime:         types.RuntimeContainerized,
-				MultiUserConfig: &types.MultiUserConfig{UserDefinedHeaders: []types.MCPHeader{{Key: "API_KEY", Name: "API Key"}}},
-				ContainerizedConfig: &types.ContainerizedRuntimeConfig{
-					Image: "example/shared:1.0.0",
-					Port:  8080,
-					Path:  "/mcp",
-				},
-			},
-		},
-	}
-	manifest := types.MCPServerCatalogEntryManifest{
-		Runtime: types.RuntimeComposite,
-		CompositeConfig: &types.CompositeCatalogConfig{ComponentServers: []types.CatalogComponentServer{
-			{MCPServerID: "shared-server"},
-		}},
-	}
-
-	err := (&MCPCatalogHandler{}).populateComponentManifests(newPopulateComponentManifestsRequest(server), &manifest, "default", "")
-
-	require.NoError(t, err)
-	require.Len(t, manifest.CompositeConfig.ComponentServers, 1)
-	component := manifest.CompositeConfig.ComponentServers[0]
-	assert.Equal(t, "shared-server", component.MCPServerID)
-	assert.Empty(t, component.CatalogEntryID)
-	assert.Equal(t, "Shared Server", component.Manifest.Name)
-	assert.Equal(t, types.RuntimeContainerized, component.Manifest.Runtime)
-	require.NotNil(t, component.Manifest.ContainerizedConfig)
-	assert.Equal(t, "example/shared:1.0.0", component.Manifest.ContainerizedConfig.Image)
-	require.NotNil(t, component.Manifest.MultiUserConfig)
-}
-
-func TestPopulateComponentManifestsHydratesSameCatalogEntryID(t *testing.T) {
-	entry := &v1.MCPServerCatalogEntry{
-		Name: "component-entry", Namespace: system.DefaultNamespace,
-		Spec: v1.MCPServerCatalogEntrySpec{
-			MCPCatalogName: "custom",
-			Manifest: types.MCPServerCatalogEntryManifest{
-				Name:           "Component Server",
-				Runtime:        types.RuntimeNPX,
-				ServerUserType: types.ServerUserTypeSingleUser,
-				NPXConfig:      &types.NPXRuntimeConfig{Package: "@example/component"},
-			},
-		},
-	}
-	manifest := types.MCPServerCatalogEntryManifest{
-		Runtime: types.RuntimeComposite,
-		CompositeConfig: &types.CompositeCatalogConfig{ComponentServers: []types.CatalogComponentServer{
-			{CatalogEntryID: "component-entry"},
-		}},
-	}
-
-	err := (&MCPCatalogHandler{}).populateComponentManifests(newPopulateComponentManifestsRequest(entry), &manifest, "custom", "")
-
-	require.NoError(t, err)
-	require.Len(t, manifest.CompositeConfig.ComponentServers, 1)
-	component := manifest.CompositeConfig.ComponentServers[0]
-	assert.Equal(t, "component-entry", component.CatalogEntryID)
-	assert.Empty(t, component.MCPServerID)
-	assert.Equal(t, "Component Server", component.Manifest.Name)
-	assert.Equal(t, types.RuntimeNPX, component.Manifest.Runtime)
-	require.NotNil(t, component.Manifest.NPXConfig)
-	assert.Equal(t, "@example/component", component.Manifest.NPXConfig.Package)
-}
-
-func newPopulateComponentManifestsRequest(objects ...kclient.Object) api.Context {
-	return api.Context{
-		Request:        httptest.NewRequest(http.MethodGet, "/", nil),
-		ResponseWriter: httptest.NewRecorder(),
-		Storage: storage.Client(fake.NewClientBuilder().
-			WithScheme(storagescheme.Scheme).
-			WithObjects(objects...).
-			Build()),
-	}
 }

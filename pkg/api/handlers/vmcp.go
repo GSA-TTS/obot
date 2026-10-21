@@ -1,0 +1,463 @@
+package handlers
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+
+	"github.com/obot-platform/obot/apiclient/types"
+	"github.com/obot-platform/obot/pkg/accesscontrolrule"
+	"github.com/obot-platform/obot/pkg/api"
+	"github.com/obot-platform/obot/pkg/api/authz"
+	gclient "github.com/obot-platform/obot/pkg/gateway/client"
+	gatewaytypes "github.com/obot-platform/obot/pkg/gateway/types"
+	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
+	"github.com/obot-platform/obot/pkg/system"
+	vmcpconfig "github.com/obot-platform/obot/pkg/vmcp"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/util/retry"
+)
+
+type VMCPHandler struct {
+	acrHelper *accesscontrolrule.Helper
+}
+
+func NewVMCPHandler(acrHelper *accesscontrolrule.Helper) *VMCPHandler {
+	return &VMCPHandler{acrHelper: acrHelper}
+}
+
+func (*VMCPHandler) List(req api.Context) error {
+	var list v1.VMCPList
+	if err := req.List(&list); err != nil {
+		return fmt.Errorf("failed to list VMCPs: %w", err)
+	}
+
+	all := (req.UserIsAdmin() || req.UserIsAuditor()) && req.URL.Query().Get("all") == "true"
+
+	items := make([]types.VMCP, 0, len(list.Items))
+	for itemIndex := range list.Items {
+		if all || authz.UserCanReadVMCP(req.User, &list.Items[itemIndex]) {
+			items = append(items, convertVMCP(vmcpForUser(req, list.Items[itemIndex])))
+		}
+	}
+	return req.Write(types.VMCPList{Items: items})
+}
+
+func (*VMCPHandler) Get(req api.Context) error {
+	var vmcp v1.VMCP
+	if err := req.Get(&vmcp, req.PathValue("vmcp_id")); err != nil {
+		return fmt.Errorf("failed to get VMCP: %w", err)
+	}
+	return req.Write(convertVMCP(vmcpForUser(req, vmcp)))
+}
+
+// vmcpForUser limits a shared VMCP to the components, tools, and profiles that
+// apply to the requesting user. Administrators and personal owners manage the definition,
+// and auditors review it, so they see all of it.
+func vmcpForUser(req api.Context, vmcp v1.VMCP) v1.VMCP {
+	if req.UserIsAuditor() || authz.UserCanManageVMCP(req.User, &vmcp) {
+		return vmcp
+	}
+
+	vmcp = *vmcp.DeepCopy()
+	manifest := &vmcp.Spec.Manifest
+	manifest.Components = vmcpconfig.EnabledComponents(req.User, vmcp, manifest.Components)
+	// Only the profiles grant tools here. An instance's selection narrows its own
+	// connection, not the VMCP definition.
+	grant := vmcpconfig.AllowedTools(req.User, manifest.Profiles, nil)
+	for i := range manifest.Components {
+		component := &manifest.Components[i]
+		component.ToolOverrides, _ = vmcpconfig.GrantedToolOverrides(component.ID, component.ToolOverrides, grant)
+	}
+	manifest.Profiles = vmcpconfig.MatchingProfiles(req.User, manifest.Profiles)
+
+	// Component statuses are keyed by name. Readiness only reflects the visible components.
+	visible := make(map[string]struct{}, len(manifest.Components))
+	for _, component := range manifest.Components {
+		visible[component.Name] = struct{}{}
+	}
+	vmcp.Status.Components = slices.DeleteFunc(vmcp.Status.Components, func(status v1.VMCPComponentStatus) bool {
+		_, ok := visible[status.Name]
+		return !ok
+	})
+	vmcp.Status.Ready = len(vmcp.Status.Components) == len(manifest.Components) && !slices.ContainsFunc(vmcp.Status.Components, func(status v1.VMCPComponentStatus) bool {
+		return !status.Ready
+	})
+	return vmcp
+}
+
+func (h *VMCPHandler) Create(req api.Context) error {
+	var manifest types.VMCPManifest
+	if err := req.Read(&manifest); err != nil {
+		return types.NewErrBadRequest("failed to read VMCP manifest: %v", err)
+	}
+	personalServer := !req.UserIsAdmin() || req.URL.Query().Get("scope") == "personal"
+
+	manifest.Default(personalServer)
+	var userID string
+	if personalServer {
+		userID = req.User.GetUID()
+	}
+
+	if err := h.loadComponentSnapshots(req, &manifest, userID, nil, true); err != nil {
+		return err
+	}
+	if err := rejectConfigurationSecretBindings(manifest); err != nil {
+		return err
+	}
+
+	if err := manifest.Validate(); err != nil {
+		return types.NewErrBadRequest("invalid VMCP manifest: %v", err)
+	}
+
+	if err := vmcpconfig.InitializeComponentIDs(&manifest); err != nil {
+		return types.NewErrBadRequest("invalid VMCP manifest: %v", err)
+	}
+
+	staticConfiguration := vmcpconfig.ExtractStaticConfiguration(&manifest, nil)
+
+	vmcp := v1.VMCP{
+		Finalizers:   []string{v1.VMCPFinalizer},
+		GenerateName: system.VMCPPrefix,
+		Namespace:    req.Namespace(),
+		Spec: v1.VMCPSpec{
+			Manifest:      manifest,
+			UserID:        userID,
+			CreatorUserID: req.User.GetUID(),
+		},
+	}
+	if err := req.Create(&vmcp); err != nil {
+		return fmt.Errorf("failed to create VMCP: %w", err)
+	}
+	if err := req.GatewayClient.UpsertCredential(req.Context(), gatewaytypes.Credential{
+		Context: vmcpconfig.StaticConfigurationCredentialContext(vmcp.Name),
+		Name:    vmcpconfig.ConfigurationCredentialName(),
+		Secrets: staticConfiguration,
+	}); err != nil {
+		cleanupErr := req.Delete(&vmcp)
+		return errors.Join(fmt.Errorf("failed to store VMCP static configuration: %w", err), cleanupErr)
+	}
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		if err := req.Get(&vmcp, vmcp.Name); err != nil {
+			return err
+		}
+		vmcpconfig.SetStaticConfigurationHashes(&vmcp, staticConfiguration)
+		return req.Update(&vmcp)
+	}); err != nil {
+		cleanupErr := req.Delete(&vmcp)
+		return errors.Join(fmt.Errorf("failed to publish VMCP static configuration: %w", err), cleanupErr)
+	}
+	return req.WriteCreated(convertVMCP(vmcp))
+}
+
+func (h *VMCPHandler) Update(req api.Context) error {
+	var vmcp v1.VMCP
+	if err := req.Get(&vmcp, req.PathValue("vmcp_id")); err != nil {
+		return fmt.Errorf("failed to get VMCP: %w", err)
+	}
+
+	if vmcp.Spec.SourceURL != "" {
+		return types.NewErrBadRequest("catalog synced vMCP %s cannot be updated via API", vmcp.Name)
+	}
+
+	var manifest types.VMCPManifest
+	if err := req.Read(&manifest); err != nil {
+		return types.NewErrBadRequest("failed to read VMCP manifest: %v", err)
+	}
+
+	manifest.Default(vmcp.Spec.UserID != "")
+
+	if err := vmcpconfig.ReconcileComponentIDs(vmcp.Spec.Manifest, &manifest); err != nil {
+		return types.NewErrBadRequest("invalid VMCP manifest: %v", err)
+	}
+	vmcpconfig.PruneRemovedComponentProfiles(vmcp.Spec.Manifest.Components, &manifest)
+	if err := h.loadComponentSnapshots(req, &manifest, vmcp.Spec.UserID, vmcp.Spec.Manifest.Components, true); err != nil {
+		return err
+	}
+	if err := rejectConfigurationSecretBindings(manifest); err != nil {
+		return err
+	}
+	if err := manifest.Validate(); err != nil {
+		return types.NewErrBadRequest("invalid VMCP manifest: %v", err)
+	}
+
+	credentialContext := vmcpconfig.StaticConfigurationCredentialContext(vmcp.Name)
+	credentialName := vmcpconfig.StaticConfigurationCredentialName(&vmcp)
+
+	cred, err := req.GatewayClient.RevealCredential(req.Context(), []string{credentialContext}, credentialName)
+	if err != nil && !errors.As(err, &gclient.CredentialNotFoundError{}) {
+		return fmt.Errorf("failed to reveal VMCP static configuration: %w", err)
+	}
+
+	staticConfiguration := vmcpconfig.ExtractStaticConfiguration(&manifest, cred.Secrets)
+	vmcp.Spec.Manifest = manifest
+	if vmcp.Spec.StaticConfigurationCredentialName != "" {
+		vmcpconfig.VersionStaticConfiguration(&vmcp, staticConfiguration)
+	} else {
+		vmcpconfig.SetStaticConfigurationHashes(&vmcp, staticConfiguration)
+	}
+
+	if err := req.GatewayClient.UpsertCredential(req.Context(), gatewaytypes.Credential{
+		Context: credentialContext,
+		Name:    vmcpconfig.StaticConfigurationCredentialName(&vmcp),
+		Secrets: staticConfiguration,
+	}); err != nil {
+		return fmt.Errorf("failed to store VMCP static configuration: %w", err)
+	}
+	if err := req.Update(&vmcp); err != nil {
+		return fmt.Errorf("failed to update VMCP: %w", err)
+	}
+	return req.Write(convertVMCP(vmcp))
+}
+
+// TriggerUpdate adopts current catalog snapshots in one resource update. It does
+// not change policies or credentials; ordinary edits never refresh snapshots.
+func (h *VMCPHandler) TriggerUpdate(req api.Context) error {
+	var vmcp v1.VMCP
+	if err := req.Get(&vmcp, req.PathValue("vmcp_id")); err != nil {
+		return err
+	}
+	if err := h.loadComponentSnapshots(req, &vmcp.Spec.Manifest, vmcp.Spec.UserID, nil, false); err != nil {
+		return err
+	}
+	if err := vmcp.Spec.Manifest.Validate(); err != nil {
+		return types.NewErrBadRequest("invalid VMCP manifest: %v", err)
+	}
+	for _, component := range vmcp.Spec.Manifest.Components {
+		if _, err := types.MapCatalogEntryToServer(component.CatalogEntry.Manifest, "", true); err != nil {
+			return types.NewErrBadRequest("invalid component %q: %v", component.Name, err)
+		}
+	}
+	return req.Update(&vmcp)
+}
+
+func (*VMCPHandler) Reveal(req api.Context) error {
+	var vmcp v1.VMCP
+	if err := req.Get(&vmcp, req.PathValue("vmcp_id")); err != nil {
+		return fmt.Errorf("failed to get VMCP: %w", err)
+	}
+
+	credential, err := req.GatewayClient.RevealCredential(req.Context(),
+		[]string{vmcpconfig.StaticConfigurationCredentialContext(vmcp.Name)},
+		vmcpconfig.StaticConfigurationCredentialName(&vmcp),
+	)
+	if err != nil {
+		if _, ok := errors.AsType[gclient.CredentialNotFoundError](err); !ok {
+			return fmt.Errorf("failed to reveal VMCP configuration: %w", err)
+		}
+	}
+
+	return req.Write(vmcpConfiguration(vmcp.Spec.Manifest.Components, credential.Secrets, types.VMCPConfigurationPolicyFixed))
+}
+
+func (*VMCPHandler) Deconfigure(req api.Context) error {
+	var vmcp v1.VMCP
+	if err := req.Get(&vmcp, req.PathValue("vmcp_id")); err != nil {
+		return fmt.Errorf("failed to get VMCP: %w", err)
+	}
+
+	// Publish an empty revision so a failed update leaves the active credentials intact.
+	if vmcp.Spec.StaticConfigurationCredentialName != "" {
+		vmcpconfig.VersionStaticConfiguration(&vmcp, map[string]string{})
+		if err := req.GatewayClient.UpsertCredential(req.Context(), gatewaytypes.Credential{
+			Context: vmcpconfig.StaticConfigurationCredentialContext(vmcp.Name),
+			Name:    vmcpconfig.StaticConfigurationCredentialName(&vmcp),
+			Secrets: map[string]string{},
+		}); err != nil {
+			return fmt.Errorf("failed to clear VMCP configuration: %w", err)
+		}
+		if err := req.Update(&vmcp); err != nil {
+			return fmt.Errorf("failed to update vMCP configuration hashes: %v", err)
+		}
+
+		return req.Write(convertVMCP(vmcp))
+	}
+
+	if _, err := req.GatewayClient.DeleteCredential(req.Context(),
+		vmcpconfig.StaticConfigurationCredentialContext(vmcp.Name),
+		vmcpconfig.ConfigurationCredentialName(),
+	); err != nil {
+		return fmt.Errorf("failed to delete VMCP configuration: %w", err)
+	}
+	vmcpconfig.SetStaticConfigurationHashes(&vmcp, map[string]string{})
+	if err := req.Update(&vmcp); err != nil {
+		return fmt.Errorf("failed to update VMCP configuration hashes: %w", err)
+	}
+	return req.Write(convertVMCP(vmcp))
+}
+
+func (h *VMCPHandler) loadComponentSnapshots(req api.Context, manifest *types.VMCPManifest, ownerID string, existing []types.VMCPComponent, rejectUnconfiguredOAuth bool) error {
+	for i := range manifest.Components {
+		component := &manifest.Components[i]
+		if component.MCPServerCatalogEntryID == "" {
+			return types.NewErrBadRequest("component mcpServerCatalogEntryID is required")
+		}
+		var previous *types.VMCPComponent
+		for j := range existing {
+			if existing[j].ID == component.ID && existing[j].MCPServerCatalogEntryID == component.MCPServerCatalogEntryID {
+				previous = &existing[j]
+				break
+			}
+		}
+		var entry v1.MCPServerCatalogEntry
+		err := req.Get(&entry, component.MCPServerCatalogEntryID)
+		if err != nil && (previous == nil || !apierrors.IsNotFound(err)) {
+			return fmt.Errorf("get component catalog entry %q: %w", component.MCPServerCatalogEntryID, err)
+		}
+		if err == nil {
+			if err := authz.CheckVMCPComponentAccess(req.Context(), req.User, ownerID, &entry, h.acrHelper, req.GatewayClient.UserInfoByID); err != nil {
+				return err
+			}
+			if previous == nil && rejectUnconfiguredOAuth && entryRequiresStaticOAuthCreds(entry) {
+				name := entry.Spec.Manifest.Name
+				if name == "" {
+					name = entry.Name
+				}
+				return types.NewErrBadRequest("MCP server %q requires administrator OAuth configuration before it can be added to a vMCP", name)
+			}
+		}
+		if previous != nil {
+			component.MCPCatalogID = previous.MCPCatalogID
+			component.CatalogEntry = previous.CatalogEntry
+			component.SourceDigest = previous.SourceDigest
+			component.OAuthCredentialID = previous.OAuthCredentialID
+			if component.Name == "" {
+				component.Name = previous.Name
+			}
+		} else {
+			component.MCPCatalogID = entry.Spec.MCPCatalogName
+			component.CatalogEntry = types.MCPServerCatalogEntrySnapshot{
+				Manifest:         entry.Spec.Manifest,
+				UnsupportedTools: entry.Spec.UnsupportedTools,
+			}
+			component.SourceDigest = vmcpconfig.SourceDigest(component.CatalogEntry)
+			component.OAuthCredentialID = vmcpconfig.StaticOAuthCredentialReference(entry.Spec.Manifest, entry.Name)
+			if component.Name == "" {
+				component.Name = entry.Spec.Manifest.Name
+				if component.Name == "" {
+					component.Name = entry.Name
+				}
+			}
+		}
+		static := map[string]bool{}
+		for _, field := range component.CatalogEntry.Manifest.Config {
+			static[field.Key] = field.Static || field.SecretBinding != nil
+		}
+		component.Configuration = slices.DeleteFunc(component.Configuration, func(policy types.VMCPConfigurationPolicy) bool {
+			return static[policy.Key]
+		})
+		for _, profile := range manifest.Profiles {
+			grant, ok := profile.Permissions.AllowedComponents[component.ID]
+			if !ok || component.ID == "" {
+				continue
+			}
+			grant.AllowedTools = slices.DeleteFunc(grant.AllowedTools, func(name string) bool {
+				return name != "" && manifest.ValidateToolReference(types.VMCPToolReference{ComponentID: component.ID, Name: name}) != nil
+			})
+			profile.Permissions.AllowedComponents[component.ID] = grant
+		}
+	}
+	return nil
+}
+
+// rejectConfigurationSecretBindings keeps Secret selection with Git-synced
+// catalogs, whose contents are controlled by the administrators of the source.
+func rejectConfigurationSecretBindings(manifest types.VMCPManifest) error {
+	for _, component := range manifest.Components {
+		for _, policy := range component.Configuration {
+			if policy.SecretBinding != nil {
+				return types.NewErrBadRequest("component %q configuration %q: secretBinding is only supported on catalog synced vMCPs", component.Name, policy.Key)
+			}
+		}
+	}
+	return nil
+}
+
+func (*VMCPHandler) Delete(req api.Context) error {
+	vmcpID := req.PathValue("vmcp_id")
+
+	var vMCP v1.VMCP
+	if err := req.Get(&vMCP, vmcpID); apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	if vMCP.Spec.SourceURL != "" {
+		return types.NewErrBadRequest("cannot delete vMCP %s synced from a catalog", vmcpID)
+	}
+
+	return req.Delete(&v1.VMCP{
+		Name:      vmcpID,
+		Namespace: req.Namespace(),
+	})
+}
+
+func vmcpConfiguration(components []types.VMCPComponent, secrets map[string]string, policyType types.VMCPConfigurationPolicyType) types.VMCPConfiguration {
+	configuration := types.VMCPConfiguration{Components: map[string]map[string]string{}}
+	for _, component := range components {
+		for _, policy := range component.Configuration {
+			if policy.Policy != policyType {
+				continue
+			}
+			value, ok := secrets[vmcpconfig.ConfigurationKey(component.ID, policy.Key)]
+			if !ok {
+				continue
+			}
+			if configuration.Components[component.ID] == nil {
+				configuration.Components[component.ID] = make(map[string]string, 1)
+			}
+			configuration.Components[component.ID][policy.Key] = value
+		}
+	}
+	return configuration
+}
+
+func convertVMCP(vmcp v1.VMCP) types.VMCP {
+	manifest := vmcp.Spec.Manifest
+	manifest.Components = slices.Clone(manifest.Components)
+	for i := range manifest.Components {
+		component := &manifest.Components[i]
+		component.CatalogEntry.Manifest.Config = slices.Clone(component.CatalogEntry.Manifest.Config)
+		sensitive := map[string]bool{}
+		for i := range component.CatalogEntry.Manifest.Config {
+			field := &component.CatalogEntry.Manifest.Config[i]
+			sensitive[field.Key] = field.Sensitive
+			if field.Sensitive && field.Value != "" {
+				field.Value = "******"
+			}
+		}
+		component.Configuration = slices.Clone(component.Configuration)
+		for i := range component.Configuration {
+			policy := &component.Configuration[i]
+			if sensitive[policy.Key] && policy.Value != "" {
+				policy.Value = "******"
+			}
+		}
+	}
+
+	componentStatuses := make([]types.VMCPComponentStatus, 0, len(vmcp.Status.Components))
+	for _, status := range vmcp.Status.Components {
+		componentStatuses = append(componentStatuses, types.VMCPComponentStatus{
+			Name:          status.Name,
+			Ready:         status.Ready,
+			Error:         status.Error,
+			SourceMissing: status.SourceMissing,
+			NeedsUpdate:   status.NeedsUpdate,
+		})
+	}
+	return types.VMCP{
+		LegacySlug:              vmcp.Spec.LegacySlug,
+		SourceURL:               vmcp.Spec.SourceURL,
+		Adopted:                 vmcp.Spec.Adopted,
+		Metadata:                MetadataFrom(&vmcp),
+		VMCPManifest:            manifest,
+		UserID:                  vmcp.Spec.UserID,
+		CreatorUserID:           vmcp.Spec.CreatorUserID,
+		StaticConfigurationHash: vmcp.Spec.StaticConfigurationHash,
+		Status: types.VMCPStatus{
+			Ready:      vmcp.Status.Ready,
+			Components: componentStatuses,
+		},
+	}
+}

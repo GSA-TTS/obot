@@ -19,6 +19,7 @@ import (
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	"github.com/obot-platform/obot/pkg/system"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/storage/value"
 	kclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,6 +33,7 @@ var (
 	verifiedAuthProviders = []string{
 		"default/google-auth-provider",
 		"default/github-auth-provider",
+		"default/login-gov-auth-provider",
 	}
 
 	identityGroupResource = schema.GroupResource{
@@ -142,7 +144,8 @@ func (c *Client) EncryptIdentities(ctx context.Context, force bool) error {
 				return fmt.Errorf("failed to encrypt identity: %w", err)
 			}
 
-			if err := tx.Updates(identities[i]).Error; err != nil {
+			// Omit the group check column to prevent resetting the group refresh window
+			if err := tx.Omit(groupsLastCheckedColumn).Updates(identities[i]).Error; err != nil {
 				return err
 			}
 		}
@@ -155,9 +158,13 @@ func (c *Client) EncryptIdentities(ctx context.Context, force bool) error {
 func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Identity, timezone string, role types2.Role, userLimit UserLimit) (*types.User, bool, error) {
 	verified := slices.Contains(verifiedAuthProviders, fmt.Sprintf("%s/%s", id.AuthProviderNamespace, id.AuthProviderName))
 
-	email := id.Email
+	email := NormalizeEmail(id.Email)
 	providerUserID := id.ProviderUserID
 	providerUsername := id.ProviderUsername
+	if strings.TrimSpace(providerUserID) == "" || strings.TrimSpace(providerUsername) == "" {
+		return nil, false, errors.New("auth provider identity requires a user ID and username")
+	}
+	id.Email = email
 
 	if id.ProviderUserID != "" {
 		id.HashedProviderUserID = hash.String(id.ProviderUserID)
@@ -181,7 +188,15 @@ func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Iden
 			if err = c.encryptIdentity(ctx, id); err != nil {
 				return nil, false, fmt.Errorf("failed to encrypt identity: %w", err)
 			}
-			if err = tx.Create(id).Error; err != nil {
+			// A concurrent request may win this insert on a first sign-in.
+			if err = tx.Clauses(clause.OnConflict{DoNothing: true}).Create(id).Error; err != nil {
+				return nil, false, err
+			}
+			// Read back whichever row won, so both racers continue with the same user ID.
+			if err = tx.Where(
+				"auth_provider_name = ? AND auth_provider_namespace = ? AND hashed_provider_user_id = ?",
+				id.AuthProviderName, id.AuthProviderNamespace, id.HashedProviderUserID,
+			).First(id).Error; err != nil {
 				return nil, false, err
 			}
 		} else if err != nil {
@@ -206,6 +221,9 @@ func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Iden
 	}
 	if err := c.decryptIdentity(ctx, id); err != nil {
 		return nil, false, fmt.Errorf("failed to decrypt identity: %w", err)
+	}
+	if NormalizeEmail(id.Email) != email {
+		return nil, false, errors.New("auth provider changed the email for an existing identity")
 	}
 
 	var updateIdentity bool
@@ -238,8 +256,9 @@ func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Iden
 		checkForExistingUser = true
 	} else if verified {
 		// Check for an existing user with this exact verified email address.
-		// We check for both true and null values, because the email might have been verified before we started tracking verified emails.
-		userQuery = userQuery.Where("hashed_email = ? and (verified_email = true or verified_email is null)", user.HashedEmail)
+		// The incoming provider proves ownership of the address, so an account created by an
+		// unverified provider can be linked and upgraded instead of duplicated.
+		userQuery = userQuery.Where("hashed_email = ?", user.HashedEmail)
 		checkForExistingUser = true
 	}
 
@@ -290,18 +309,6 @@ func (c *Client) ensureIdentity(ctx context.Context, tx *gorm.DB, id *types.Iden
 
 			if time.Since(user.LastActiveDay) > 24*time.Hour {
 				user.LastActiveDay = time.Now().UTC().Truncate(24 * time.Hour)
-				userChanged = true
-			}
-
-			if user.Username != id.ProviderUsername {
-				user.Username = id.ProviderUsername
-				user.HashedUsername = hash.String(user.Username)
-				userChanged = true
-			}
-
-			if user.Email != email {
-				user.Email = email
-				user.HashedEmail = hash.String(user.Email)
 				userChanged = true
 			}
 
@@ -432,17 +439,8 @@ func (c *Client) ensureIdentityProviderData(ctx context.Context, id *types.Ident
 
 	// Ensure groups and group memberships are up to date. ensureGroups makes its own HTTP call to
 	// the auth provider (outside any transaction) and persists results in its own transaction.
-	groupsLastChecked := id.AuthProviderGroupsLastChecked
 	if err := c.ensureGroups(ctx, id); err != nil {
 		return fmt.Errorf("failed to update groups for identity: %w", err)
-	}
-	if !groupsLastChecked.Equal(id.AuthProviderGroupsLastChecked) {
-		// Groups were updated, so we should update the last checked time on the identity.
-		if err := c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			return c.encryptAndUpdateIdentity(ctx, tx, *id)
-		}); err != nil {
-			return err
-		}
 	}
 
 	return nil
@@ -485,7 +483,8 @@ func (c *Client) encryptAndUpdateIdentity(ctx context.Context, tx *gorm.DB, id t
 		return fmt.Errorf("failed to encrypt identity: %w", err)
 	}
 
-	if err := tx.Updates(&id).Error; err != nil {
+	// Omit the group check column to prevent resetting the group refresh window
+	if err := tx.Omit(groupsLastCheckedColumn).Updates(&id).Error; err != nil {
 		return fmt.Errorf("failed to update identity: %w", err)
 	}
 

@@ -50,12 +50,13 @@ type serializableRequest struct {
 
 // serializableState represents the authentication state returned from auth providers
 type serializableState struct {
-	ExpiresOn         *time.Time `json:"expiresOn"`
-	AccessToken       string     `json:"accessToken"`
-	PreferredUsername string     `json:"preferredUsername"`
-	User              string     `json:"user"`
-	Email             string     `json:"email"`
-	SetCookies        []string   `json:"setCookies"`
+	ExpiresOn             *time.Time `json:"expiresOn"`
+	AccessToken           string     `json:"accessToken"`
+	PreferredUsername     string     `json:"preferredUsername"`
+	User                  string     `json:"user"`
+	Email                 string     `json:"email"`
+	SetCookies            []string   `json:"setCookies"`
+	RequirePasswordChange bool       `json:"requirePasswordChange"`
 }
 
 func NewProxyManager(dispatcher *dispatcher.Dispatcher) *Manager {
@@ -87,7 +88,35 @@ func (pm *Manager) AuthenticateRequest(req *http.Request) (*authenticator.Respon
 		return nil, false, err
 	}
 
-	return proxy.authenticateRequest(req)
+	resp, ok, err := proxy.authenticateRequest(req)
+	if ok || !errors.Is(err, ErrInvalidSession) {
+		return resp, ok, err
+	}
+
+	// A verification login is served by the staged provider, so the active one cannot validate its
+	// session. Fall back only for the browser holding the verification.
+	staged, stagedErr := pm.dispatcher.GetStagedAuthProvider(req.Context())
+	if stagedErr != nil || staged == "" {
+		return resp, ok, err
+	}
+	if loginable, loginErr := pm.dispatcher.LoginableAuthProvider(req.Context(), req, staged); loginErr != nil || !loginable {
+		return resp, ok, err
+	}
+	stagedProxy, stagedErr := pm.createProxy(req.Context(), system.DefaultNamespace+"/"+staged)
+	if stagedErr != nil {
+		return resp, ok, err
+	}
+
+	return stagedProxy.authenticateRequest(req)
+}
+
+func overridesVerificationPin(r *http.Request, verification string) bool {
+	if verification == "" || r.URL.Path != "/oauth2/start" {
+		return false
+	}
+
+	requested := r.URL.Query().Get(ObotAuthProviderQueryParam)
+	return requested != "" && requested != verification
 }
 
 func (pm *Manager) HandlerFunc(ctx api.Context) error {
@@ -95,15 +124,44 @@ func (pm *Manager) HandlerFunc(ctx api.Context) error {
 	return nil
 }
 
+// stagedVerificationProvider returns the staged provider when this request belongs to a
+// verification round trip, and "" otherwise. The round trip is identified by the verify cookie
+// rather than a query parameter because a provider's own login pages redirect through paths that
+// name no provider of their own.
+func (pm *Manager) stagedVerificationProvider(r *http.Request) string {
+	if cookie, err := r.Cookie(auth.AuthProviderVerifyCookie); err != nil || cookie.Value == "" {
+		return ""
+	}
+
+	staged, err := pm.dispatcher.GetStagedAuthProvider(r.Context())
+	if err != nil || staged == "" {
+		return ""
+	}
+
+	// LoginableAuthProvider re-checks that cookie against an open verification, so a stale or
+	// forged one cannot turn the staged provider into a login path of its own.
+	loginable, err := pm.dispatcher.LoginableAuthProvider(r.Context(), r, staged)
+	if err != nil || !loginable {
+		return ""
+	}
+
+	return system.DefaultNamespace + "/" + staged
+}
+
+func clearCurrentAuthProviderCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:   CurrentAuthProviderCookie,
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+}
+
 func (pm *Manager) ServeHTTP(user user.Info, w http.ResponseWriter, r *http.Request) {
 	// If the proxy manager is not set up, just redirect the user.
 	// This can happen when auth is disabled.
 	if pm == nil {
-		rd := r.URL.Query().Get("rd")
-		if rd == "" || !strings.HasPrefix(rd, "/") {
-			rd = "/"
-		}
-		http.Redirect(w, r, rd, http.StatusFound)
+		http.Redirect(w, r, auth.SafeRedirectPath(r.URL.Query().Get("rd")), http.StatusFound)
 		return
 	}
 
@@ -112,7 +170,21 @@ func (pm *Manager) ServeHTTP(user user.Info, w http.ResponseWriter, r *http.Requ
 		provider string
 		err      error
 	)
-	if len(user.GetExtra()["auth_provider_name"]) > 0 && len(user.GetExtra()["auth_provider_namespace"]) > 0 {
+	verification := pm.stagedVerificationProvider(r)
+
+	if overridesVerificationPin(r, verification) {
+		auth.ClearAuthProviderVerifyCookie(w)
+		verification = ""
+	}
+
+	if verification != "" {
+		// A verification deliberately signs in through a provider other than the caller's, so it is
+		// the only case where the provider a request names beats the one its session uses.
+		provider = verification
+		if r.URL.Path == "/oauth2/callback" {
+			clearCurrentAuthProviderCookie(w)
+		}
+	} else if len(user.GetExtra()["auth_provider_name"]) > 0 && len(user.GetExtra()["auth_provider_namespace"]) > 0 {
 		provider = fmt.Sprintf("%s/%s", user.GetExtra()["auth_provider_namespace"][0], user.GetExtra()["auth_provider_name"][0])
 	} else if r.URL.Path == "/oauth2/callback" {
 		// Check for the current auth provider cookie.
@@ -120,12 +192,7 @@ func (pm *Manager) ServeHTTP(user user.Info, w http.ResponseWriter, r *http.Requ
 			provider = cookie.Value
 
 			// Now delete the current auth provider cookie so that it doesn't interfere with anything.
-			http.SetCookie(w, &http.Cookie{
-				Name:   CurrentAuthProviderCookie,
-				Value:  "",
-				Path:   "/",
-				MaxAge: -1,
-			})
+			clearCurrentAuthProviderCookie(w)
 		} else {
 			http.Error(w, "Login timed out. Please try again.", http.StatusUnauthorized)
 			return
@@ -168,12 +235,12 @@ func (pm *Manager) ServeHTTP(user user.Info, w http.ResponseWriter, r *http.Requ
 		}
 
 		// Check if the provider is configured.
-		configuredProvider, err := pm.dispatcher.GetConfiguredAuthProvider(r.Context())
+		loginable, err := pm.dispatcher.LoginableAuthProvider(r.Context(), r, name)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to get configured auth provider: %v", err), http.StatusInternalServerError)
 			return
 		}
-		if configuredProvider != "" && configuredProvider != name {
+		if !loginable {
 			http.Error(w, "auth provider not configured: "+provider, http.StatusBadRequest)
 			return
 		}
@@ -285,12 +352,11 @@ func (p *Proxy) authenticateRequest(req *http.Request) (*authenticator.Response,
 		return nil, false, err
 	}
 
-	if stateResponse.StatusCode == http.StatusInternalServerError && (strings.Contains(string(body), "record not found") || strings.Contains(string(body), "session ticket cookie failed validation")) {
-		return nil, false, ErrInvalidSession
+	ss, err := decodeSerializableState(stateResponse.StatusCode, body)
+	if err != nil {
+		return nil, false, err
 	}
-
-	var ss serializableState
-	if err = json.Unmarshal(body, &ss); err != nil {
+	if err = validateSerializableState(&ss); err != nil {
 		return nil, false, err
 	}
 
@@ -304,6 +370,9 @@ func (p *Proxy) authenticateRequest(req *http.Request) (*authenticator.Response,
 			"auth_provider_namespace": {p.namespace},
 			"auth_provider_user_id":   {ss.User},
 		},
+	}
+	if ss.RequirePasswordChange {
+		u.Extra["password_change_required"] = []string{"true"}
 	}
 
 	if len(ss.SetCookies) != 0 {
@@ -321,6 +390,35 @@ func (p *Proxy) authenticateRequest(req *http.Request) (*authenticator.Response,
 	return &authenticator.Response{
 		User: u,
 	}, true, nil
+}
+
+func decodeSerializableState(statusCode int, body []byte) (serializableState, error) {
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden ||
+		(statusCode == http.StatusInternalServerError &&
+			(strings.Contains(string(body), "record not found") || strings.Contains(string(body), "session ticket cookie failed validation"))) {
+		return serializableState{}, ErrInvalidSession
+	}
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return serializableState{}, fmt.Errorf("auth provider state request returned status %d", statusCode)
+	}
+
+	var ss serializableState
+	if err := json.Unmarshal(body, &ss); err != nil {
+		return serializableState{}, errors.New("auth provider returned invalid state")
+	}
+	return ss, nil
+}
+
+func validateSerializableState(ss *serializableState) error {
+	ss.User = strings.TrimSpace(ss.User)
+	ss.Email = strings.ToLower(strings.TrimSpace(ss.Email))
+	if ss.User == "" {
+		return errors.New("auth provider returned an empty user ID")
+	}
+	if ss.Email == "" {
+		return errors.New("auth provider returned an empty email")
+	}
+	return nil
 }
 
 // Important: do not change the order of these checks.

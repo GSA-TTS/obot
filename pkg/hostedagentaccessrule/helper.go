@@ -5,6 +5,7 @@ import (
 
 	"github.com/obot-platform/obot/apiclient/types"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
+	"github.com/obot-platform/obot/pkg/subjectgroups"
 	"github.com/obot-platform/obot/pkg/system"
 	kuser "k8s.io/apiserver/pkg/authentication/user"
 	gocache "k8s.io/client-go/tools/cache"
@@ -15,6 +16,7 @@ const (
 	ResourceSelectorIndex = "selectors"
 	UserIDIndex           = "user-ids"
 	GroupIDIndex          = "group-ids"
+	ObotGroupIDIndex      = "obot-group-ids"
 	SubjectSelectorIndex  = "subject-selectors"
 )
 
@@ -61,10 +63,8 @@ func (h *Helper) UserHasAccessToHostedAgentID(user kuser.Info, hostedAgentID str
 		return false, nil
 	}
 
-	var (
-		userID string
-		groups = authGroupSet(user)
-	)
+	var userID string
+	groups, obotGroups := subjectgroups.Sets(user)
 	if user != nil {
 		userID = user.GetUID()
 	}
@@ -73,7 +73,7 @@ func (h *Helper) UserHasAccessToHostedAgentID(user kuser.Info, hostedAgentID str
 	if err != nil {
 		return false, err
 	}
-	if hasMatchingSubject(selectorRules, userID, groups) {
+	if hasMatchingSubject(selectorRules, userID, groups, obotGroups) {
 		return true, nil
 	}
 
@@ -81,7 +81,7 @@ func (h *Helper) UserHasAccessToHostedAgentID(user kuser.Info, hostedAgentID str
 	if err != nil {
 		return false, err
 	}
-	if hasMatchingSubject(agentRules, userID, groups) {
+	if hasMatchingSubject(agentRules, userID, groups, obotGroups) {
 		return true, nil
 	}
 
@@ -144,8 +144,17 @@ func (h *Helper) getRulesForUser(namespace string, user kuser.Info) ([]v1.Hosted
 		addRules(userRules)
 	}
 
-	for groupID := range authGroupSet(user) {
+	groups, obotGroups := subjectgroups.Sets(user)
+	for groupID := range groups {
 		groupRules, err := h.GetHostedAgentAccessRulesForGroup(namespace, groupID)
+		if err != nil {
+			return nil, err
+		}
+		addRules(groupRules)
+	}
+
+	for groupID := range obotGroups {
+		groupRules, err := h.getIndexedRules(namespace, ObotGroupIDIndex, groupID, "obot group")
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +181,7 @@ func (h *Helper) getIndexedRules(namespace, indexName, key, target string) ([]v1
 	return result, nil
 }
 
-func hasMatchingSubject(rules []v1.HostedAgentAccessRule, userID string, groups map[string]struct{}) bool {
+func hasMatchingSubject(rules []v1.HostedAgentAccessRule, userID string, groups, obotGroups map[string]struct{}) bool {
 	for _, rule := range rules {
 		for _, subject := range rule.Spec.Manifest.Subjects {
 			switch subject.Type {
@@ -184,6 +193,10 @@ func hasMatchingSubject(rules []v1.HostedAgentAccessRule, userID string, groups 
 				if _, ok := groups[subject.ID]; ok {
 					return true
 				}
+			case types.SubjectTypeObotGroup:
+				if _, ok := obotGroups[subject.ID]; ok {
+					return true
+				}
 			case types.SubjectTypeSelector:
 				if subject.ID == "*" {
 					return true
@@ -193,16 +206,4 @@ func hasMatchingSubject(rules []v1.HostedAgentAccessRule, userID string, groups 
 	}
 
 	return false
-}
-
-func authGroupSet(user kuser.Info) map[string]struct{} {
-	if user == nil {
-		return map[string]struct{}{}
-	}
-	groups := user.GetExtra()["auth_provider_groups"]
-	set := make(map[string]struct{}, len(groups))
-	for _, group := range groups {
-		set[group] = struct{}{}
-	}
-	return set
 }

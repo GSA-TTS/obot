@@ -36,7 +36,7 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 		return nil, err
 	}
 
-	version, err := handlers.NewVersionHandler(ctx, handlers.VersionHandlerOptions{
+	version := handlers.NewVersionHandler(handlers.VersionHandlerOptions{
 		GatewayClient:           services.GatewayClient,
 		StorageClient:           services.StorageClient,
 		LicenseProvider:         services.LicenseProvider,
@@ -45,15 +45,15 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 		MCPNetworkPolicyEnabled: services.MCPNetworkPolicyEnabled,
 		MCPDefaultDenyAllEgress: services.MCPDefaultDenyAllEgress,
 		AuthEnabled:             services.AuthEnabled,
-		DisableUpdateCheck:      services.DisableUpdateCheck,
 		MessagePoliciesEnabled:  services.MessagePoliciesEnabled,
 		AgentsEnabled:           agentsEnabled,
 		HostedAgentsEnabled:     services.HostedAgentsEnabled,
 		HideK8sDetails:          services.HideK8sDetails,
+		UpgradeStatusReader:     services.VersionChecker,
+		ProviderConfiguration:   services.ProviderDispatcher,
+		ModelProxyURL:           services.ModelProxyURL,
+		ModelProxySettings:      services.GatewayClient,
 	})
-	if err != nil {
-		return nil, err
-	}
 
 	mcpGateway, err := mcpgateway.NewHandler(
 		ctx,
@@ -97,13 +97,15 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	hostedAgentPoolDefaults := handlers.NewHostedAgentPoolDefaultsHandler()
 	hostedAgentPoolAssignments := handlers.NewHostedAgentPoolAssignmentHandler()
 	hostedAgentAccessRules := handlers.NewHostedAgentAccessRuleHandler()
-	skills := handlers.NewSkillHandler(services.SkillAccessRuleHelper)
+	skills := handlers.NewSkillHandler(services.GitMaxRepoSizeMB, services.SkillAccessRuleHelper)
 	powerUserWorkspaces := handlers.NewPowerUserWorkspaceHandler(services.ServerURL, services.AccessControlRuleHelper, services.MCPSecretBindingAllowedLabel)
 	mcpWebhookValidations := handlers.NewMCPWebhookValidationHandler(services.MCPSessionManager)
 	availableModels := handlers.NewAvailableModelsHandler(services.ProviderDispatcher, services.LicenseProvider)
 	modelProviders := handlers.NewModelProviderHandler(services.ProviderDispatcher, services.LicenseProvider)
 	modelAccessPolicies := handlers.NewModelAccessPolicyHandler()
 	messagePolicies := handlers.NewMessagePolicyHandler()
+	vmcps := handlers.NewVMCPHandler(services.AccessControlRuleHelper)
+	vmcpInstances := handlers.NewVMCPInstanceHandler()
 	policyViolations := handlers.NewMessagePolicyViolationHandler()
 	deviceScans := handlers.NewDeviceScansHandler()
 	mdmAssetSources := handlers.NewMDMAssetSourceHandler()
@@ -114,16 +116,26 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	localAuth := handlers.NewLocalAuthHandler(services.LocalAuthProvider)
 	defaultModelAliases := handlers.NewDefaultModelAliasHandler()
 	images := handlers.NewImageHandler()
-	mcp := handlers.NewMCPHandler(services.MCPSessionManager, services.AccessControlRuleHelper, oauthChecker, services.Router.Backend(), services.MCPImagePullSecrets, services.ServerURL, services.MCPSecretBindingAllowedLabel, services.ForceDynamicClient)
+	mcp := handlers.NewMCPHandler(services.MCPSessionManager, services.AccessControlRuleHelper, oauthChecker, services.Router.Backend(), services.MCPImagePullSecrets, services.ServerURL, services.MCPSecretBindingAllowedLabel)
+
+	mcpTester := handlers.NewMCPTesterHandlerWithModelProxy(services.StorageClient, services.MCPSessionManager, services.AccessControlRuleHelper, services.ModelAccessPolicyHelper, services.LocalServerURL, nil, handlers.MCPTesterModelProxyOptions{
+		URL:           services.ModelProxyURL,
+		Providers:     services.ProviderDispatcher,
+		License:       services.LicenseProvider,
+		GatewayClient: services.GatewayClient,
+		Settings:      services.GatewayClient,
+	})
+	modelProxy := handlers.NewModelProxyHandler(services.GatewayClient, services.ModelProxyConfiguredURL, services.ModelProxyURL, services.LicenseProvider)
+
 	mcpSecretBindings := handlers.NewMCPSecretBindingHandler(services.MCPRuntimeBackend, services.LocalK8sClient, services.ObotNamespace, services.MCPSecretBindingAllowedLabel)
 	mcpAuditLogs := mcpgateway.NewAuditLogHandler(services.GatewayClient)
 	localAgentAuditLogs := mcpgateway.NewLocalAgentAuditLogHandler()
 	llmAuditLogs := handlers.NewLLMAuditLogHandler()
 	auditLogExports := handlers.NewAuditLogExportHandler(services.GatewayClient)
-	serverInstances := handlers.NewServerInstancesHandler(services.AccessControlRuleHelper, services.ServerURL)
+	serverInstances := handlers.NewServerInstancesHandler(services.ServerURL)
 	systemMCPServers := handlers.NewSystemMCPServerHandler(services.MCPSessionManager, services.MCPSecretBindingAllowedLabel)
 	userDefaultRoleSettings := handlers.NewUserDefaultRoleSettingHandler()
-	setupHandler := setup.NewHandler(services.ServerURL, services.Bootstrapper)
+	setupHandler := setup.NewHandler(services.ServerURL, services.Bootstrapper, services.ProviderDispatcher)
 	registryHandler := registry.NewHandler(services.AccessControlRuleHelper, services.ServerURL, services.RegistryNoAuth, services.MCPSecretBindingAllowedLabel)
 	oauthClients := handlers.NewOAuthClientsHandler(services.OAuthServerConfig, services.ServerURL)
 	publishedArtifacts := handlers.NewPublishedArtifactHandler(services.ArtifactBlobStore, services.ArtifactBlobBucket)
@@ -131,13 +143,7 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	licenseHandler := handlers.NewLicenseHandler(services.LicenseProvider, upgrade.NewCommunityLicenseIssuer(services.GatewayClient, upgrade.ServerBaseURL(), http.DefaultClient))
 	tunnelHandler := handlers.NewTunnelHandler(services.TunnelManager)
 	mcpTunnelHandler := handlers.NewMCPTunnelHandler(services.TunnelManager)
-	k8sSettingsHandler := handlers.NewK8sSettingsHandler(
-		services.MCPSessionManager,
-		services.MCPRuntimeBackend,
-		services.ServiceName,
-		services.ServiceNamespace,
-		services.LocalK8sClient,
-	)
+	k8sSettingsHandler := handlers.NewK8sSettingsHandler(services.MCPSessionManager)
 
 	enforcement, err := handlers.NewEnforcementHandler(services.ServerURL)
 	if err != nil {
@@ -184,50 +190,56 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("GET /api/all-mcps/servers/{mcp_server_id}/prompts", mcp.GetPrompts)
 	mux.HandleFunc("GET /api/all-mcps/servers/{mcp_server_id}/prompts/{prompt_name}", mcp.GetPrompt)
 
-	// User-Deployed MCP Servers (single-user, remote, and composite)
+	// Legacy MCP servers: read and deployment operations; manage connections through vMCPs.
 	mux.HandleFunc("GET /api/mcp-servers", mcp.ListServer)
 	mux.HandleFunc("GET /api/mcp-server-binding-secrets", mcpSecretBindings.ListAllowedSecrets)
 	mux.HandleFunc("GET /api/mcp-servers/{mcp_server_id}", mcp.GetServer)
-	mux.HandleFunc("POST /api/mcp-servers", mcp.CreateServer)
-	mux.HandleFunc("PUT /api/mcp-servers/{mcp_server_id}", mcp.UpdateServer)
-	mux.HandleFunc("PUT /api/mcp-servers/{mcp_server_id}/alias", mcp.UpdateServerAlias)
-	mux.HandleFunc("DELETE /api/mcp-servers/{mcp_server_id}", mcp.DeleteServer)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/launch", mcp.LaunchServer)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/check-oauth", mcp.CheckOAuth)
-	mux.HandleFunc("GET /api/mcp-servers/{mcp_server_id}/oauth-url", mcp.GetOAuthURL)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/oauth-debugger/client", mcp.RegisterOAuthDebuggerClient)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/oauth-debugger/authorization-url", mcp.GetOAuthDebuggerAuthorizationURL)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/oauth-debugger/token", mcp.ExchangeOAuthDebuggerToken)
-	mux.HandleFunc("DELETE /api/mcp-servers/{mcp_server_id}/oauth", mcp.ClearOAuthCredentials)
 	mux.HandleFunc("GET /api/mcp-servers/{mcp_server_id}/details", mcp.GetServerDetails)
 	mux.HandleFunc("GET /api/mcp-servers/{mcp_server_id}/logs", mcp.StreamServerLogs)
 	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/restart", mcp.RestartServerDeployment)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/configure", mcp.ConfigureServer)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/deconfigure", mcp.DeconfigureServer)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/reveal", mcp.Reveal)
-	mux.HandleFunc("GET /api/mcp-servers/{mcp_server_id}/tools", mcp.GetTools)
-	mux.HandleFunc("GET /api/mcp-servers/{mcp_server_id}/resources", mcp.GetResources)
-	mux.HandleFunc("GET /api/mcp-servers/{mcp_server_id}/resources/{resource_uri}", mcp.ReadResource)
-	mux.HandleFunc("GET /api/mcp-servers/{mcp_server_id}/prompts", mcp.GetPrompts)
-	mux.HandleFunc("GET /api/mcp-servers/{mcp_server_id}/prompts/{prompt_name}", mcp.GetPrompt)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/update-url", mcp.UpdateURL)
-	mux.HandleFunc("POST /api/mcp-servers/{mcp_server_id}/trigger-update", mcp.TriggerUpdate)
 
-	// MCPServerInstances
+	// Legacy MCP server instances (read-only)
 	mux.HandleFunc("GET /api/mcp-server-instances", serverInstances.ListServerInstances)
 	mux.HandleFunc("GET /api/mcp-server-instances/{mcp_server_instance_id}", serverInstances.GetServerInstance)
-	mux.HandleFunc("POST /api/mcp-server-instances", serverInstances.CreateServerInstance)
-	mux.HandleFunc("POST /api/mcp-server-instances/{mcp_server_instance_id}/reveal", serverInstances.RevealConfig)
-	mux.HandleFunc("POST /api/mcp-server-instances/{mcp_server_instance_id}/configure", serverInstances.ConfigureServerInstance)
-	mux.HandleFunc("POST /api/mcp-server-instances/{mcp_server_instance_id}/deconfigure", serverInstances.DeconfigureServerInstance)
-	mux.HandleFunc("DELETE /api/mcp-server-instances/{mcp_server_instance_id}", serverInstances.DeleteServerInstance)
-	mux.HandleFunc("DELETE /api/mcp-server-instances/{mcp_server_instance_id}/oauth", serverInstances.ClearOAuthCredentials)
+
+	// Virtual MCPs
+	mux.HandleFunc("GET /api/vmcps", vmcps.List)
+	mux.HandleFunc("POST /api/vmcps", vmcps.Create)
+	mux.HandleFunc("GET /api/vmcps/{vmcp_id}", vmcps.Get)
+	mux.HandleFunc("POST /api/vmcps/{vmcp_id}/launch", mcp.LaunchServer)
+	mux.HandleFunc("POST /api/vmcps/{vmcp_id}/check-oauth", mcp.CheckOAuth)
+	mux.HandleFunc("GET /api/vmcps/{vmcp_id}/oauth-url", mcp.GetOAuthURL)
+	mux.HandleFunc("DELETE /api/vmcps/{vmcp_id}/oauth", mcp.ClearOAuthCredentials)
+	mux.HandleFunc("GET /api/vmcps/{vmcp_id}/tools", mcp.GetTools)
+	mux.HandleFunc("GET /api/vmcps/{vmcp_id}/resources", mcp.GetResources)
+	mux.HandleFunc("GET /api/vmcps/{vmcp_id}/resources/{resource_uri}", mcp.ReadResource)
+	mux.HandleFunc("GET /api/vmcps/{vmcp_id}/prompts", mcp.GetPrompts)
+	mux.HandleFunc("GET /api/vmcps/{vmcp_id}/prompts/{prompt_name}", mcp.GetPrompt)
+	mux.HandleFunc("PUT /api/vmcps/{vmcp_id}", vmcps.Update)
+	mux.HandleFunc("POST /api/vmcps/{vmcp_id}/trigger-update", vmcps.TriggerUpdate)
+	mux.HandleFunc("POST /api/vmcps/{vmcp_id}/reveal", vmcps.Reveal)
+	mux.HandleFunc("POST /api/vmcps/{vmcp_id}/deconfigure", vmcps.Deconfigure)
+	mux.HandleFunc("DELETE /api/vmcps/{vmcp_id}", vmcps.Delete)
+	mux.HandleFunc("POST /api/vmcps/{vmcp_id}/components/{component_id}/generate-tool-previews", mcpCatalogs.GenerateVMCPComponentToolPreviews)
+	mux.HandleFunc("POST /api/vmcps/{vmcp_id}/components/{component_id}/generate-tool-previews/oauth-url", mcpCatalogs.GenerateVMCPComponentToolPreviewsOAuthURL)
+
+	// Virtual MCP instances
+	mux.HandleFunc("GET /api/vmcp-instances", vmcpInstances.List)
+	mux.HandleFunc("POST /api/vmcp-instances", vmcpInstances.Create)
+	mux.HandleFunc("GET /api/vmcp-instances/{vmcp_instance_id}", vmcpInstances.Get)
+	mux.HandleFunc("POST /api/vmcp-instances/{vmcp_instance_id}/tester/chat", mcpTester.Chat)
+	mux.HandleFunc("PUT /api/vmcp-instances/{vmcp_instance_id}", vmcpInstances.Update)
+	mux.HandleFunc("DELETE /api/vmcp-instances/{vmcp_instance_id}", vmcpInstances.Delete)
+	mux.HandleFunc("POST /api/vmcp-instances/{vmcp_instance_id}/configure", vmcpInstances.Configure)
+	mux.HandleFunc("POST /api/vmcp-instances/{vmcp_instance_id}/reveal", vmcpInstances.Reveal)
+	mux.HandleFunc("POST /api/vmcp-instances/{vmcp_instance_id}/deconfigure", vmcpInstances.Deconfigure)
 
 	// MCP Catalogs (admin only)
 	mux.HandleFunc("GET /api/mcp-catalogs", mcpCatalogs.List)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}", mcpCatalogs.Get)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/categories", mcpCatalogs.ListCategoriesForCatalog)
 	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/refresh", mcpCatalogs.Refresh)
+	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/orphaned-vmcps", mcpCatalogs.ListOrphanedVMCPs)
 	mux.HandleFunc("PUT /api/mcp-catalogs/{catalog_id}", mcpCatalogs.Update)
 
 	// ModelInfoSource (admin only)
@@ -239,6 +251,7 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/entries/{entry_id}", mcpCatalogs.GetEntry)
 	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/entries", mcpCatalogs.CreateEntry)
 	mux.HandleFunc("PUT /api/mcp-catalogs/{catalog_id}/entries/{entry_id}", mcpCatalogs.UpdateEntry)
+	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/reveal", mcpCatalogs.RevealEntry)
 	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/accept-ownership", mcpCatalogs.AcceptEntryOwnership)
 	mux.HandleFunc("DELETE /api/mcp-catalogs/{catalog_id}/entries/{entry_id}", mcpCatalogs.DeleteEntry)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/servers", mcpCatalogs.AdminListServersForEntryInCatalog)
@@ -248,9 +261,6 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/entries/all-servers", mcpCatalogs.AdminListServersForAllEntriesInCatalog)
 	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/generate-tool-previews", mcpCatalogs.GenerateToolPreviews)
 	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/generate-tool-previews/oauth-url", mcpCatalogs.GenerateToolPreviewsOAuthURL)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/{component_id}/generate-tool-previews", mcpCatalogs.GenerateComponentToolPreviews)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/{component_id}/generate-tool-previews/oauth-url", mcpCatalogs.GenerateComponentToolPreviewsOAuthURL)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/refresh-components", mcpCatalogs.RefreshCompositeComponents)
 
 	// MCP Catalog Entry OAuth Credentials (admin only)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/oauth-credentials", mcpCatalogs.GetOAuthCredentials)
@@ -260,24 +270,9 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	// MCPServers within the catalog (admin only, for multi-user MCP servers)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/servers", mcp.ListServer)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}", mcp.GetServer)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers", mcp.CreateServer)
-	mux.HandleFunc("PUT /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}", mcp.UpdateServer)
-	mux.HandleFunc("PUT /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/alias", mcp.UpdateServerAlias)
-	mux.HandleFunc("DELETE /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}", mcp.DeleteServer)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/launch", mcp.LaunchServer)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/check-oauth", mcp.CheckOAuth)
-	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/oauth-url", mcp.GetOAuthURL)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/oauth-debugger/client", mcp.RegisterOAuthDebuggerClient)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/oauth-debugger/authorization-url", mcp.GetOAuthDebuggerAuthorizationURL)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/oauth-debugger/token", mcp.ExchangeOAuthDebuggerToken)
-	mux.HandleFunc("DELETE /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/oauth", mcp.ClearOAuthCredentials)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/details", mcp.GetServerDetails)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/logs", mcp.StreamServerLogs)
 	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/restart", mcp.RestartServerDeployment)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/trigger-update", mcp.TriggerUpdate)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/configure", mcp.ConfigureServer)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/deconfigure", mcp.DeconfigureServer)
-	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/reveal", mcp.Reveal)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/instances", serverInstances.ListServerInstancesForServer)
 	mux.HandleFunc("GET /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/k8s-settings-status", mcp.CheckK8sSettingsStatus)
 	mux.HandleFunc("POST /api/mcp-catalogs/{catalog_id}/servers/{mcp_server_id}/redeploy-with-k8s-settings", mcp.RedeployWithK8sSettings)
@@ -313,13 +308,13 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/entries/{entry_id}", mcpCatalogs.GetEntry)
 	mux.HandleFunc("POST /api/workspaces/{workspace_id}/entries", mcpCatalogs.CreateEntry)
 	mux.HandleFunc("PUT /api/workspaces/{workspace_id}/entries/{entry_id}", mcpCatalogs.UpdateEntry)
+	mux.HandleFunc("POST /api/workspaces/{workspace_id}/entries/{entry_id}/reveal", mcpCatalogs.RevealEntry)
 	mux.HandleFunc("DELETE /api/workspaces/{workspace_id}/entries/{entry_id}", mcpCatalogs.DeleteEntry)
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/entries/{entry_id}/servers", mcpCatalogs.ListServersForEntry)
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/entries/{entry_id}/servers/{mcp_server_id}", mcpCatalogs.GetServerFromEntry)
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/entries/{entry_id}/servers/{mcp_server_id}/details", mcp.GetServerDetails)
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/entries/{entry_id}/servers/{mcp_server_id}/logs", mcp.StreamServerLogs)
 	mux.HandleFunc("POST /api/workspaces/{workspace_id}/entries/{entry_id}/servers/{mcp_server_id}/restart", mcp.RestartServerDeployment)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/entries/{entry_id}/servers/{mcp_server_id}/trigger-update", mcp.TriggerUpdate)
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/entries/{entry_id}/servers/{mcp_server_id}/k8s-settings-status", mcp.CheckK8sSettingsStatus)
 	mux.HandleFunc("POST /api/workspaces/{workspace_id}/entries/{entry_id}/servers/{mcp_server_id}/redeploy-with-k8s-settings", mcp.RedeployWithK8sSettings)
 	mux.HandleFunc("POST /api/workspaces/{workspace_id}/entries/{entry_id}/generate-tool-previews", mcpCatalogs.GenerateToolPreviews)
@@ -333,20 +328,6 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	// Workspace-scoped MCP Servers (PowerUserPlus and higher only)
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/servers", mcp.ListServer)
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/servers/{mcp_server_id}", mcp.GetServer)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers", mcp.CreateServer)
-	mux.HandleFunc("PUT /api/workspaces/{workspace_id}/servers/{mcp_server_id}", mcp.UpdateServer)
-	mux.HandleFunc("PUT /api/workspaces/{workspace_id}/servers/{mcp_server_id}/alias", mcp.UpdateServerAlias)
-	mux.HandleFunc("DELETE /api/workspaces/{workspace_id}/servers/{mcp_server_id}", mcp.DeleteServer)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers/{mcp_server_id}/launch", mcp.LaunchServer)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers/{mcp_server_id}/check-oauth", mcp.CheckOAuth)
-	mux.HandleFunc("GET /api/workspaces/{workspace_id}/servers/{mcp_server_id}/oauth-url", mcp.GetOAuthURL)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers/{mcp_server_id}/oauth-debugger/client", mcp.RegisterOAuthDebuggerClient)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers/{mcp_server_id}/oauth-debugger/authorization-url", mcp.GetOAuthDebuggerAuthorizationURL)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers/{mcp_server_id}/oauth-debugger/token", mcp.ExchangeOAuthDebuggerToken)
-	mux.HandleFunc("DELETE /api/workspaces/{workspace_id}/servers/{mcp_server_id}/oauth", mcp.ClearOAuthCredentials)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers/{mcp_server_id}/configure", mcp.ConfigureServer)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers/{mcp_server_id}/deconfigure", mcp.DeconfigureServer)
-	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers/{mcp_server_id}/reveal", mcp.Reveal)
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/servers/{mcp_server_id}/details", mcp.GetServerDetails)
 	mux.HandleFunc("GET /api/workspaces/{workspace_id}/servers/{mcp_server_id}/logs", mcp.StreamServerLogs)
 	mux.HandleFunc("POST /api/workspaces/{workspace_id}/servers/{mcp_server_id}/restart", mcp.RestartServerDeployment)
@@ -549,7 +530,6 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("GET /api/default-k8s-settings", k8sSettingsHandler.Defaults)
 	mux.HandleFunc("GET /api/k8s-settings", k8sSettingsHandler.Get)
 	mux.HandleFunc("PUT /api/k8s-settings", k8sSettingsHandler.Update)
-	mux.HandleFunc("GET /api/app-k8s-settings", k8sSettingsHandler.GetApp)
 
 	// Image Pull Secrets
 	mux.HandleFunc("GET /api/image-pull-secrets/capability", imagePullSecretsHandler.Capability)
@@ -574,6 +554,11 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	eulaHandler := handlers.NewEulaHandler()
 	mux.HandleFunc("GET /api/eula", eulaHandler.Get)
 	mux.HandleFunc("PUT /api/eula", eulaHandler.Update)
+
+	// Product Telemetry Consent
+	productTelemetryConsentHandler := handlers.NewProductTelemetryConsentHandler(services.ProductTelemetryConsent)
+	mux.HandleFunc("GET /api/product-telemetry-consent", productTelemetryConsentHandler.Get)
+	mux.HandleFunc("PUT /api/product-telemetry-consent", productTelemetryConsentHandler.Update)
 
 	// App Preferences
 	appPrefsHandler := handlers.NewAppPreferencesHandler()
@@ -603,6 +588,9 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 
 	// Model providers
 	mux.HandleFunc("GET /api/model-providers", modelProviders.List)
+	mux.HandleFunc("GET /api/model-proxy", modelProxy.Get)
+	mux.HandleFunc("PUT /api/model-proxy", modelProxy.Update)
+	mux.HandleFunc("GET /api/model-proxy/usage", modelProxy.Usage)
 	mux.HandleFunc("GET /api/model-providers/{model_provider_id}", modelProviders.ByID)
 	mux.HandleFunc("POST /api/model-providers/{model_provider_id}/configure", modelProviders.Configure)
 	mux.HandleFunc("POST /api/model-providers/{model_provider_id}/deconfigure", modelProviders.Deconfigure)
@@ -615,6 +603,10 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("GET /api/auth-providers/{id}", authProviders.ByID)
 	mux.HandleFunc("POST /api/auth-providers/{id}/configure", authProviders.Configure)
 	mux.HandleFunc("POST /api/auth-providers/{id}/deconfigure", authProviders.Deconfigure)
+	mux.HandleFunc("POST /api/auth-providers/{id}/stage", authProviders.Stage)
+	mux.HandleFunc("DELETE /api/auth-providers/{id}/stage", authProviders.Unstage)
+	mux.HandleFunc("POST /api/auth-providers/{id}/verify", authProviders.Verify)
+	mux.HandleFunc("POST /api/auth-providers/{id}/activate", authProviders.Activate)
 	mux.HandleFunc("POST /api/auth-providers/{id}/reveal", authProviders.Reveal)
 
 	// Local auth provider users
@@ -622,6 +614,8 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("POST /api/local-auth/users", localAuth.Create)
 	mux.HandleFunc("POST /api/local-auth/users/{id}/password", localAuth.SetPassword)
 	mux.HandleFunc("DELETE /api/local-auth/users/{id}", localAuth.Delete)
+	mux.HandleFunc("POST /api/local-auth/activate", localAuth.Activate)
+	mux.HandleFunc("POST /api/local-auth/change-password", localAuth.ChangePassword)
 
 	// Bootstrap
 	mux.HandleFunc("GET /api/bootstrap", services.Bootstrapper.IsEnabled)

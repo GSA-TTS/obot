@@ -9,7 +9,6 @@ import (
 	"github.com/obot-platform/obot/apiclient/types"
 	gatewayclient "github.com/obot-platform/obot/pkg/gateway/client"
 	gatewaydb "github.com/obot-platform/obot/pkg/gateway/db"
-	gatewaytypes "github.com/obot-platform/obot/pkg/gateway/types"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	storagescheme "github.com/obot-platform/obot/pkg/storage/scheme"
 	storageservices "github.com/obot-platform/obot/pkg/storage/services"
@@ -21,7 +20,6 @@ import (
 )
 
 func TestConfigurationHasDrifted(t *testing.T) {
-	gatewayClient := newTestGatewayClient(t)
 	tests := []struct {
 		name           string
 		serverManifest types.MCPServerManifest
@@ -29,6 +27,38 @@ func TestConfigurationHasDrifted(t *testing.T) {
 		expectedDrift  bool
 		expectedError  bool
 	}{
+		{
+			name: "drift - static configuration revision changed",
+			serverManifest: types.MCPServerManifest{
+				Runtime:                     types.RuntimeUVX,
+				UVXConfig:                   &types.UVXRuntimeConfig{Package: "test-package"},
+				Config:                      []types.MCPConfig{{Key: "TOKEN", Static: true, Usage: types.Env}},
+				StaticConfigurationRevision: "old",
+			},
+			entryManifest: types.MCPServerCatalogEntryManifest{
+				Runtime:                     types.RuntimeUVX,
+				UVXConfig:                   &types.UVXRuntimeConfig{Package: "test-package"},
+				Config:                      []types.MCPConfig{{Key: "TOKEN", Static: true, Usage: types.Env}},
+				StaticConfigurationRevision: "new",
+			},
+			expectedDrift: true,
+		},
+		{
+			name: "no drift - same static configuration revision",
+			serverManifest: types.MCPServerManifest{
+				Runtime:                     types.RuntimeUVX,
+				UVXConfig:                   &types.UVXRuntimeConfig{Package: "test-package"},
+				Config:                      []types.MCPConfig{{Key: "TOKEN", Static: true, Usage: types.Env}},
+				StaticConfigurationRevision: "current",
+			},
+			entryManifest: types.MCPServerCatalogEntryManifest{
+				Runtime:                     types.RuntimeUVX,
+				UVXConfig:                   &types.UVXRuntimeConfig{Package: "test-package"},
+				Config:                      []types.MCPConfig{{Key: "TOKEN", Static: true, Usage: types.Env}},
+				StaticConfigurationRevision: "current",
+			},
+			expectedDrift: false,
+		},
 		{
 			name: "no drift - identical UVX manifests",
 			serverManifest: types.MCPServerManifest{
@@ -39,7 +69,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 					Package: "test-package",
 					Args:    []string{"arg1", "arg2"},
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:        "test-server",
@@ -49,7 +85,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 					Package: "test-package",
 					Args:    []string{"arg1", "arg2"},
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			expectedDrift: false,
 			expectedError: false,
@@ -64,7 +106,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 					Package: "@test/package",
 					Args:    []string{"--port", "3000"},
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:        "test-server",
@@ -74,7 +122,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 					Package: "@test/package",
 					Args:    []string{"--port", "3000"},
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			expectedDrift: false,
 			expectedError: false,
@@ -92,7 +146,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 					Port:    8080,
 					Path:    "/mcp",
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:        "test-server",
@@ -105,7 +165,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 					Port:    8080,
 					Path:    "/mcp",
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			expectedDrift: false,
 			expectedError: false,
@@ -119,7 +185,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				RemoteConfig: &types.RemoteRuntimeConfig{
 					URL: "https://api.example.com/mcp",
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:        "test-server",
@@ -128,7 +200,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				RemoteConfig: &types.RemoteCatalogConfig{
 					FixedURL: "https://api.example.com/mcp",
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			expectedDrift: false,
 			expectedError: false,
@@ -143,7 +221,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 					Hostname: "api.example.com",
 					URL:      "https://api.example.com:8080/mcp/path",
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:        "test-server",
@@ -152,7 +236,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				RemoteConfig: &types.RemoteCatalogConfig{
 					Hostname: "api.example.com",
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			expectedDrift: false,
 			expectedError: false,
@@ -344,9 +434,17 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				UVXConfig: &types.UVXRuntimeConfig{
 					Package: "test-package",
 				},
-				Env: []types.MCPEnv{
-					{Key: "KEY1", Name: "key1"},
-					{Key: "KEY2", Name: "key2"},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+					{
+						Key:   "KEY2",
+						Name:  "key2",
+						Usage: types.Env,
+					},
 				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
@@ -356,9 +454,17 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				UVXConfig: &types.UVXRuntimeConfig{
 					Package: "test-package",
 				},
-				Env: []types.MCPEnv{
-					{Key: "KEY2", Name: "key2"},
-					{Key: "KEY1", Name: "key1"},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY2",
+						Name:  "key2",
+						Usage: types.Env,
+					},
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
 				},
 			},
 			expectedDrift: false,
@@ -370,17 +476,25 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key"}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key"},
+						Usage:         types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key"}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key"},
+						Usage:         types.Env,
+					},
+				},
 			},
 			expectedDrift: false,
 			expectedError: false,
@@ -391,17 +505,25 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					SecretBinding: &types.MCPSecretBinding{Name: "old-secret", Key: "api-key"}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						SecretBinding: &types.MCPSecretBinding{Name: "old-secret", Key: "api-key"},
+						Usage:         types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					SecretBinding: &types.MCPSecretBinding{Name: "new-secret", Key: "api-key"}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						SecretBinding: &types.MCPSecretBinding{Name: "new-secret", Key: "api-key"},
+						Usage:         types.Env,
+					},
+				},
 			},
 			expectedDrift: true,
 			expectedError: false,
@@ -412,17 +534,25 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "old-key"}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "old-key"},
+						Usage:         types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "new-key"}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "new-key"},
+						Usage:         types.Env,
+					},
+				},
 			},
 			expectedDrift: true,
 			expectedError: false,
@@ -433,22 +563,30 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					Name:          "API Key",
-					Required:      true,
-					Sensitive:     true,
-					SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key", AdminAdded: true}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						Name:          "API Key",
+						Required:      true,
+						Sensitive:     true,
+						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key", AdminAdded: true},
+						Usage:         types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:       "API_KEY",
-					Name:      "API Key",
-					Required:  true,
-					Sensitive: true}},
+				Config: []types.MCPConfig{
+					{
+						Key:       "API_KEY",
+						Name:      "API Key",
+						Required:  true,
+						Sensitive: true,
+						Usage:     types.Env,
+					},
+				},
 			},
 			expectedDrift: false,
 			expectedError: false,
@@ -459,12 +597,16 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "ADMIN_API_KEY",
-					Name:          "Admin API Key",
-					Required:      true,
-					Sensitive:     true,
-					SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key", AdminAdded: true}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "ADMIN_API_KEY",
+						Name:          "Admin API Key",
+						Required:      true,
+						Sensitive:     true,
+						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key", AdminAdded: true},
+						Usage:         types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:      "test-server",
@@ -480,23 +622,31 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					Name:          "API Key",
-					Required:      true,
-					Sensitive:     true,
-					SecretBinding: &types.MCPSecretBinding{Name: "admin-secret", Key: "api-key", AdminAdded: true}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						Name:          "API Key",
+						Required:      true,
+						Sensitive:     true,
+						SecretBinding: &types.MCPSecretBinding{Name: "admin-secret", Key: "api-key", AdminAdded: true},
+						Usage:         types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					Name:          "API Key",
-					Required:      true,
-					Sensitive:     true,
-					SecretBinding: &types.MCPSecretBinding{Name: "catalog-secret", Key: "api-key"}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						Name:          "API Key",
+						Required:      true,
+						Sensitive:     true,
+						SecretBinding: &types.MCPSecretBinding{Name: "catalog-secret", Key: "api-key"},
+						Usage:         types.Env,
+					},
+				},
 			},
 			expectedDrift: true,
 			expectedError: false,
@@ -507,22 +657,30 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:       "API_KEY",
-					Name:      "API Key",
-					Required:  true,
-					Sensitive: true}},
+				Config: []types.MCPConfig{
+					{
+						Key:       "API_KEY",
+						Name:      "API Key",
+						Required:  true,
+						Sensitive: true,
+						Usage:     types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					Name:          "API Key",
-					Required:      true,
-					Sensitive:     true,
-					SecretBinding: &types.MCPSecretBinding{Name: "admin-secret", Key: "api-key", AdminAdded: true}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						Name:          "API Key",
+						Required:      true,
+						Sensitive:     true,
+						SecretBinding: &types.MCPSecretBinding{Name: "admin-secret", Key: "api-key", AdminAdded: true},
+						Usage:         types.Env,
+					},
+				},
 			},
 			expectedDrift: false,
 			expectedError: false,
@@ -533,22 +691,30 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:       "API_KEY",
-					Name:      "API Key",
-					Required:  true,
-					Sensitive: true}},
+				Config: []types.MCPConfig{
+					{
+						Key:       "API_KEY",
+						Name:      "API Key",
+						Required:  true,
+						Sensitive: true,
+						Usage:     types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					Name:          "API Key",
-					Required:      true,
-					Sensitive:     true,
-					SecretBinding: &types.MCPSecretBinding{Name: "catalog-secret", Key: "api-key"}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						Name:          "API Key",
+						Required:      true,
+						Sensitive:     true,
+						SecretBinding: &types.MCPSecretBinding{Name: "catalog-secret", Key: "api-key"},
+						Usage:         types.Env,
+					},
+				},
 			},
 			expectedDrift: true,
 			expectedError: false,
@@ -559,22 +725,30 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:           "API_KEY",
-					Name:          "API Key",
-					Required:      true,
-					Sensitive:     true,
-					SecretBinding: &types.MCPSecretBinding{Name: "catalog-secret", Key: "api-key"}}},
+				Config: []types.MCPConfig{
+					{
+						Key:           "API_KEY",
+						Name:          "API Key",
+						Required:      true,
+						Sensitive:     true,
+						SecretBinding: &types.MCPSecretBinding{Name: "catalog-secret", Key: "api-key"},
+						Usage:         types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:      "test-server",
 				Runtime:   types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{Package: "test-package"},
-				Env: []types.MCPEnv{{
-					Key:       "API_KEY",
-					Name:      "API Key",
-					Required:  true,
-					Sensitive: true}},
+				Config: []types.MCPConfig{
+					{
+						Key:       "API_KEY",
+						Name:      "API Key",
+						Required:  true,
+						Sensitive: true,
+						Usage:     types.Env,
+					},
+				},
 			},
 			expectedDrift: true,
 			expectedError: false,
@@ -586,10 +760,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteRuntimeConfig{
 					URL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:           "Authorization",
 						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "token"},
-					}},
+						Usage:         types.Header,
+					},
 				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
@@ -597,10 +774,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteCatalogConfig{
 					FixedURL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:           "Authorization",
 						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "token"},
-					}},
+						Usage:         types.Header,
+					},
 				},
 			},
 			expectedDrift: false,
@@ -613,10 +793,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteRuntimeConfig{
 					URL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:           "Authorization",
 						SecretBinding: &types.MCPSecretBinding{Name: "old-secret", Key: "token"},
-					}},
+						Usage:         types.Header,
+					},
 				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
@@ -624,10 +807,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteCatalogConfig{
 					FixedURL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:           "Authorization",
 						SecretBinding: &types.MCPSecretBinding{Name: "new-secret", Key: "token"},
-					}},
+						Usage:         types.Header,
+					},
 				},
 			},
 			expectedDrift: true,
@@ -640,10 +826,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteRuntimeConfig{
 					URL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:           "Authorization",
 						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "old-token"},
-					}},
+						Usage:         types.Header,
+					},
 				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
@@ -651,10 +840,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteCatalogConfig{
 					FixedURL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:           "Authorization",
 						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "new-token"},
-					}},
+						Usage:         types.Header,
+					},
 				},
 			},
 			expectedDrift: true,
@@ -667,13 +859,16 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteRuntimeConfig{
 					URL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:           "Authorization",
 						Name:          "Authorization",
 						Required:      true,
 						Sensitive:     true,
 						SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "token", AdminAdded: true},
-					}},
+						Usage:         types.Header,
+					},
 				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
@@ -681,12 +876,15 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteCatalogConfig{
 					FixedURL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:       "Authorization",
 						Name:      "Authorization",
 						Required:  true,
 						Sensitive: true,
-					}},
+						Usage:     types.Header,
+					},
 				},
 			},
 			expectedDrift: false,
@@ -699,12 +897,15 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteRuntimeConfig{
 					URL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:       "Authorization",
 						Name:      "Authorization",
 						Required:  true,
 						Sensitive: true,
-					}},
+						Usage:     types.Header,
+					},
 				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
@@ -712,13 +913,16 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteCatalogConfig{
 					FixedURL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:           "Authorization",
 						Name:          "Authorization",
 						Required:      true,
 						Sensitive:     true,
 						SecretBinding: &types.MCPSecretBinding{Name: "catalog-secret", Key: "token"},
-					}},
+						Usage:         types.Header,
+					},
 				},
 			},
 			expectedDrift: true,
@@ -731,13 +935,16 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteRuntimeConfig{
 					URL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:           "Authorization",
 						Name:          "Authorization",
 						Required:      true,
 						Sensitive:     true,
 						SecretBinding: &types.MCPSecretBinding{Name: "catalog-secret", Key: "token"},
-					}},
+						Usage:         types.Header,
+					},
 				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
@@ -745,12 +952,15 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				Runtime: types.RuntimeRemote,
 				RemoteConfig: &types.RemoteCatalogConfig{
 					FixedURL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{{
+				},
+				Config: []types.MCPConfig{
+					{
 						Key:       "Authorization",
 						Name:      "Authorization",
 						Required:  true,
 						Sensitive: true,
-					}},
+						Usage:     types.Header,
+					},
 				},
 			},
 			expectedDrift: true,
@@ -764,18 +974,12 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				UVXConfig: &types.UVXRuntimeConfig{
 					Package: "test-package",
 				},
-				MultiUserConfig: &types.MultiUserConfig{
-					UserDefinedHeaders: []types.MCPHeader{{Key: "X-User"}},
-				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:    "test-server",
 				Runtime: types.RuntimeUVX,
 				UVXConfig: &types.UVXRuntimeConfig{
 					Package: "test-package",
-				},
-				MultiUserConfig: &types.MultiUserConfig{
-					UserDefinedHeaders: []types.MCPHeader{{Key: "X-User"}},
 				},
 			},
 			expectedDrift: false,
@@ -789,8 +993,12 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				UVXConfig: &types.UVXRuntimeConfig{
 					Package: "test-package",
 				},
-				MultiUserConfig: &types.MultiUserConfig{
-					UserDefinedHeaders: []types.MCPHeader{{Key: "X-User"}},
+				Config: []types.MCPConfig{
+					{
+						Key:         "X-User",
+						Usage:       types.Header,
+						UserAllowed: true,
+					},
 				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
@@ -799,11 +1007,8 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				UVXConfig: &types.UVXRuntimeConfig{
 					Package: "test-package",
 				},
-				MultiUserConfig: &types.MultiUserConfig{
-					UserDefinedHeaders: []types.MCPHeader{{Key: "X-Other"}},
-				},
 			},
-			expectedDrift: true,
+			expectedDrift: false,
 			expectedError: false,
 		},
 		{
@@ -821,11 +1026,8 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				UVXConfig: &types.UVXRuntimeConfig{
 					Package: "test-package",
 				},
-				MultiUserConfig: &types.MultiUserConfig{
-					UserDefinedHeaders: []types.MCPHeader{{Key: "X-User"}},
-				},
 			},
-			expectedDrift: true,
+			expectedDrift: false,
 			expectedError: false,
 		},
 		{
@@ -837,7 +1039,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				UVXConfig: &types.UVXRuntimeConfig{
 					Package: "test-package",
 				},
-				Env: []types.MCPEnv{{Key: "KEY1", Name: "key1"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY1",
+						Name:  "key1",
+						Usage: types.Env,
+					},
+				},
 			},
 			entryManifest: types.MCPServerCatalogEntryManifest{
 				Name:        "test-server",
@@ -846,7 +1054,13 @@ func TestConfigurationHasDrifted(t *testing.T) {
 				UVXConfig: &types.UVXRuntimeConfig{
 					Package: "test-package",
 				},
-				Env: []types.MCPEnv{{Key: "KEY2", Name: "key2"}},
+				Config: []types.MCPConfig{
+					{
+						Key:   "KEY2",
+						Name:  "key2",
+						Usage: types.Env,
+					},
+				},
 			},
 			expectedDrift: true,
 			expectedError: false,
@@ -992,14 +1206,7 @@ func TestConfigurationHasDrifted(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := &v1.MCPServer{
-				Name: "test-server",
-				Spec: v1.MCPServerSpec{
-					UserID:   "test-user",
-					Manifest: tt.serverManifest,
-				},
-			}
-			drifted, err := ConfigurationHasDrifted(t.Context(), gatewayClient, server, tt.entryManifest, false)
+			drifted, err := configurationHasDrifted(tt.serverManifest, tt.entryManifest, false)
 
 			if tt.expectedError {
 				if err == nil {
@@ -1016,58 +1223,6 @@ func TestConfigurationHasDrifted(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestConfigurationHasDriftedRestoresStaticValuesWithoutMutatingServer(t *testing.T) {
-	gatewayClient := newTestGatewayClient(t)
-	referenceManifest := types.MCPServerCatalogEntryManifest{
-		Runtime: types.RuntimeRemote,
-		Env: []types.MCPEnv{
-			{Key: "STATIC_ENV", Value: "stored-env"},
-			{Key: "DYNAMIC_ENV"},
-		},
-		RemoteConfig: &types.RemoteCatalogConfig{
-			FixedURL: "https://api.example.com/mcp",
-			Headers: []types.MCPHeader{
-				{Key: "STATIC_HEADER", Value: "stored-header"},
-				{Key: "EXISTING_HEADER", Value: "configured"},
-			},
-		},
-	}
-	server := &v1.MCPServer{
-		Name: "shared-server",
-		Spec: v1.MCPServerSpec{
-			MCPCatalogID: "default",
-			Manifest: types.MCPServerManifest{
-				Runtime: types.RuntimeRemote,
-				Env: []types.MCPEnv{
-					{Key: "STATIC_ENV"},
-					{Key: "DYNAMIC_ENV"},
-				},
-				RemoteConfig: &types.RemoteRuntimeConfig{
-					URL: "https://api.example.com/mcp",
-					Headers: []types.MCPHeader{
-						{Key: "STATIC_HEADER"},
-						{Key: "EXISTING_HEADER", Value: "configured"},
-					},
-				},
-			},
-		},
-	}
-	require.NoError(t, gatewayClient.UpsertCredential(t.Context(), gatewaytypes.Credential{
-		Context: "default-shared-server",
-		Name:    server.Name,
-		Secrets: map[string]string{
-			"STATIC_ENV":    "stored-env",
-			"STATIC_HEADER": "stored-header",
-		},
-	}))
-
-	drifted, err := ConfigurationHasDrifted(t.Context(), gatewayClient, server, referenceManifest, false)
-	require.NoError(t, err)
-	assert.False(t, drifted)
-	assert.Empty(t, server.Spec.Manifest.Env[0].Value)
-	assert.Empty(t, server.Spec.Manifest.RemoteConfig.Headers[0].Value)
 }
 
 func TestRuntimeSpecificDriftFunctions(t *testing.T) {
@@ -1160,20 +1315,6 @@ func TestRuntimeSpecificDriftFunctions(t *testing.T) {
 		}
 	})
 
-	t.Run("multiUserConfigHasDrifted", func(t *testing.T) {
-		assert.False(t, multiUserConfigHasDrifted(nil, nil))
-		assert.True(t, multiUserConfigHasDrifted(nil, &types.MultiUserConfig{}))
-		assert.True(t, multiUserConfigHasDrifted(&types.MultiUserConfig{}, nil))
-		assert.False(t, multiUserConfigHasDrifted(
-			&types.MultiUserConfig{UserDefinedHeaders: []types.MCPHeader{{Key: "X-User"}}},
-			&types.MultiUserConfig{UserDefinedHeaders: []types.MCPHeader{{Key: "X-User"}}},
-		))
-		assert.True(t, multiUserConfigHasDrifted(
-			&types.MultiUserConfig{UserDefinedHeaders: []types.MCPHeader{{Key: "X-User"}}},
-			&types.MultiUserConfig{UserDefinedHeaders: []types.MCPHeader{{Key: "X-Other"}}},
-		))
-	})
-
 	t.Run("default deny semantics are compared effectively", func(t *testing.T) {
 		assert.False(t, uvxConfigHasDrifted(
 			&types.UVXRuntimeConfig{Package: "test", EgressDomains: []string{"api.example.com"}},
@@ -1243,18 +1384,6 @@ func TestRuntimeSpecificDriftFunctions(t *testing.T) {
 				entryConfig:   &types.RemoteCatalogConfig{FixedURL: "https://api.example.com", TunnelName: "mcptunnel-home"},
 				expectedDrift: true,
 			},
-			{
-				name: "headers match despite order",
-				serverConfig: &types.RemoteRuntimeConfig{Headers: []types.MCPHeader{
-					{Key: "X-Second", Value: "second"},
-					{Key: "X-First", Value: "first"},
-				}},
-				entryConfig: &types.RemoteCatalogConfig{Headers: []types.MCPHeader{
-					{Key: "X-First", Value: "first"},
-					{Key: "X-Second", Value: "second"},
-				}},
-				expectedDrift: false,
-			},
 		}
 
 		for _, tt := range tests {
@@ -1299,9 +1428,8 @@ func TestDetectDriftMarksCatalogEntryDeploymentNeedingUpdateForResources(t *test
 		Requests: types.MCPResourceRequests{CPU: "500m", Memory: "512Mi"},
 	}
 	entry := newMCPServerCatalogEntry(types.MCPServerCatalogEntryManifest{
-		Name:           "Shared Template",
-		Runtime:        types.RuntimeContainerized,
-		ServerUserType: types.ServerUserTypeMultiUser,
+		Name:    "Shared Template",
+		Runtime: types.RuntimeContainerized,
 		ContainerizedConfig: &types.ContainerizedRuntimeConfig{
 			Image: "example/mcp:1.0.0",
 			Port:  8080,
@@ -1342,9 +1470,8 @@ func TestDetectDriftMarksCatalogEntryDeploymentNeedingUpdateForResources(t *test
 
 func TestDetectDriftMarksMultiUserCatalogEntryDeploymentNeedingUpdate(t *testing.T) {
 	entry := newMCPServerCatalogEntry(types.MCPServerCatalogEntryManifest{
-		Name:           "Shared Template",
-		Runtime:        types.RuntimeContainerized,
-		ServerUserType: types.ServerUserTypeMultiUser,
+		Name:    "Shared Template",
+		Runtime: types.RuntimeContainerized,
 		ContainerizedConfig: &types.ContainerizedRuntimeConfig{
 			Image: "example/mcp:2.0.0",
 			Port:  8080,
@@ -1381,9 +1508,8 @@ func TestDetectDriftMarksMultiUserCatalogEntryDeploymentNeedingUpdate(t *testing
 
 func TestDetectDriftClearsMultiUserCatalogEntryDeploymentWhenConfigurationMatches(t *testing.T) {
 	entry := newMCPServerCatalogEntry(types.MCPServerCatalogEntryManifest{
-		Name:           "Shared Template",
-		Runtime:        types.RuntimeContainerized,
-		ServerUserType: types.ServerUserTypeMultiUser,
+		Name:    "Shared Template",
+		Runtime: types.RuntimeContainerized,
 		ContainerizedConfig: &types.ContainerizedRuntimeConfig{
 			Image: "example/mcp:1.0.0",
 			Port:  8080,
@@ -1421,9 +1547,8 @@ func TestDetectDriftClearsMultiUserCatalogEntryDeploymentWhenConfigurationMatche
 
 func TestDetectDriftIgnoresCatalogEntryUpgradeNote(t *testing.T) {
 	entry := newMCPServerCatalogEntry(types.MCPServerCatalogEntryManifest{
-		Name:           "Shared Template",
-		Runtime:        types.RuntimeContainerized,
-		ServerUserType: types.ServerUserTypeMultiUser,
+		Name:    "Shared Template",
+		Runtime: types.RuntimeContainerized,
 		ContainerizedConfig: &types.ContainerizedRuntimeConfig{
 			Image: "example/mcp:1.0.0",
 			Port:  8080,
@@ -1461,19 +1586,20 @@ func TestDetectDriftIgnoresCatalogEntryUpgradeNote(t *testing.T) {
 
 func TestDetectDriftClearsMultiUserCatalogEntryDeploymentWithAdminAddedEnvBinding(t *testing.T) {
 	entry := newMCPServerCatalogEntry(types.MCPServerCatalogEntryManifest{
-		Name:           "Shared Template",
-		Runtime:        types.RuntimeContainerized,
-		ServerUserType: types.ServerUserTypeMultiUser,
+		Name:    "Shared Template",
+		Runtime: types.RuntimeContainerized,
 		ContainerizedConfig: &types.ContainerizedRuntimeConfig{
 			Image: "example/mcp:1.0.0",
 			Port:  8080,
 			Path:  "/mcp",
 		},
-		Env: []types.MCPEnv{{
+		Config: []types.MCPConfig{{
 			Key:       "API_KEY",
 			Name:      "API Key",
 			Required:  true,
-			Sensitive: true}},
+			Sensitive: true,
+			Usage:     types.Env,
+		}},
 	})
 	server := newMCPServer("shared-server")
 	server.Spec.MCPCatalogID = "default"
@@ -1486,12 +1612,14 @@ func TestDetectDriftClearsMultiUserCatalogEntryDeploymentWithAdminAddedEnvBindin
 			Port:  8080,
 			Path:  "/mcp",
 		},
-		Env: []types.MCPEnv{{
+		Config: []types.MCPConfig{{
 			Key:           "API_KEY",
 			Name:          "API Key",
 			Required:      true,
 			Sensitive:     true,
-			SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key", AdminAdded: true}}},
+			SecretBinding: &types.MCPSecretBinding{Name: "bound-secret", Key: "api-key", AdminAdded: true},
+			Usage:         types.Env,
+		}},
 	}
 	server.Status.NeedsUpdate = true
 
@@ -1885,4 +2013,72 @@ func TestEnsureMCPNetworkPolicyDeletesPolicyForUnsupportedRuntime(t *testing.T) 
 		"spec.mcpServerName": server.Name,
 	}))
 	require.Empty(t, policies.Items)
+}
+
+func TestEnsureMCPCatalogIDRecordsScopeForSnapshotBackedServers(t *testing.T) {
+	const entryName = "default-everything-c001b50cc6rtk"
+
+	tests := []struct {
+		name              string
+		entrySpec         v1.MCPServerCatalogEntrySpec
+		existingStatusID  string
+		expectedCatalogID string
+	}{
+		{
+			name:              "catalog-scoped entry records its catalog",
+			entrySpec:         v1.MCPServerCatalogEntrySpec{MCPCatalogName: "default"},
+			existingStatusID:  "",
+			expectedCatalogID: "default",
+		},
+		{
+			name:              "workspace-scoped entry records its workspace",
+			entrySpec:         v1.MCPServerCatalogEntrySpec{PowerUserWorkspaceID: "puw1-test"},
+			existingStatusID:  "",
+			expectedCatalogID: "puw1-test",
+		},
+		{
+			name:              "unscoped entry leaves the status untouched",
+			entrySpec:         v1.MCPServerCatalogEntrySpec{},
+			existingStatusID:  "",
+			expectedCatalogID: "",
+		},
+		{
+			name:              "legacy entry-name status is replaced by the workspace",
+			entrySpec:         v1.MCPServerCatalogEntrySpec{PowerUserWorkspaceID: "puw1-test"},
+			existingStatusID:  entryName,
+			expectedCatalogID: "puw1-test",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := &v1.MCPServerCatalogEntry{
+				Name:      entryName,
+				Namespace: "default",
+				Spec:      tt.entrySpec,
+			}
+			server := &v1.MCPServer{
+				Name:      "ms1-vmcp-component",
+				Namespace: "default",
+				Spec: v1.MCPServerSpec{
+					MCPServerCatalogEntryName: entryName,
+					VMCPInstanceID:            "vmcpi1-test",
+				},
+				Status: v1.MCPServerStatus{MCPCatalogID: tt.existingStatusID},
+			}
+
+			client := newFakeClient(t, entry, server)
+			require.NoError(t, (&Handler{}).EnsureMCPCatalogID(router.Request{
+				Client:    client,
+				Ctx:       t.Context(),
+				Object:    server,
+				Namespace: server.Namespace,
+				Name:      server.Name,
+			}, &router.ResponseWrapper{}))
+
+			var updated v1.MCPServer
+			require.NoError(t, client.Get(t.Context(), router.Key(server.Namespace, server.Name), &updated))
+			assert.Equal(t, tt.expectedCatalogID, updated.Status.MCPCatalogID)
+		})
+	}
 }

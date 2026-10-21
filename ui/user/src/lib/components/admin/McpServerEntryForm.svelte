@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { ADMIN_SESSION_STORAGE } from '$lib/constants';
 	import Loading from '$lib/icons/Loading.svelte';
@@ -9,7 +8,6 @@
 		type MCPCatalogServer,
 		UserService,
 		Group,
-		MCPCompositeDeletionDependencyError,
 		type LaunchServerType,
 		type MCPServerOAuthCredentialStatus,
 		type AccessControlRule,
@@ -20,6 +18,7 @@
 	} from '$lib/services';
 	import {
 		getMCPDisplayName,
+		getManifestConfiguration,
 		getServerTypeLabel,
 		getSource,
 		isMultiUserCatalogEntry,
@@ -34,12 +33,7 @@
 	import OverflowContainer from '../OverflowContainer.svelte';
 	import ResponsiveDialog from '../ResponsiveDialog.svelte';
 	import Select from '../Select.svelte';
-	import CatalogConfigureForm, {
-		type LaunchFormData,
-		type CompositeLaunchFormData,
-		type ComponentLaunchFormData
-	} from '../mcp/CatalogConfigureForm.svelte';
-	import McpMultiDeleteBlockedDialog from '../mcp/McpMultiDeleteBlockedDialog.svelte';
+	import CatalogConfigureForm, { type LaunchFormData } from '../mcp/CatalogConfigureForm.svelte';
 	import McpServerDetails from '../mcp/McpServerDetails.svelte';
 	import McpServerInfo from '../mcp/McpServerInfo.svelte';
 	import McpServerTools from '../mcp/McpServerTools.svelte';
@@ -50,8 +44,6 @@
 	import CatalogServerForm from './CatalogServerForm.svelte';
 	import McpServerEntryTroubleshooting from './McpServerEntryTroubleshooting.svelte';
 	import McpServerInstances from './McpServerInstances.svelte';
-	import AuditLogsPageContent from './audit-logs/AuditLogsPageContent.svelte';
-	import UsageGraphs from './usage/UsageGraphs.svelte';
 	import {
 		CircleAlert,
 		ChevronLeft,
@@ -63,7 +55,6 @@
 		Server,
 		Settings,
 		Trash2,
-		Users,
 		Wrench,
 		ExternalLink,
 		X
@@ -78,6 +69,8 @@
 		server?: MCPCatalogServer;
 		type?: LaunchServerType;
 		readonly?: boolean;
+		disableAddFromTools?: boolean;
+		onAddFromTools?: () => void;
 		onCancel?: () => void;
 		onSubmit?: (id: string, isMultiUserEntry: boolean, message?: string) => void;
 		hasExistingConfigured?: boolean;
@@ -87,6 +80,7 @@
 		configuredServers?: MCPCatalogServer[];
 		allowMultiUserServerConfigurationEdit?: boolean;
 		connectOnly?: boolean;
+		hideTitleBarAction?: boolean;
 	}
 
 	let {
@@ -96,6 +90,8 @@
 		entity = 'catalog',
 		type,
 		readonly,
+		disableAddFromTools,
+		onAddFromTools,
 		onCancel,
 		onSubmit,
 		hasExistingConfigured,
@@ -104,12 +100,12 @@
 		excludeViews,
 		configuredServers,
 		allowMultiUserServerConfigurationEdit,
-		connectOnly
+		connectOnly,
+		hideTitleBarAction = false
 	}: Props = $props();
 
 	let entry = $state(untrack(() => initialEntry));
 	let lastSyncedInitialEntry: MCPCatalogEntry | MCPCatalogServer | undefined = undefined;
-	let prefix = $derived(profile.current.hasAdminAccess?.() ? '/admin' : '');
 
 	$effect(() => {
 		const next = initialEntry;
@@ -142,7 +138,6 @@
 	let source = $derived(entry ? getSource(entry, usersMap) : undefined);
 
 	let deleteServer = $state(false);
-	let deleteConflictError = $state<MCPCompositeDeletionDependencyError | undefined>();
 	let deleteResourceFromRule = $state<{
 		rule: AccessControlRule;
 		resourceId: string;
@@ -161,18 +156,23 @@
 
 	let oauthDialog = $state<ReturnType<typeof ResponsiveDialog>>();
 	let oauthURL = $state<string>();
-	let oauthURLs = $state<Record<string, string>>();
-	let authenticatedComponents = $state<Set<string>>(new Set());
 
 	let staticOauthConfigModal = $state<ReturnType<typeof StaticOAuthConfigureModal>>();
 	let staticOauthStatus = $state<MCPServerOAuthCredentialStatus>();
 
 	let configDialog = $state<ReturnType<typeof CatalogConfigureForm>>();
-	let configureForm = $state<LaunchFormData | CompositeLaunchFormData>();
+	let configureForm = $state<LaunchFormData>();
 	let saving = $state(false);
 	let error = $state<string>();
 	let showButtonInlineError = $state(false);
 	let showUpdateExistingDeploymentsConfirm = $state(false);
+	let showUpdateExistingVmcps = $state(false);
+	let showUpdateExistingConfirm = $derived(
+		showUpdateExistingDeploymentsConfirm || showUpdateExistingVmcps
+	);
+	let hasBothUpdateActions = $derived(
+		showUpdateExistingDeploymentsConfirm && showUpdateExistingVmcps
+	);
 	let selectedDeploymentsToView = $state<MCPCatalogServer[]>([]);
 
 	let serverInstancesLoading = $state(false);
@@ -212,14 +212,18 @@
 			entry.lastUpdated &&
 			new Date(entry.toolPreviewsLastGenerated) < new Date(entry.lastUpdated)
 	);
+	let hasStaticOauth = $derived(
+		entry &&
+			'isCatalogEntry' in entry &&
+			entry.manifest?.runtime === 'remote' &&
+			entry.manifest?.remoteConfig?.staticOAuthRequired
+	);
 	let requiresStaticOauth = $derived(
-		staticOauthStatus
-			? !staticOauthStatus.configured
-			: entry &&
-					'isCatalogEntry' in entry &&
-					entry.manifest?.runtime === 'remote' &&
-					entry.manifest?.remoteConfig?.staticOAuthRequired &&
-					!entry.oauthCredentialConfigured
+		hasStaticOauth &&
+			!(
+				staticOauthStatus?.configured ??
+				(entry && 'isCatalogEntry' in entry ? entry.oauthCredentialConfigured : false)
+			)
 	);
 	let previewToolsOverride = $state<MCPCatalogEntryServerManifest['toolPreview']>();
 
@@ -228,21 +232,15 @@
 			entry && !server
 				? [
 						{ label: 'Overview', view: 'overview' },
+						// Basic users who just connected don't see Configuration.
+						// Catalog entry-deployed multi-user servers also hide it: the configuration is
+						// owned by the upstream catalog entry, not the deployment.
 						...(trueOwner &&
 						(!isCatalogEntryDeployedMultiUserServer(entry) || allowMultiUserServerConfigurationEdit)
 							? [{ label: 'Configuration', view: 'configuration' }]
 							: []),
 						...(belongsToUser ? [{ label: 'Server Details', view: 'server-instances' }] : []),
 						{ label: 'Tools', view: 'tools' },
-						// Basic users who just connected don't see Configuration.
-						// Catalog entry-deployed multi-user servers also hide it: the configuration is
-						// owned by the upstream catalog entry, not the deployment.
-						...(belongsToUser
-							? [
-									{ label: 'Audit Logs', view: 'audit-logs' },
-									{ label: 'Usage', view: 'usage' }
-								]
-							: []),
 						...(isAtLeastPowerUserPlus && trueOwner
 							? [{ label: 'Access Policies', view: 'access-control' }]
 							: []),
@@ -345,6 +343,9 @@
 						refreshToolsDisplay();
 					}
 				})
+				// Nothing awaits this, so a failed load is swallowed here rather than surfacing as an
+				// unhandled rejection. The list stays as it was and the spinner still clears below.
+				.catch(() => {})
 				.finally(() => {
 					if (!cancelled) {
 						serverInstancesLoading = false;
@@ -362,13 +363,6 @@
 			setVirtualPageDisabled(false);
 		} else {
 			setVirtualPageDisabled(true);
-		}
-	});
-
-	// Auto-close OAuth dialog when all components are authenticated
-	$effect(() => {
-		if (oauthURLs !== undefined && Object.keys(oauthURLs).length === 0) {
-			oauthDialog?.close();
 		}
 	});
 
@@ -432,38 +426,11 @@
 	}
 
 	function compileTemporaryInstanceBody() {
-		function isCompositeForm(
-			f: LaunchFormData | CompositeLaunchFormData | undefined
-		): f is CompositeLaunchFormData {
-			return Boolean(f && typeof f === 'object' && 'componentConfigs' in f);
-		}
-
-		if (isCompositeForm(configureForm)) {
-			const body: {
-				componentConfigs: Record<
-					string,
-					{ config: Record<string, string>; url: string; disabled: boolean }
-				>;
-			} = { componentConfigs: {} };
-			const composite = configureForm;
-			for (const [compId, comp] of Object.entries(composite.componentConfigs)) {
-				const cfg: Record<string, string> = {};
-				for (const f of comp.envs || []) if (f.value) cfg[f.key] = f.value;
-				for (const f of comp.headers || []) if (f.value) cfg[f.key] = f.value;
-				body.componentConfigs[compId] = {
-					config: cfg,
-					url: comp.url || '',
-					disabled: !!comp.disabled
-				};
-			}
-			return body;
-		}
 		return {
-			url: (configureForm as LaunchFormData)?.url,
-			config: [
-				...((configureForm as LaunchFormData)?.headers ?? []),
-				...((configureForm as LaunchFormData)?.envs ?? [])
-			].reduce<Record<string, string>>((acc, curr) => {
+			url: configureForm?.url,
+			config: [...(configureForm?.headers ?? []), ...(configureForm?.envs ?? [])].reduce<
+				Record<string, string>
+			>((acc, curr) => {
 				acc[curr.key] = curr.value;
 				return acc;
 			}, {})
@@ -474,50 +441,19 @@
 		if (!entry || !id) return;
 		if (document.visibilityState !== 'visible') return;
 
-		// Composite OAuth case: check if all components have been clicked
-		if (oauthURLs && Object.keys(oauthURLs).length > 0) {
-			const pendingComponents = Object.keys(oauthURLs).filter(
-				(componentId) => !authenticatedComponents.has(componentId)
-			);
-
-			// If there are still components that haven't been clicked, keep waiting
-			if (pendingComponents.length > 0) {
-				return;
-			}
-
-			// All components have been clicked; stop listening and regenerate tool previews
-			document.removeEventListener('visibilitychange', handleVisibilityChange);
-			handleLaunchTemporaryInstance();
-			return;
-		}
-
-		// Single-server OAuth (string oauthURL) or non-composite case
 		document.removeEventListener('visibilitychange', handleVisibilityChange);
 		handleLaunchTemporaryInstance();
 	}
 
-	function handleTemporaryInstanceOauth(oauthUrlToUse: string | Record<string, string>) {
+	function handleTemporaryInstanceOauth(oauthUrlToUse: string) {
 		if (!oauthUrlToUse) return;
 
-		// Check if it's a single OAuth URL (string) or multiple (map)
-		if (typeof oauthUrlToUse === 'string') {
-			oauthURL = oauthUrlToUse;
-			oauthURLs = undefined;
-		} else {
-			// It's a map of component IDs to OAuth URLs
-			oauthURLs = oauthUrlToUse;
-			oauthURL = undefined;
-		}
+		oauthURL = oauthUrlToUse;
 
 		oauthDialog?.open();
 
 		// add visibility change listener
 		document.addEventListener('visibilitychange', handleVisibilityChange);
-	}
-
-	function markComponentAuthenticated(componentId: string) {
-		// Create new Set to trigger reactivity in Svelte 5
-		authenticatedComponents = new Set([...authenticatedComponents, componentId]);
 	}
 
 	async function handleLaunchTemporaryInstance(showInlineError = false) {
@@ -551,7 +487,6 @@
 
 			if (result && entry) {
 				previewToolsOverride = result.manifest?.toolPreview;
-				oauthURLs = undefined;
 				oauthURL = undefined;
 				oauthDialog?.close();
 				configDialog?.close();
@@ -571,7 +506,7 @@
 								entryID,
 								body as unknown as { config?: Record<string, string>; url?: string }
 							);
-				if (oauthResponse) {
+				if (typeof oauthResponse === 'string') {
 					configDialog?.close();
 					handleTemporaryInstanceOauth(oauthResponse);
 				}
@@ -587,60 +522,19 @@
 	function handleInitTemporaryInstance() {
 		if (!entry) return;
 
-		if (entry.manifest?.runtime === 'composite') {
-			const comps = entry.manifest?.compositeConfig?.componentServers || [];
-			const componentConfigs: Record<string, ComponentLaunchFormData> = {};
-			for (const c of comps) {
-				// Use catalogEntryID when present (catalog-based component), otherwise fall
-				// back to mcpServerID (multi-user server component). Skip only if we have
-				// neither identifier.
-				const id = c.catalogEntryID || c.mcpServerID;
-				if (!id) continue;
-
-				const rc = c.manifest?.remoteConfig as Record<string, unknown> | undefined;
-				const hasHostname = Boolean(rc && 'hostname' in rc && rc.hostname);
-				const isMultiUser = Boolean(c.mcpServerID && !c.catalogEntryID);
-				componentConfigs[id] = isMultiUser
-					? {
-							// Multi-user server components are configured at the org/admin level;
-							// for composite previews we only expose the enable/disable toggle.
-							name: c.manifest?.name || id,
-							icon: c.manifest?.icon,
-							disabled: false,
-							isMultiUser: true
-						}
-					: {
-							envs: (c.manifest?.env || []).map((e) => ({ ...e, value: '' })),
-							headers: (c.manifest?.remoteConfig?.headers || []).map((h) => ({ ...h, value: '' })),
-							...(hasHostname
-								? { hostname: (rc as Record<string, unknown>).hostname as string, url: '' }
-								: {}),
-							name: c.manifest?.name || id,
-							icon: c.manifest?.icon,
-							disabled: false
-						};
-			}
-			configureForm = { componentConfigs } as CompositeLaunchFormData;
-
-			// Always open the composite configuration dialog so the user can
-			// enable/disable individual components before generating previews,
-			// even if no component has required config fields.
-			configDialog?.open();
-			return;
-		}
-
 		const hostname =
 			entry?.manifest?.remoteConfig &&
 			'hostname' in entry.manifest.remoteConfig &&
 			entry.manifest.remoteConfig.hostname;
 
+		const { env, headers } = getManifestConfiguration(entry.manifest);
 		configureForm = {
 			name: '',
-			envs: entry.manifest?.env?.map((env) => ({
+			envs: env.map((env) => ({
 				...env,
 				value: ''
 			})),
-			headers: entry.manifest?.remoteConfig?.headers?.map((header) => ({
+			headers: headers.map((header) => ({
 				...header,
 				value: ''
 			})),
@@ -676,7 +570,7 @@
 		if (onCancel) {
 			onCancel();
 		} else {
-			goto(`${prefix}/mcp-catalog`);
+			goto('/mcp-servers?view=entries');
 		}
 	}
 
@@ -692,6 +586,21 @@
 		if (selectedDeploymentsToView.length === 0) {
 			selectedDeploymentsToView.push(resolvedConfiguredServers[0]);
 		}
+	}
+
+	function closeUpdateExistingConfirm() {
+		showUpdateExistingDeploymentsConfirm = false;
+		showUpdateExistingVmcps = false;
+	}
+
+	function goToUpdateDeployments() {
+		closeUpdateExistingConfirm();
+		handleSelectionChange('server-instances');
+	}
+
+	function goToUpdateVmcps() {
+		closeUpdateExistingConfirm();
+		goto(`/vmcps?components=${entry?.id}`);
 	}
 
 	async function reloadConfiguredServers() {
@@ -711,10 +620,7 @@
 
 	function handleSubmit(updatedEntry: MCPCatalogEntry | MCPCatalogServer, message?: string) {
 		if (onSubmit) {
-			const isMultiUserEntry =
-				'isCatalogEntry' in updatedEntry
-					? updatedEntry.manifest?.serverUserType === 'multiUser'
-					: true;
+			const isMultiUserEntry = !('isCatalogEntry' in updatedEntry);
 			onSubmit(updatedEntry.id, isMultiUserEntry, message);
 		} else {
 			entry = updatedEntry;
@@ -724,13 +630,20 @@
 					entity === 'workspace'
 						? UserService.listWorkspaceMCPServersForEntry
 						: AdminService.listMCPServersForEntry;
-				listInstances(id, updatedEntry.id).then((response) => {
-					resolvedConfiguredServers = response.filter((s) => !s.deleted);
-					refreshToolsDisplay();
-					if (response.length > 0 && response.some((instance) => instance)) {
-						showUpdateExistingDeploymentsConfirm = true;
-					}
-				});
+				listInstances(id, updatedEntry.id)
+					.then((response) => {
+						resolvedConfiguredServers = response.filter((s) => !s.deleted);
+						refreshToolsDisplay();
+
+						if (response.length > 0) {
+							const belongsToVmcps = response.filter(
+								(s) => !s.deleted && !!(s.vmcpComponentID || s.vmcpID || s.vmcpInstanceID)
+							);
+							showUpdateExistingVmcps = belongsToVmcps.length > 0;
+							showUpdateExistingDeploymentsConfirm = response.length > belongsToVmcps.length;
+						}
+					})
+					.catch(() => {});
 			}
 			if (message) {
 				success.add(message);
@@ -746,7 +659,7 @@
 		selected === 'configuration' &&
 		readonly}
 >
-	{#if entry}
+	{#if entry && !hideTitleBarAction}
 		<div class="flex items-center justify-between gap-4">
 			<div class="flex items-center gap-2">
 				<div class="icon">
@@ -796,14 +709,21 @@
 		</div>
 	{/if}
 
-	{#if requiresStaticOauth}
-		<div class="flex items-center gap-3 rounded-lg border border-warning bg-warning/10 p-4">
-			<Info class="size-5 shrink-0 text-warning" />
+	{#if hasStaticOauth}
+		<div
+			class="flex items-center gap-3 rounded-lg border p-4 {requiresStaticOauth
+				? 'border-warning bg-warning/10'
+				: 'border-base-300'}"
+		>
+			<Info class="size-5 shrink-0 {requiresStaticOauth ? 'text-warning' : ''}" />
 			<div class="flex-1">
-				<p class="text-sm font-medium">Requires Oauth Config</p>
+				<p class="text-sm font-medium">
+					{requiresStaticOauth ? 'Requires OAuth Config' : 'OAuth credentials configured'}
+				</p>
 				<p class="text-muted-foreground mt-1 text-xs">
-					This MCP server is missing static client ID and secret credentials. Click the button to
-					get started.
+					{requiresStaticOauth
+						? 'This MCP server is missing static client ID and secret credentials. Click the button to get started.'
+						: 'Manage or clear the static OAuth credentials for this MCP server.'}
 				</p>
 			</div>
 			<button
@@ -812,7 +732,7 @@
 				disabled={!canConfigureOAuthCredentials}
 			>
 				<Settings class="size-4" />
-				Configure OAuth Credentials
+				{requiresStaticOauth ? 'Configure OAuth Credentials' : 'Manage OAuth Credentials'}
 			</button>
 		</div>
 	{/if}
@@ -916,10 +836,6 @@
 			{@render toolsView()}
 		{:else if selected === 'access-control'}
 			{@render accessControlView()}
-		{:else if selected === 'usage'}
-			{@render usageView()}
-		{:else if selected === 'audit-logs'}
-			{@render auditLogsView()}
 		{:else if selected === 'server-instances'}
 			{#if entry && 'isCatalogEntry' in entry && server}
 				<McpServerDetails catalogEntry={entry} {server} />
@@ -993,15 +909,13 @@
 					if (!entry) return;
 					setLastVisitedMcpServer();
 
-					const isAdminRoute = window.location.pathname.includes('/admin/');
-
 					let url: string;
 					if (entity === 'workspace') {
-						url = !isAdminRoute
-							? `/mcp-access-policies/${d.id}`
-							: `/admin/mcp-access-policies/w/${id}/r/${d.id}`;
+						url = !profile.current.hasAdminAccess?.()
+							? `/mcp-servers/access-policies/${d.id}`
+							: `/mcp-servers/access-policies/w/${id}/r/${d.id}`;
 					} else {
-						url = `/admin/mcp-access-policies/${d.id}`;
+						url = `/mcp-servers/access-policies/${d.id}`;
 					}
 					openUrl(url, isCtrlClick);
 				}}
@@ -1050,75 +964,6 @@
 	{/await}
 {/snippet}
 
-{#snippet usageView()}
-	{#if entry}
-		{@const isMultiUserServer = !!page.url.pathname.match(/\/mcp-servers\/s.*$/)?.[0]}
-		{@const isSingleUserServer =
-			!isMultiUserServer && ['npx', 'uvx', 'containerized'].includes(entry.manifest.runtime)}
-		{@const isRemoteServer = !isMultiUserServer && entry.manifest.runtime === 'remote'}
-
-		{@const mcpServerDisplayName = entry.manifest?.name ?? null}
-		{@const entryId = entry.id ?? null}
-
-		<div class="mt-4 flex min-h-full flex-col gap-8 pb-8">
-			<UsageGraphs
-				mcpId={isMultiUserServer ? entryId : null}
-				mcpServerCatalogEntryName={isSingleUserServer || isRemoteServer ? entryId : null}
-				{mcpServerDisplayName}
-			/>
-		</div>
-	{/if}
-{/snippet}
-
-{#snippet auditLogsView()}
-	{#if entry}
-		{@const isMultiUserServer = 'serverUserType' in entry && entry.serverUserType === 'multiUser'}
-		{@const isSingleUserServer =
-			!isMultiUserServer && ['npx', 'uvx', 'containerized'].includes(entry.manifest.runtime)}
-		{@const isRemoteServer = !isMultiUserServer && entry.manifest.runtime === 'remote'}
-
-		{@const mcpServerDisplayName = entry.manifest?.name ?? null}
-		{@const entryId = entry.id ?? null}
-		{@const mcpCatalogEntryId = 'catalogEntryID' in entry ? entry?.catalogEntryID : null}
-		{@const mcpServerCatalogEntryName =
-			isMultiUserServer && mcpCatalogEntryId
-				? mcpCatalogEntryId
-				: isSingleUserServer || isRemoteServer
-					? entryId
-					: null}
-		<div class="mt-4 flex flex-1 flex-col gap-8 pb-8">
-			<!-- temporary filter mcp server by name and catalog entry id-->
-			<AuditLogsPageContent
-				mcpId={isMultiUserServer ? entryId : server ? server.id : null}
-				{mcpServerCatalogEntryName}
-				{mcpServerDisplayName}
-				{entity}
-			>
-				{#snippet emptyContent()}
-					<div class="mt-12 flex w-md flex-col items-center gap-4 self-center text-center">
-						<Users class="text-muted-content size-24 opacity-50" />
-						<h4 class="text-muted-content text-lg font-semibold">No recent audit logs</h4>
-						<p class="text-muted-content text-sm font-light">
-							This server has not had any active usage in the last 7 days.
-						</p>
-						{#if entryId || mcpCatalogEntryId}
-							{@const param = entryId ? 'mcpId=' + entryId : 'entryId=' + mcpCatalogEntryId}
-							<p class="text-muted-content text-sm font-light">
-								See more usage details in the server's <a
-									href={resolve(`/admin/audit-logs?${param}`)}
-									class="text-link"
-								>
-									Audit Logs
-								</a>.
-							</p>
-						{/if}
-					</div>
-				{/snippet}
-			</AuditLogsPageContent>
-		</div>
-	{/if}
-{/snippet}
-
 {#snippet filtersView()}
 	{#if listFilters}
 		{#await listFilters}
@@ -1138,7 +983,7 @@
 					]}
 					onClickRow={(d, isCtrlClick) => {
 						setLastVisitedMcpServer();
-						const url = `/admin/filters/${d.id}`;
+						const url = `/mcp-servers/filters/${d.id}`;
 						openUrl(url, isCtrlClick);
 					}}
 				>
@@ -1278,54 +1123,73 @@
 			<McpServerTools
 				{entry}
 				server={server ?? deploymentToDisplayTools}
-				showToolNameIssues={entry.manifest?.runtime === 'composite'}
+				showToolNameIssues={false}
 				previewOverride={previewToolsOverride}
 			>
 				{#snippet noToolsContent()}
-					<div
-						class="mt-12 flex w-lg max-w-full flex-col items-center gap-4 self-center text-center"
-					>
-						<Wrench class="text-muted-content size-24 opacity-50" />
-						{#if !entry || (entry && (readonly || server || deploymentToDisplayTools || connectOnly))}
-							<h4 class="text-muted-content text-lg font-semibold">No tools</h4>
-							<p class="text-muted-content text-sm font-light">
-								Looks like this MCP server doesn't have any tools available currently.
+					{#if onAddFromTools}
+						<div class="mt-8 paper max-w-sm self-center items-center justify-items-center">
+							<div class="rounded-full bg-primary/10 p-2 w-fit">
+								<Wrench class="text-primary size-6" />
+							</div>
+							<h4 class="text-lg font-semibold">Tool Info Unavailable</h4>
+							<p class="text-sm font-light text-center">
+								Connect to this server to get an up-to-date list of the tools.
 							</p>
-						{:else if !readonly && !connectOnly}
-							<h4 class="text-muted-content text-lg font-semibold">No tools</h4>
-							{#if !isMultiTenant}
-								<button
-									class="btn btn-primary flex items-center gap-1 text-sm"
-									onclick={handleInitTemporaryInstance}
-									disabled={saving}
-								>
-									{#if saving}
-										<Loading class="size-4" />
-									{:else}
-										Populate Tool Preview
-									{/if}
-								</button>
-							{/if}
-							{#if !error}
-								<p class="text-muted-content text-sm font-light">
-									{#if isMultiTenant}
-										Tools will populate when a server is deployed for the catalog entry.
-									{:else if type === 'remote'}
-										Click above to connect to the remote MCP server to populate capabilities and
-										tools for preview.
-									{:else}
-										Click above to set up a temporary instance that will populate capabilities and
-										tools for preview. Otherwise, tools will populate when the user first deploys a
-										server for the catalog entry.
-									{/if}
-								</p>
-							{/if}
-						{/if}
-					</div>
-					{#if error && showButtonInlineError}
-						<div class="mt-4 w-full">
-							{@render errorSnippet()}
+							<button
+								class="btn btn-primary w-full flex items-center gap-1 text-sm"
+								onclick={onAddFromTools}
+								disabled={disableAddFromTools}
+							>
+								{disableAddFromTools ? 'Already added to vMCP' : 'Add to vMCP'}
+							</button>
 						</div>
+					{:else}
+						<div
+							class="mt-12 flex w-lg max-w-full flex-col items-center gap-4 self-center text-center"
+						>
+							<Wrench class="text-muted-content size-24 opacity-50" />
+							{#if !entry || (entry && (readonly || server || deploymentToDisplayTools || connectOnly))}
+								<h4 class="text-muted-content text-lg font-semibold">No tools</h4>
+								<p class="text-muted-content text-sm font-light">
+									Looks like this MCP server doesn't have any tools available currently.
+								</p>
+							{:else if !readonly && !connectOnly}
+								<h4 class="text-muted-content text-lg font-semibold">No tools</h4>
+								{#if !isMultiTenant}
+									<button
+										class="btn btn-primary flex items-center gap-1 text-sm"
+										onclick={handleInitTemporaryInstance}
+										disabled={saving}
+									>
+										{#if saving}
+											<Loading class="size-4" />
+										{:else}
+											Populate Tool Preview
+										{/if}
+									</button>
+								{/if}
+								{#if !error}
+									<p class="text-muted-content text-sm font-light">
+										{#if isMultiTenant}
+											Tools will populate when a server is deployed for the catalog entry.
+										{:else if type === 'remote'}
+											Click above to connect to the remote MCP server to populate capabilities and
+											tools for preview.
+										{:else}
+											Click above to set up a temporary instance that will populate capabilities and
+											tools for preview. Otherwise, tools will populate when the user first deploys
+											a server for the catalog entry.
+										{/if}
+									</p>
+								{/if}
+							{/if}
+						</div>
+						{#if error && showButtonInlineError}
+							<div class="mt-4 w-full">
+								{@render errorSnippet()}
+							</div>
+						{/if}
 					{/if}
 				{/snippet}
 			</McpServerTools>
@@ -1357,22 +1221,14 @@
 	show={deleteServer}
 	onsuccess={async () => {
 		if (!id || !entry) return;
-		const url = `${prefix}/mcp-catalog` as `/${string}`;
+		const url = '/mcp-servers' as `/${string}`;
 
 		if (!('isCatalogEntry' in entry)) {
 			const workspaceID = entry.powerUserWorkspaceID || (entity === 'workspace' ? id : undefined);
 			const deleteServerFn = workspaceID
 				? UserService.deleteWorkspaceMCPCatalogServer
 				: AdminService.deleteMCPCatalogServer;
-			try {
-				await deleteServerFn(workspaceID || id, entry.id);
-			} catch (error) {
-				if (error instanceof MCPCompositeDeletionDependencyError) {
-					deleteConflictError = error;
-					return;
-				}
-				throw error;
-			}
+			await deleteServerFn(workspaceID || id, entry.id);
 			goto(url);
 		} else {
 			const deleteCatalogEntryFn =
@@ -1384,14 +1240,6 @@
 		}
 	}}
 	oncancel={() => (deleteServer = false)}
-/>
-
-<McpMultiDeleteBlockedDialog
-	show={!!deleteConflictError}
-	error={deleteConflictError}
-	onClose={() => {
-		deleteConflictError = undefined;
-	}}
 />
 
 <Confirm
@@ -1457,44 +1305,12 @@
 		</div>
 	{:else if oauthURL}
 		<!-- Single server OAuth -->
-		<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- external OAuth URL -->
-		<a href={oauthURL} rel="external" target="_blank" class="btn btn-primary text-center"
-			>Authenticate</a
+		<a
+			href={oauthURL}
+			rel="external noopener noreferrer"
+			target="_blank"
+			class="btn btn-primary text-center">Authenticate</a
 		>
-	{:else if oauthURLs && Object.keys(oauthURLs).length > 0}
-		<!-- Composite server OAuth - multiple components -->
-		<div class="flex flex-col gap-3">
-			<p class="text-muted-content text-sm">
-				Multiple components require authentication. Please authenticate each component below:
-			</p>
-			{#each Object.entries(oauthURLs).filter(([id]) => !authenticatedComponents.has(id)) as [componentId, url] (componentId)}
-				{@const component = entry?.manifest?.compositeConfig?.componentServers?.find(
-					(c) => c.catalogEntryID === componentId || c.mcpServerID === componentId
-				)}
-				{@const componentName = component?.manifest?.name || componentId}
-				<div class="flex items-center justify-between gap-2 rounded border border-base-400 p-3">
-					<div class="flex items-center gap-2">
-						{#if component?.manifest?.icon}
-							<img src={component.manifest.icon} alt={componentName} class="size-6 shrink-0" />
-						{/if}
-						<span class="text-sm font-medium">{componentName}</span>
-					</div>
-					<button
-						type="button"
-						class="btn btn-primary text-sm"
-						onclick={() => {
-							markComponentAuthenticated(componentId);
-							const newWindow = window.open(url, '_blank', 'noopener,noreferrer');
-							if (newWindow) {
-								newWindow.opener = null;
-							}
-						}}
-					>
-						Authenticate
-					</button>
-				</div>
-			{/each}
-		</div>
 	{/if}
 </ResponsiveDialog>
 
@@ -1540,30 +1356,76 @@
 {/snippet}
 
 <Confirm
-	title="Update Deployments"
-	msg="Update existing deployments now?"
-	show={showUpdateExistingDeploymentsConfirm}
-	onsuccess={() => {
-		showUpdateExistingDeploymentsConfirm = false;
-		handleSelectionChange('server-instances');
-	}}
-	oncancel={() => {
-		showUpdateExistingDeploymentsConfirm = false;
-	}}
+	title={hasBothUpdateActions
+		? 'Updates Required'
+		: showUpdateExistingDeploymentsConfirm
+			? 'Update Deployments'
+			: 'Update vMCPs'}
+	msg={hasBothUpdateActions
+		? 'Existing deployments and vMCPs need to be updated.'
+		: showUpdateExistingDeploymentsConfirm
+			? 'Update existing deployments now?'
+			: 'Update existing vMCPs now?'}
+	show={showUpdateExistingConfirm}
+	onsuccess={hasBothUpdateActions
+		? undefined
+		: showUpdateExistingDeploymentsConfirm
+			? goToUpdateDeployments
+			: goToUpdateVmcps}
+	oncancel={closeUpdateExistingConfirm}
 	cancelText="Skip"
-	submitText="Go to Server Details"
+	submitText={showUpdateExistingDeploymentsConfirm ? 'Go to Server Details' : 'Go to vMCPs'}
+	hideCancelButton={hasBothUpdateActions}
 	type="info"
 >
 	{#snippet note()}
-		<p class="text-sm font-light">
-			There are existing deployment(s) of this MCP server that need to be updated. Would you like to
-			take care of this now?
-		</p>
+		{#if hasBothUpdateActions}
+			<p class="text-sm font-light">
+				There are existing deployment(s) and vMCP(s) using this MCP server that need to be updated.
+				Would you like to take care of this now?
+			</p>
 
-		{#if profile.current.hasAdminAccess?.()}
-			<p class="text-xs font-light mt-2 text-muted-content">
-				Deployments can also be updated at a later time through the "Server Details" tab or through
-				the MCP Management "Deployments" page.
+			{#if profile.current.hasAdminAccess?.()}
+				<p class="text-xs font-light mt-2 text-muted-content">
+					Deployments can also be updated at a later time through the "Server Details" tab or
+					through the MCP Management "Deployments" page.
+				</p>
+			{/if}
+
+			<div
+				class="mt-4 flex w-full flex-col items-center justify-center gap-2 md:flex-row md:justify-end"
+			>
+				<button
+					type="button"
+					onclick={goToUpdateDeployments}
+					class="btn btn-primary flex flex-1 justify-center p-2 w-full"
+				>
+					Go to Server Details
+				</button>
+				<button
+					type="button"
+					onclick={goToUpdateVmcps}
+					class="btn btn-primary flex flex-1 justify-center p-2 w-full"
+				>
+					Go to vMCPs
+				</button>
+			</div>
+		{:else if showUpdateExistingDeploymentsConfirm}
+			<p class="text-sm font-light">
+				There are existing deployment(s) of this MCP server that need to be updated. Would you like
+				to take care of this now?
+			</p>
+
+			{#if profile.current.hasAdminAccess?.()}
+				<p class="text-xs font-light mt-2 text-muted-content">
+					Deployments can also be updated at a later time through the "Server Details" tab or
+					through the MCP Management "Deployments" page.
+				</p>
+			{/if}
+		{:else}
+			<p class="text-sm font-light">
+				There are existing vMCP(s) using this MCP server that need to be updated. Would you like to
+				take care of this now?
 			</p>
 		{/if}
 	{/snippet}

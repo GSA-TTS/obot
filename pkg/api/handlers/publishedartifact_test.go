@@ -413,18 +413,6 @@ func TestConvertPublishedArtifact(t *testing.T) {
 	}
 }
 
-func TestConvertPublishedArtifact_ZeroValue(t *testing.T) {
-	input := &v1.PublishedArtifact{}
-	result := convertPublishedArtifactForRequester(input, &kuser.DefaultInfo{UID: "user-123"}, false)
-
-	if result.Name != "" {
-		t.Errorf("Name = %q, want empty", result.Name)
-	}
-	if result.LatestVersion != 0 {
-		t.Errorf("LatestVersion = %d, want 0", result.LatestVersion)
-	}
-}
-
 func TestValidatePublishedArtifactSubjects(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -434,36 +422,60 @@ func TestValidatePublishedArtifactSubjects(t *testing.T) {
 		{
 			name: "valid user and group",
 			subjects: []types.Subject{
-				{Type: types.SubjectTypeUser, ID: "user1"},
-				{Type: types.SubjectTypeGroup, ID: "group1"},
+				{
+					Type: types.SubjectTypeUser,
+					ID:   "user1",
+				},
+				{
+					Type: types.SubjectTypeGroup,
+					ID:   "group1",
+				},
 			},
 		},
 		{
 			name: "valid wildcard",
 			subjects: []types.Subject{
-				{Type: types.SubjectTypeSelector, ID: "*"},
+				{
+					Type: types.SubjectTypeSelector,
+					ID:   "*",
+				},
 			},
 		},
 		{
 			name: "wildcard mixed",
 			subjects: []types.Subject{
-				{Type: types.SubjectTypeSelector, ID: "*"},
-				{Type: types.SubjectTypeUser, ID: "user1"},
+				{
+					Type: types.SubjectTypeSelector,
+					ID:   "*",
+				},
+				{
+					Type: types.SubjectTypeUser,
+					ID:   "user1",
+				},
 			},
 			wantErr: "wildcard subject",
 		},
 		{
 			name: "wildcard non selector",
 			subjects: []types.Subject{
-				{Type: types.SubjectTypeUser, ID: "*"},
+				{
+					Type: types.SubjectTypeUser,
+					ID:   "*",
+				},
 			},
 			wantErr: "wildcard subject (*) must use selector type",
 		},
 		{
 			name: "duplicate subject",
 			subjects: []types.Subject{
-				{Type: types.SubjectTypeUser, ID: "user1"},
-				{Type: types.SubjectTypeUser, ID: "user1"},
+				{
+					Type: types.SubjectTypeUser,
+					ID:   "user1",
+				},
+				{
+					Type: types.SubjectTypeUser,
+					ID:   "user1",
+				},
 			},
 			wantErr: "duplicate subject",
 		},
@@ -645,8 +657,14 @@ func TestPublishedArtifactCreate_InheritsSubjectsFromPreviousVersion(t *testing.
 
 	gotSubjects := artifact.Status.Versions[1].Subjects
 	wantSubjects := []types.Subject{
-		{Type: types.SubjectTypeUser, ID: "user-a"},
-		{Type: types.SubjectTypeGroup, ID: "group-b"},
+		{
+			Type: types.SubjectTypeUser,
+			ID:   "user-a",
+		},
+		{
+			Type: types.SubjectTypeGroup,
+			ID:   "group-b",
+		},
 	}
 	if len(gotSubjects) != len(wantSubjects) {
 		t.Fatalf("v2 subjects len = %d, want %d", len(gotSubjects), len(wantSubjects))
@@ -736,14 +754,44 @@ func TestValidateZIPEntryName(t *testing.T) {
 		entry   string
 		wantErr string
 	}{
-		{name: "valid simple", entry: "SKILL.md"},
-		{name: "valid nested", entry: "scripts/run.sh"},
-		{name: "absolute unix", entry: "/etc/passwd", wantErr: "absolute path"},
-		{name: "traversal unix", entry: "../etc/passwd", wantErr: "path traversal"},
-		{name: "traversal nested", entry: "foo/../../etc/passwd", wantErr: "path traversal"},
-		{name: "windows backslash traversal", entry: `..\..\evil.sh`, wantErr: "path traversal"},
-		{name: "windows drive letter", entry: `C:\tmp\evil.sh`, wantErr: "absolute path"},
-		{name: "windows drive slash", entry: "C:/tmp/evil.sh", wantErr: "absolute path"},
+		{
+			name:  "valid simple",
+			entry: "SKILL.md",
+		},
+		{
+			name:  "valid nested",
+			entry: "scripts/run.sh",
+		},
+		{
+			name:    "absolute unix",
+			entry:   "/etc/passwd",
+			wantErr: "absolute path",
+		},
+		{
+			name:    "traversal unix",
+			entry:   "../etc/passwd",
+			wantErr: "path traversal",
+		},
+		{
+			name:    "traversal nested",
+			entry:   "foo/../../etc/passwd",
+			wantErr: "path traversal",
+		},
+		{
+			name:    "windows backslash traversal",
+			entry:   `..\..\evil.sh`,
+			wantErr: "path traversal",
+		},
+		{
+			name:    "windows drive letter",
+			entry:   `C:\tmp\evil.sh`,
+			wantErr: "absolute path",
+		},
+		{
+			name:    "windows drive slash",
+			entry:   "C:/tmp/evil.sh",
+			wantErr: "absolute path",
+		},
 	}
 
 	for _, tt := range tests {

@@ -2,12 +2,14 @@ package server
 
 import (
 	"bufio"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -129,6 +131,7 @@ func (s *Server) Wrap(f api.HandlerFunc) http.HandlerFunc {
 					Path:   "/",
 					MaxAge: -1,
 				})
+				auth.ClearAuthProviderVerifyCookie(rw)
 				// Refresh the page so that the cookie deletes.
 				http.Redirect(rw, req, req.URL.String(), http.StatusFound)
 				return
@@ -189,6 +192,18 @@ func (s *Server) Wrap(f api.HandlerFunc) http.HandlerFunc {
 			for _, setCookie := range user.GetExtra()["set-cookies"] {
 				rw.Header().Add("Set-Cookie", setCookie)
 			}
+		}
+
+		// Enforced after audit logging is installed and refreshed provider cookies are replayed, so
+		// rejected probes stay auditable and a cookie refresh is not lost to a blocked operation.
+		if cmp.Or(user.GetExtra()["password_change_required"]...) == "true" && !passwordChangeRequestAllowed(req) {
+			if req.Pattern != "/" {
+				http.Error(rw, "password change required", http.StatusForbidden)
+			} else {
+				rd := req.URL.RequestURI()
+				http.Redirect(rw, req, "/change-password?rd="+url.QueryEscape(rd), http.StatusSeeOther)
+			}
+			return
 		}
 
 		var shouldLogError bool
@@ -252,6 +267,22 @@ func (s *Server) Wrap(f api.HandlerFunc) http.HandlerFunc {
 			slog.Error("Error handling request", "path", req.URL.Path, "error", err)
 		}
 	}
+}
+
+func passwordChangeRequestAllowed(req *http.Request) bool {
+	if isStaticAssetPath(req.URL.Path) || req.URL.Path == "/change-password" || strings.HasPrefix(req.URL.Path, "/change-password/") || req.URL.Path == "/activate" || strings.HasPrefix(req.URL.Path, "/activate/") || req.URL.Path == "/oauth2/sign_out" {
+		return true
+	}
+	return (req.Method == http.MethodGet && slices.Contains([]string{
+		"/api/me",
+		"/api/version",
+		"/api/license",
+		"/api/app-preferences",
+	}, req.URL.Path)) ||
+		(req.Method == http.MethodPost && slices.Contains([]string{
+			"/api/local-auth/activate",
+			"/api/local-auth/change-password",
+		}, req.URL.Path))
 }
 
 func (w *headersResponseWriter) Unwrap() http.ResponseWriter {
@@ -323,7 +354,14 @@ func (w *headersResponseWriter) Push(target string, opts *http.PushOptions) erro
 // isStaticAssetPath returns true if the path is a static asset that should be
 // exempt from rate limiting. This includes SvelteKit chunks, CSS, and UI images.
 func isStaticAssetPath(path string) bool {
-	return strings.HasPrefix(path, "/_app/") || strings.HasPrefix(path, "/user/images/")
+	return strings.HasPrefix(path, "/_app/") || strings.HasPrefix(path, "/user/images/") || slices.Contains([]string{
+		"/favicon.ico",
+		"/favicon-16x16.png",
+		"/favicon-32x32.png",
+		"/apple-touch-icon.png",
+		"/android-chrome-192x192.png",
+		"/android-chrome-512x512.png",
+	}, path)
 }
 
 func (rw *responseWriter) WriteHeader(code int) {

@@ -143,6 +143,71 @@ func migratePublishedArtifactVisibility(ctx context.Context, client kclient.Clie
 	return nil
 }
 
+func migrateVMCPDefaultAdminGroups(ctx context.Context, client kclient.Client) error {
+	var vmcps v1.VMCPList
+	if err := client.List(ctx, &vmcps); err != nil {
+		return err
+	}
+
+	for i := range vmcps.Items {
+		vmcp := &vmcps.Items[i]
+		var changed bool
+		for j := range vmcp.Spec.Manifest.Profiles {
+			profile := &vmcp.Spec.Manifest.Profiles[j]
+			if profile.Name != "default" || !profile.Permissions.AllowAllComponents {
+				continue
+			}
+			for k := range profile.Subjects {
+				subject := &profile.Subjects[k]
+				if subject.Type == types.SubjectTypeGroup && subject.ID == types.GroupAdmin {
+					subject.Type = types.SubjectTypeObotGroup
+					changed = true
+				}
+			}
+		}
+		if changed {
+			if err := client.Update(ctx, vmcp); err != nil {
+				return fmt.Errorf("failed to migrate vMCP %s/%s: %w", vmcp.Namespace, vmcp.Name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func migrateEverythingAccessControlRuleAdminGroup(ctx context.Context, client kclient.Client) error {
+	var rule v1.AccessControlRule
+	if err := client.Get(ctx, kclient.ObjectKey{
+		Namespace: system.DefaultNamespace,
+		Name:      "acr1-everything",
+	}, &rule); apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to get everything access control rule: %w", err)
+	}
+
+	if rule.Spec.MCPCatalogID != system.DefaultCatalog ||
+		rule.Spec.PowerUserWorkspaceID != "" {
+		return nil
+	}
+
+	var changed bool
+	for i := range rule.Spec.Manifest.Subjects {
+		subject := &rule.Spec.Manifest.Subjects[i]
+		if subject.Type == types.SubjectTypeGroup && subject.ID == types.GroupAdmin {
+			subject.Type = types.SubjectTypeObotGroup
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := client.Update(ctx, &rule); err != nil {
+		return fmt.Errorf("failed to migrate everything access control rule: %w", err)
+	}
+	return nil
+}
+
 func deleteToolReferenceOwnedModels(ctx context.Context, client kclient.Client) error {
 	var models v1.ModelList
 	if err := client.List(ctx, &models); err != nil {
@@ -164,44 +229,4 @@ func deleteToolReferenceOwnedModels(ctx context.Context, client kclient.Client) 
 	}
 
 	return nil
-}
-
-func mcpServerCredentialContext(server v1.MCPServer) string {
-	switch {
-	case server.Spec.MCPCatalogID != "":
-		return fmt.Sprintf("%s-%s", server.Spec.MCPCatalogID, server.Name)
-	case server.Spec.PowerUserWorkspaceID != "":
-		return fmt.Sprintf("%s-%s", server.Spec.PowerUserWorkspaceID, server.Name)
-	default:
-		return ""
-	}
-}
-
-func extractAndClearMCPServerConfigValues(manifest *types.MCPServerManifest) (map[string]string, bool) {
-	configValues := make(map[string]string)
-	var changed bool
-
-	for i := range manifest.Env {
-		if manifest.Env[i].Value != "" {
-			if manifest.Env[i].Key != "" {
-				configValues[manifest.Env[i].Key] = manifest.Env[i].Value
-			}
-			manifest.Env[i].Value = ""
-			changed = true
-		}
-	}
-
-	if manifest.RemoteConfig != nil {
-		for i := range manifest.RemoteConfig.Headers {
-			if manifest.RemoteConfig.Headers[i].Value != "" {
-				if manifest.RemoteConfig.Headers[i].Key != "" {
-					configValues[manifest.RemoteConfig.Headers[i].Key] = manifest.RemoteConfig.Headers[i].Value
-				}
-				manifest.RemoteConfig.Headers[i].Value = ""
-				changed = true
-			}
-		}
-	}
-
-	return configValues, changed
 }

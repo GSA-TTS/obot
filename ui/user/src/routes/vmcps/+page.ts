@@ -1,10 +1,18 @@
+import { AdminService, UserService } from '$lib/services';
+import type { VMCP } from '$lib/services';
 import type { PageLoad } from './$types';
-import { redirect } from '@sveltejs/kit';
 
-export const load: PageLoad = async ({ parent }) => {
-	// temporarily only for admins due to using composite catalog entries
+export const load: PageLoad = async ({ fetch, parent }) => {
 	const { profile } = await parent();
-	if (!profile.isAdmin?.()) {
-		throw redirect(307, '/');
+
+	let vmcps: VMCP[];
+	try {
+		vmcps = profile.hasAdminAccess?.()
+			? await AdminService.listAllVMCPs({ fetch })
+			: await UserService.listVMCPs({ fetch });
+	} catch {
+		vmcps = [];
 	}
+
+	return { vmcps };
 };

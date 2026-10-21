@@ -1,8 +1,10 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -13,7 +15,6 @@ import (
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/jwt/persistent"
 	"github.com/obot-platform/obot/pkg/system"
-	"github.com/obot-platform/obot/pkg/utils"
 )
 
 const (
@@ -29,11 +30,13 @@ type Client struct {
 type ClientOption struct {
 	// OAuthClientName overrides ClientName only for dynamic client registration.
 	OAuthClientName string
-	ClientName      string
-	ClientVersion   string
-	TokenStorage    TokenStorage
-	CallbackHandler CallbackHandler
-	ClientLookup    ClientCredLookup
+	// OAuthClientIDMetadataDocument is empty when CIMD must not be used.
+	OAuthClientIDMetadataDocument string
+	ClientName                    string
+	ClientVersion                 string
+	TokenStorage                  TokenStorage
+	CallbackHandler               CallbackHandler
+	ClientLookup                  ClientCredLookup
 }
 
 func (c *Client) hasValidToken() bool {
@@ -72,6 +75,7 @@ func (sm *SessionManager) clientForServerWithOptions(ctx context.Context, client
 }
 
 func (sm *SessionManager) loadSession(ctx context.Context, server ServerConfig, clientScope string, clientOpts ClientOption) (*Client, error) {
+	connectID := cmp.Or(server.MCPServerInstanceID, server.MCPServerName)
 	sessions, _ := sm.sessions.LoadOrStore(server.MCPServerName, &sync.Map{})
 
 	clientSessions, ok := sessions.(*sync.Map)
@@ -115,13 +119,17 @@ func (sm *SessionManager) loadSession(ctx context.Context, server ServerConfig, 
 		)
 
 		now := time.Now().Add(-time.Second)
+		groups := []string{types.GroupMCP, types.GroupAuthenticated}
+		if server.ComponentMCPServer {
+			groups = append(groups, types.GroupCompositeMCP)
+		}
 		jwtToken, token, err = sm.tokenService.NewToken(ctx, persistent.TokenContext{
-			Audience:   utils.FirstSet(server.Audiences...),
+			Audience:   cmp.Or(server.Audiences...),
 			ExpiresAt:  persistent.NewTime(now.Add(time.Hour + 15*time.Minute)),
 			IssuedAt:   persistent.NewTime(now),
 			UserID:     server.UserID,
-			MCPID:      server.MCPServerName,
-			UserGroups: []string{types.GroupMCP, types.GroupAuthenticated},
+			MCPID:      connectID,
+			UserGroups: groups,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create JWT token for client: %w", err)
@@ -147,7 +155,7 @@ func (sm *SessionManager) loadSession(ctx context.Context, server ServerConfig, 
 			}
 		}
 	} else {
-		url = system.MCPConnectURL(sm.TransformObotHostname(sm.baseURL), server.MCPServerName)
+		url = system.MCPConnectURL(sm.TransformObotHostname(sm.baseURL), connectID)
 	}
 
 	c := gomcp.NewClient(&gomcp.Implementation{
@@ -163,14 +171,7 @@ func (sm *SessionManager) loadSession(ctx context.Context, server ServerConfig, 
 		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
 	}
 
-	var oauthHandler auth.OAuthHandler = authorizationErrorOAuthHandler{}
-	if clientOpts.TokenStorage != nil {
-		oauthClientName := clientOpts.OAuthClientName
-		if oauthClientName == "" {
-			oauthClientName = clientOpts.ClientName
-		}
-		oauthHandler = newOAuth(httpClient, clientOpts.CallbackHandler, clientOpts.ClientLookup, clientOpts.TokenStorage, server.MCPServerName, oauthClientName, sm.baseURL+"/oauth/mcp/callback", system.OAuthClientIDMetadataURL(sm.baseURL))
-	}
+	oauthHandler := sm.oauthHandlerForClient(httpClient, server.MCPServerName, clientOpts)
 
 	session, err := c.Connect(ctx, &gomcp.StreamableClientTransport{
 		Endpoint:             url,
@@ -204,4 +205,25 @@ func (sm *SessionManager) loadSession(ctx context.Context, server ServerConfig, 
 	}
 
 	return result, nil
+}
+
+func (sm *SessionManager) oauthHandlerForClient(httpClient *http.Client, serverName string, clientOpts ClientOption) auth.OAuthHandler {
+	if clientOpts.TokenStorage == nil {
+		return authorizationErrorOAuthHandler{}
+	}
+
+	oauthClientName := clientOpts.OAuthClientName
+	if oauthClientName == "" {
+		oauthClientName = clientOpts.ClientName
+	}
+	return newOAuth(
+		httpClient,
+		clientOpts.CallbackHandler,
+		clientOpts.ClientLookup,
+		clientOpts.TokenStorage,
+		serverName,
+		oauthClientName,
+		sm.baseURL+"/oauth/mcp/callback",
+		clientOpts.OAuthClientIDMetadataDocument,
+	)
 }

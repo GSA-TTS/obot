@@ -71,7 +71,7 @@ Obot checks the allowlist when a tunneled remote catalog entry or server is save
 The Docker tab is selected by default after creating or rotating a tunnel. Run the displayed command on a machine with network access to the remote MCP server:
 
 ```bash
-docker run --rm ghcr.io/obot-platform/obot:v0.25.0 \
+docker run --rm ghcr.io/obot-platform/obot:v0.26.0 \
   tunnel \
   --obot-base-url https://obot.example.com/api \
   --token YOUR_TUNNEL_SECRET

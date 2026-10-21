@@ -35,6 +35,9 @@ const (
 	// CommunityEntitlement is required to enable community edition.
 	CommunityEntitlement = "OBOT_COMMUNITY"
 
+	// CloudEntitlement identifies Obot Cloud deployments.
+	CloudEntitlement = "OBOT_CLOUD"
+
 	// EnterpriseModelProvidersEntitlement is required to enable enterprise model providers.
 	EnterpriseModelProvidersEntitlement = "OBOT_ENTERPRISE_MODEL_PROVIDERS"
 
@@ -147,6 +150,11 @@ func (p *Provider) LicenseKey(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return snapshot.key, nil
+}
+
+// MachineFingerprint returns the existing persisted installation identity.
+func (p *Provider) MachineFingerprint() string {
+	return p.machineFingerprint
 }
 
 func (p *Provider) LicenseKeyViaConfiguration() bool {

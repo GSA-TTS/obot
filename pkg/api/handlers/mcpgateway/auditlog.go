@@ -101,15 +101,16 @@ func NewAuditLogHandler(gatewayClient *gateway.Client) *AuditLogHandler {
 	}
 }
 
-// getOwnServerMCPIDs returns the MCP server IDs for servers that the user owns directly
-// (not through a workspace or catalog). These are single-user servers where:
-// - Spec.UserID == user's ID
-// - Spec.IsSingleUser() == true
+// getOwnServerMCPIDs returns the MCP IDs for the servers and vMCPs that the user owns directly
+// (not through a workspace or catalog). These are the single-user MCPServers and the personal
+// VMCPs where Spec.UserID is the user's ID; an audit log records either kind in its MCPID.
 func getOwnServerMCPIDs(req api.Context) ([]string, error) {
-	var mcpServers v1.MCPServerList
-	if err := req.List(&mcpServers, &kclient.ListOptions{
+	ownedByUser := &kclient.ListOptions{
 		FieldSelector: fields.OneTermEqualSelector("spec.userID", req.User.GetUID()),
-	}); err != nil {
+	}
+
+	var mcpServers v1.MCPServerList
+	if err := req.List(&mcpServers, ownedByUser); err != nil {
 		return nil, err
 	}
 
@@ -119,11 +120,21 @@ func getOwnServerMCPIDs(req api.Context) ([]string, error) {
 			mcpIDs = append(mcpIDs, server.Name)
 		}
 	}
+
+	var vmcps v1.VMCPList
+	if err := req.List(&vmcps, ownedByUser); err != nil {
+		return nil, err
+	}
+
+	for _, vmcp := range vmcps.Items {
+		mcpIDs = append(mcpIDs, vmcp.Name)
+	}
+
 	return mcpIDs, nil
 }
 
 // parseMultiValueParam parses query parameters that can have multiple values
-// Supports both comma-separated values in single parameter and repeated parameters
+// Supports JSON string arrays, comma-separated values, and repeated parameters.
 func parseMultiValueParam(queryValues map[string][]string, key string) []string {
 	values := queryValues[key]
 	if len(values) == 0 {
@@ -133,6 +144,15 @@ func parseMultiValueParam(queryValues map[string][]string, key string) []string 
 	var result []string
 	for _, value := range values {
 		if value == "" {
+			continue
+		}
+		var items []string
+		if strings.HasPrefix(strings.TrimSpace(value), "[") && json.Unmarshal([]byte(value), &items) == nil {
+			for _, item := range items {
+				if item != "" {
+					result = append(result, item)
+				}
+			}
 			continue
 		}
 		// Split by comma to support comma-separated values

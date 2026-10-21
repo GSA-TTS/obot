@@ -2,15 +2,19 @@ package mcpcatalog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/obot-platform/nah/pkg/name"
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/mcp"
+	"github.com/obot-platform/obot/pkg/system"
+	"github.com/obot-platform/obot/pkg/utils"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
+	"sigs.k8s.io/yaml"
 )
 
 var (
@@ -22,6 +26,23 @@ type ValidationOptions struct {
 	MCP        mcp.ValidationOptions
 	MCPBackend string
 	GitManaged bool
+}
+
+// VMCPName gives catalog sync and composite migration the same resource identity.
+func VMCPName(catalogName, sourceURL, entryKey, displayName string) string {
+	return name.SafeHashConcatName(system.VMCPPrefix, catalogName, utils.Digest(mcp.SourceIDForURL(sourceURL))[:12], VMCPEntryKey(entryKey, displayName))
+}
+
+// VMCPEntryKey returns the key that identifies a vMCP within its source,
+// falling back to one derived from the display name.
+func VMCPEntryKey(entryKey, displayName string) string {
+	if entryKey != "" {
+		return entryKey
+	}
+	if key := SanitizeName(displayName); key != "" {
+		return key
+	}
+	return utils.Digest(displayName)[:12]
 }
 
 // SanitizeName converts a catalog entry name to the RFC 1123-compatible form
@@ -36,48 +57,29 @@ func SanitizeName(name string) string {
 // NormalizeManifest applies the same compatibility normalization used when
 // Obot imports a catalog source.
 func NormalizeManifest(entry *types.MCPServerCatalogEntryManifest) {
-	normalizeEnv(entry.Env)
-	normalizeRemoteConfig(entry.Runtime, entry.RemoteConfig)
-	normalizeServerUserType(&entry.ServerUserType)
+	normalizeConfig(entry.Config)
 }
 
 // NormalizeSystemManifest applies the same compatibility normalization used
 // when Obot imports a system catalog source.
 func NormalizeSystemManifest(entry *types.SystemMCPServerCatalogEntryManifest) {
-	normalizeEnv(entry.Env)
-	normalizeRemoteConfig(entry.Runtime, entry.RemoteConfig)
-	normalizeServerUserType(&entry.ServerUserType)
+	normalizeConfig(entry.Config)
 }
 
-func normalizeEnv(envs []types.MCPEnv) {
-	for i, env := range envs {
-		if env.Key == "" {
-			env.Key = env.Name
+func normalizeConfig(configs []types.MCPConfig) {
+	for i, config := range configs {
+		if config.Key == "" {
+			config.Key = config.Name
 		}
-		if filepath.Ext(env.Key) != "" {
-			env.Key = strings.ReplaceAll(env.Key, ".", "_")
-			env.File = true
-		}
-		env.Key = strings.ReplaceAll(strings.ToUpper(env.Key), "-", "_")
-		envs[i] = env
-	}
-}
-
-func normalizeRemoteConfig(runtime types.Runtime, remoteConfig *types.RemoteCatalogConfig) {
-	if runtime == types.RuntimeRemote && remoteConfig != nil {
-		for i, header := range remoteConfig.Headers {
-			if header.Key == "" {
-				header.Key = header.Name
+		if config.Usage == types.Header {
+			config.Key = strings.ReplaceAll(strings.ToUpper(config.Key), "_", "-")
+		} else {
+			if config.Usage == types.File || config.Usage == types.DynamicFile {
+				config.Key = strings.ReplaceAll(config.Key, ".", "_")
 			}
-			header.Key = strings.ReplaceAll(strings.ToUpper(header.Key), "_", "-")
-			remoteConfig.Headers[i] = header
+			config.Key = strings.ReplaceAll(strings.ToUpper(config.Key), "-", "_")
 		}
-	}
-}
-
-func normalizeServerUserType(serverUserType *types.ServerUserType) {
-	if *serverUserType == "" {
-		*serverUserType = types.ServerUserTypeSingleUser
+		configs[i] = config
 	}
 }
 
@@ -85,13 +87,85 @@ func ValidateSourceFields(entry types.MCPServerCatalogEntryManifest) error {
 	if SanitizeName(entry.Name) == "" {
 		return fmt.Errorf("invalid catalog entry name after sanitization: original=%q sanitized=%q", entry.Name, SanitizeName(entry.Name))
 	}
-	if entry.EntryKey == "" {
+	return ValidateEntryKey(entry.EntryKey)
+}
+
+func ValidateEntryKey(key string) error {
+	if key == "" {
 		return nil
 	}
-	if errs := kvalidation.IsDNS1123Subdomain(entry.EntryKey); len(errs) > 0 {
-		return fmt.Errorf("source entry key %q must be DNS-friendly: %s", entry.EntryKey, strings.Join(errs, "; "))
+	if errs := kvalidation.IsDNS1123Subdomain(key); len(errs) > 0 {
+		return fmt.Errorf("source entry key %q must be DNS-friendly: %s", key, strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// ValidateConfigurationFields checks removed fields before typed decoding discards them.
+// Other unknown fields remain allowed for forward compatibility.
+func ValidateConfigurationFields(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := yaml.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+
+	for _, path := range [][]string{
+		{"env"},
+		{"remoteConfig", "headers"},
+		{"multiUserConfig", "userDefinedHeaders"},
+	} {
+		parent := fields
+		if len(path) == 2 {
+			parent = nil
+			if err := json.Unmarshal(fields[path[0]], &parent); err != nil {
+				continue // Typed decoding reports malformed runtime configurations.
+			}
+		}
+		if _, exists := parent[path[len(path)-1]]; exists {
+			return fmt.Errorf("legacy configuration field %q is no longer supported; move it to top-level config", strings.Join(path, "."))
+		}
+	}
+	return nil
+}
+
+// DecodeVMCPManifest maps catalog entry-key references to the resolved-ID
+// field used by the vMCP API and storage model.
+func DecodeVMCPManifest(data []byte) (types.VMCPManifest, error) {
+	var manifest types.VMCPManifest
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return manifest, err
+	}
+
+	var references struct {
+		EntryKey   string `json:"entryKey"`
+		Components []struct {
+			EntryKey string `json:"mcpServerCatalogEntryKey"`
+		} `json:"components"`
+	}
+	if err := yaml.Unmarshal(data, &references); err != nil {
+		return manifest, err
+	}
+
+	for i := range manifest.Components {
+		if strings.TrimSpace(manifest.Components[i].ID) == "" {
+			return manifest, fmt.Errorf("vMCP %q components[%d] id is required", manifest.DisplayName, i)
+		}
+
+		if references.Components[i].EntryKey == "" {
+			name := manifest.DisplayName
+			if name == "" {
+				name = references.EntryKey
+			}
+			if name == "" {
+				name = "<unnamed>"
+			}
+			return manifest, fmt.Errorf("vMCP %q component %q mcpServerCatalogEntryKey is required", name,
+				manifest.Components[i].ID)
+		}
+
+		manifest.Components[i].MCPServerCatalogEntryID = references.Components[i].EntryKey
+	}
+
+	return manifest, nil
 }
 
 func ValidateManifest(ctx context.Context, entry types.MCPServerCatalogEntryManifest, options ValidationOptions) error {

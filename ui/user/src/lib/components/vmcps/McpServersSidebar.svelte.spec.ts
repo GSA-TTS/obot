@@ -1,7 +1,8 @@
 import type { EntryDrag } from '$lib/runes/vmcps/entryDrag.svelte';
+import { Group } from '$lib/services';
 import { mcpServersAndEntries } from '$lib/stores';
 import { createMCPCatalogEntry } from '../../../tests/helpers/mcp';
-import { preparePageData } from '../../../tests/helpers/pageData';
+import { createMockProfile, preparePageData } from '../../../tests/helpers/pageData';
 import McpServersSidebar from './McpServersSidebar.svelte';
 import { tick } from 'svelte';
 import { describe, expect, it, vi } from 'vitest';
@@ -23,6 +24,7 @@ function createDragStub(overrides: Partial<EntryDrag> = {}) {
 		isComponentLinked: () => false,
 		isDragging: () => false,
 		isDraggingNewEntry: false,
+		disabled: false,
 		activate: vi.fn(),
 		cancel: vi.fn(),
 		pointerDown: vi.fn(),
@@ -40,12 +42,12 @@ async function renderSidebar(
 		drag: EntryDrag;
 		entries: ReturnType<typeof createMCPCatalogEntry>[];
 		canCreateEntry: boolean;
-		showAllConnectors: boolean;
 		query: string;
 		onSearch: (value: string) => void;
+		groups: string[];
 	}> = {}
 ) {
-	const { entries = [github, slack], drag = createDragStub(), ...rest } = props;
+	const { entries = [github, slack], drag = createDragStub(), groups, ...rest } = props;
 	mcpServersAndEntries.current = {
 		entries,
 		servers: [],
@@ -55,7 +57,7 @@ async function renderSidebar(
 		lastFetched: null,
 		isInitialized: true
 	};
-	await preparePageData();
+	await preparePageData(groups ? { profile: createMockProfile(groups) } : undefined);
 	const result = render(McpServersSidebar, {
 		drag,
 		onSearch: rest.onSearch ?? vi.fn(),
@@ -79,6 +81,10 @@ function card(name: string) {
 	return page.getByRole('button', { name: new RegExp(`View ${name} details`) });
 }
 
+function createEntryButton() {
+	return page.getByCSS('#mcp-create-catalog-entry-button');
+}
+
 describe('McpServersSidebar.svelte', () => {
 	it('filters the list by the query it is given', async () => {
 		await renderSidebar({ query: 'slack' });
@@ -96,43 +102,24 @@ describe('McpServersSidebar.svelte', () => {
 		await vi.waitFor(() => expect(onSearch).toHaveBeenCalledWith('git'));
 	});
 
-	it('hides workspace-owned servers unless the page allows them', async () => {
-		const workspaceEntry = createMCPCatalogEntry({
-			id: 'entry-workspace',
-			name: 'Workspace Slack',
-			powerUserWorkspaceID: 'ws-1'
-		});
-		await renderSidebar({ entries: [github, workspaceEntry] });
+	it.each([
+		['power users', [Group.POWERUSER]],
+		['admins', [Group.ADMIN]]
+	])('shows create entry button for %s when the catalog is empty', async (_label, groups) => {
+		await renderSidebar({ entries: [], groups, canCreateEntry: true });
 
-		await expect.element(card('Workspace Slack')).not.toBeInTheDocument();
-
-		await renderSidebar({ entries: [github, workspaceEntry], showAllConnectors: true });
-
-		await expect.element(card('Workspace Slack')).toBeVisible();
+		await expect.element(createEntryButton()).toBeVisible();
+		await expect.element(page.getByRole('status')).not.toBeInTheDocument();
 	});
 
-	it('leaves out composite and multi-user servers, which cannot be dragged in', async () => {
-		const composite = createMCPCatalogEntry({
-			id: 'entry-composite',
-			name: 'Composite',
-			runtime: 'composite'
-		});
-		const multiUser = createMCPCatalogEntry({
-			id: 'entry-multi',
-			name: 'Multi User',
-			serverUserType: 'multiUser'
-		});
-		await renderSidebar({ entries: [github, composite, multiUser] });
+	it.each([
+		['regular users', [Group.USER]],
+		['readonly admins', [Group.AUDITOR]]
+	])('says so when nothing is left to show for %s', async (_label, groups) => {
+		await renderSidebar({ entries: [], groups, canCreateEntry: false });
 
-		await expect.element(card('GitHub')).toBeVisible();
-		await expect.element(card('Composite')).not.toBeInTheDocument();
-		await expect.element(card('Multi User')).not.toBeInTheDocument();
-	});
-
-	it('says so when nothing is left to show', async () => {
-		await renderSidebar({ entries: [] });
-
-		await expect.element(page.getByText('No MCP servers available.')).toBeVisible();
+		await expect.element(page.getByRole('status')).toBeVisible();
+		await expect.element(createEntryButton()).not.toBeInTheDocument();
 	});
 
 	it('reorders the list by name and created date', async () => {
@@ -173,16 +160,12 @@ describe('McpServersSidebar.svelte', () => {
 	});
 
 	describe('create entry button', () => {
-		function createButton() {
-			return page.getByCSS('#mcp-create-catalog-entry-button');
-		}
-
 		it('appears only for users allowed to create entries', async () => {
 			await renderSidebar({ canCreateEntry: false });
-			await expect.element(createButton()).not.toBeInTheDocument();
+			await expect.element(createEntryButton()).not.toBeInTheDocument();
 
 			await renderSidebar({ canCreateEntry: true });
-			await expect.element(createButton()).toBeVisible();
+			await expect.element(createEntryButton()).toBeVisible();
 		});
 	});
 
@@ -212,7 +195,7 @@ describe('McpServersSidebar.svelte', () => {
 		it('activates without an entry from the create card, which has none yet', async () => {
 			const { drag } = await renderSidebar({ canCreateEntry: true });
 
-			const el = await page.getByCSS('#mcp-create-catalog-entry-button').element();
+			const el = await createEntryButton().element();
 			el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
 
 			expect(drag.activate).toHaveBeenCalledWith();
@@ -261,7 +244,7 @@ describe('McpServersSidebar.svelte', () => {
 			await renderSidebar({ entries: [githubDev, slackChat, plain] });
 
 			await clickNative(page.getByCSS('#mcp-server-settings-button'));
-			await page.getByRole('combobox', { name: 'Filter By' }).click();
+			await page.getByRole('combobox', { name: 'Filter By', exact: false }).click();
 			await page.getByRole('button', { name: 'devtools', exact: true }).click();
 			await tick();
 
@@ -269,7 +252,7 @@ describe('McpServersSidebar.svelte', () => {
 			await expect.element(card('Slack')).not.toBeInTheDocument();
 			await expect.element(card('Plain')).not.toBeInTheDocument();
 
-			await page.getByRole('combobox', { name: 'Filter By' }).click();
+			await page.getByRole('combobox', { name: 'Filter By', exact: false }).click();
 			await page.getByRole('button', { name: 'communication', exact: true }).click();
 			await tick();
 

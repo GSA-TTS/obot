@@ -2,19 +2,21 @@
 	import { resolve } from '$app/paths';
 	import { PAGE_TRANSITION_DURATION } from '$lib/constants';
 	import { stripMarkdownToText } from '$lib/markdown';
+	import { UserService, type VMCP } from '$lib/services';
 	import { API_KEY_CREATABLE_CAPABILITIES, type APIKey } from '$lib/services/api-keys/types';
 	import {
 		compileAvailableMcpServers,
 		getMCPDisplayName,
 		isDeprecatedMCPServer
 	} from '$lib/services/user/mcp';
-	import { mcpServersAndEntries, profile } from '$lib/stores';
+	import { errors, mcpServersAndEntries, profile } from '$lib/stores';
 	import { formatTimeAgo, formatTimeUntil } from '$lib/time';
 	import Confirm from '../Confirm.svelte';
 	import McpDeprecatedNotice from '../mcp/McpDeprecatedNotice.svelte';
 	import IconButton from '../primitives/IconButton.svelte';
 	import { KeyRound, Server, Trash2 } from '@lucide/svelte';
 	import { Eye } from '@lucide/svelte';
+	import { onMount } from 'svelte';
 	import { fly } from 'svelte/transition';
 	import { twMerge } from 'tailwind-merge';
 
@@ -27,6 +29,12 @@
 	let { agentAuthScope, isAdmin = false, onDelete }: Props = $props();
 	let deletingAgentAuthScope = $state(false);
 	let saving = $state(false);
+	let vmcps = $state<VMCP[]>([]);
+	onMount(() => {
+		UserService.listVMCPs()
+			.then((items) => (vmcps = items))
+			.catch(() => errors.append('Failed to load vMCPs.'));
+	});
 
 	let mcpServers = $derived(
 		compileAvailableMcpServers(
@@ -42,6 +50,16 @@
 	let resolvedServers = $derived.by(() => {
 		if (!agentAuthScope?.mcpServerIds || isAllServers) return [];
 		return agentAuthScope.mcpServerIds.map((id) => {
+			const vmcp = vmcps.find((item) => item.id === id);
+			if (vmcp)
+				return {
+					id,
+					name: vmcp.displayName || id,
+					description: vmcp.description,
+					icon: vmcp.icon,
+					exists: true,
+					deprecated: false
+				};
 			const server = serverMap.get(id);
 			return {
 				id,
@@ -79,7 +97,7 @@
 	);
 
 	const duration = PAGE_TRANSITION_DURATION;
-	const title = $derived(agentAuthScope?.name || 'Agent Auth Scope');
+	const title = $derived(agentAuthScope?.name || 'Agent Identity');
 </script>
 
 {#if agentAuthScope}
@@ -197,15 +215,21 @@
 			<section class="paper gap-2 p-4">
 				<p class="text-lg font-semibold" id="agent-auth-scope-keys">API Keys</p>
 				<div class="flex flex-col gap-2" role="group" aria-labelledby="agent-auth-scope-keys">
-					<a
-						href={resolve(
-							`${isAdmin ? '/admin' : ''}/agent-auth-scopes/${agentAuthScope.id}/${encodeURIComponent(agentAuthScope.prefix)}` as `/${string}`
-						)}
-						class="bg-base-200 hover:bg-base-300 flex justify-between items-center gap-3 rounded-lg p-3 text-sm transition-colors"
-					>
-						{agentAuthScope.prefix}
-						<Eye class="size-4" />
-					</a>
+					{#if isAdmin}
+						<a
+							href={resolve(
+								`/identity-access/agents/${agentAuthScope.id}/${encodeURIComponent(agentAuthScope.prefix)}` as `/${string}`
+							)}
+							class="bg-base-200 hover:bg-base-300 flex justify-between items-center gap-3 rounded-lg p-3 text-sm transition-colors"
+						>
+							{agentAuthScope.prefix}
+							<Eye class="size-4" />
+						</a>
+					{:else}
+						<p class="bg-base-200 flex rounded-lg p-3 text-sm">
+							{agentAuthScope.prefix}
+						</p>
+					{/if}
 				</div>
 			</section>
 		</div>

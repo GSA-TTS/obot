@@ -2,7 +2,6 @@ import {
 	MAX_ZOOM,
 	MIN_ZOOM,
 	VMCP_CARD_HEIGHT,
-	VMCP_COLLAPSED_ROW_HEIGHT,
 	VMCP_COMPONENT_HEIGHT,
 	VMCP_OVERSCAN_ROWS
 } from './constants';
@@ -54,19 +53,18 @@ export function fitCamera(
 }
 
 /**
- * Where the canvas opens: actual size, top of the world in view. Centered horizontally only when
- * the world fits, so a wide world still starts at its left edge rather than off-screen.
+ * Where the canvas opens: actual size, centered in the viewport. A world too large to fit anchors
+ * at `padding` on that axis, so its top-left corner stays in view rather than going off-screen.
  */
 export function defaultCamera(
 	viewport: { width: number; height: number },
-	world: { width: number },
+	world: { width: number; height: number },
 	padding = 32
 ): Camera {
-	const overflows = world.width + padding * 2 > viewport.width;
 	return {
 		zoom: 1,
-		x: overflows ? padding : (viewport.width - world.width) / 2,
-		y: padding
+		x: Math.max(padding, (viewport.width - world.width) / 2),
+		y: Math.max(padding, (viewport.height - world.height) / 2)
 	};
 }
 
@@ -127,8 +125,7 @@ export function windowRange({
 	return { start, end: Math.max(start, end) };
 }
 
-export function vmcpRowHeight(componentCount: number, expanded: boolean) {
-	if (!expanded) return VMCP_COLLAPSED_ROW_HEIGHT;
+export function vmcpRowHeight(componentCount: number) {
 	const stack = Math.max(1, componentCount) * VMCP_COMPONENT_HEIGHT;
 	return Math.max(VMCP_CARD_HEIGHT, stack);
 }

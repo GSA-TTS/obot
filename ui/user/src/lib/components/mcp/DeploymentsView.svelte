@@ -1,11 +1,11 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { tooltip } from '$lib/actions/tooltip.svelte';
 	import Confirm from '$lib/components/Confirm.svelte';
 	import DotDotDot from '$lib/components/DotDotDot.svelte';
 	import DiffDialog from '$lib/components/admin/DiffDialog.svelte';
 	import McpConfirmDelete from '$lib/components/mcp/McpConfirmDelete.svelte';
-	import McpMultiDeleteBlockedDialog from '$lib/components/mcp/McpMultiDeleteBlockedDialog.svelte';
 	import McpTunnelDisconnectedStatus from '$lib/components/mcp/McpTunnelDisconnectedStatus.svelte';
 	import Table, { type InitSort, type InitSortFn } from '$lib/components/table/Table.svelte';
 	import { ADMIN_SESSION_STORAGE } from '$lib/constants';
@@ -17,7 +17,7 @@
 		type MCPCatalogEntry,
 		type MCPCatalogServer,
 		type OrgUser,
-		MCPCompositeDeletionDependencyError
+		type VMCP
 	} from '$lib/services';
 	import {
 		getMCPDisplayName,
@@ -34,19 +34,28 @@
 		isMcpTunnelDisconnected,
 		shouldShowMcpTunnelDisconnectedBadge
 	} from '$lib/services/user/mcpTunnel';
-	import { profile, mcpServersAndEntries, mcpTunnelConnections, version } from '$lib/stores';
+	import { vmcpInstancePath } from '$lib/services/vmcps/utils';
+	import {
+		errors,
+		profile,
+		mcpServersAndEntries,
+		mcpTunnelConnections,
+		version,
+		vmcpInstances
+	} from '$lib/stores';
 	import { formatTimeAgo } from '$lib/time';
 	import { getUserDisplayName, openUrl } from '$lib/utils';
 	import CapacityBanner from './CapacityBanner.svelte';
 	import EditExistingDeployment from './EditExistingDeployment.svelte';
 	import McpDeprecatedNotice from './McpDeprecatedNotice.svelte';
 	import {
-		Captions,
 		CircleAlert,
 		CircleFadingArrowUp,
 		Ellipsis,
 		ExternalLink,
 		GitCompare,
+		Layers,
+		Layers2,
 		Power,
 		Server,
 		ServerCog,
@@ -75,7 +84,7 @@
 		noDataContent?: Snippet;
 		onlyMyServers?: boolean;
 		servers?: MCPCatalogServer[];
-		skipLoadOnMount?: boolean;
+		skipLoadMcpsOnMount?: boolean;
 		serverPrefixPath?: string;
 		entry?: MCPCatalogEntry | MCPCatalogServer;
 	}
@@ -96,7 +105,7 @@
 		noDataContent,
 		onlyMyServers,
 		servers: initialServers,
-		skipLoadOnMount,
+		skipLoadMcpsOnMount,
 		serverPrefixPath,
 		entry
 	}: Props = $props();
@@ -106,16 +115,13 @@
 		if (entity !== 'catalog' || !doesSupportK8sUpdates || !profile.current.hasAdminAccess?.())
 			return false;
 
-		return entry
-			? 'isCatalogEntry' in entry &&
-					entry.manifest.runtime !== 'composite' &&
-					entry.manifest.runtime !== 'remote'
-			: true;
+		return entry ? 'isCatalogEntry' in entry && entry.manifest.runtime !== 'remote' : true;
 	});
 
 	const hasAdminAccess = $derived(profile.current.hasAdminAccess?.() ?? false);
 
 	let loading = $state(false);
+	let loadingVMcps = $state(false);
 
 	let diffDialog = $state<ReturnType<typeof DiffDialog>>();
 	let existingServer = $state<MCPCatalogServer>();
@@ -138,10 +144,9 @@
 	let deleting = $state(false);
 	let restarting = $state(false);
 
-	let deleteConflictError = $state<MCPCompositeDeletionDependencyError | undefined>();
-
 	let deployedCatalogEntryServers = $state<MCPCatalogServer[]>([]);
 	let deployedWorkspaceCatalogEntryServers = $state<MCPCatalogServer[]>([]);
+	let vmcps = $state<VMCP[]>([]);
 	let serversData = $derived.by(() => {
 		if (initialServers) return initialServers;
 		if (entity === 'workspace') {
@@ -164,6 +169,11 @@
 			mcpServersAndEntries.current.userInstances.map((instance) => [instance.mcpServerID, instance])
 		)
 	);
+
+	let vmcpInstancesMap = $derived(
+		new Map(vmcpInstances.current.items.map((instance) => [instance.id, instance]))
+	);
+
 	let tableRef = $state<ReturnType<typeof Table>>();
 
 	let entriesMap = $derived(
@@ -173,24 +183,22 @@
 		}, {})
 	);
 
-	let compositeMapping = $derived(
-		serversData
-			.filter((server) => 'compositeConfig' in server.manifest)
-			.reduce<Record<string, MCPCatalogServer>>((acc, server) => {
-				acc[server.id] = server;
-				return acc;
-			}, {})
-	);
-
 	let tableData = $derived.by(() => {
-		function isCompositeDescendantDisabled(parent: MCPCatalogServer, id: string) {
-			const match = parent.manifest.compositeConfig?.componentServers.find(
-				(component) => component.catalogEntryID === id || component.mcpServerID === id
-			);
-			return match ? match.disabled : false;
-		}
+		const vmcpsMap = new Map(vmcps.map((v) => [v.id, v]));
 
+		const getVMcp = (deployment: MCPCatalogServer) => {
+			if (deployment.vmcpID) {
+				return vmcpsMap.get(deployment.vmcpID)?.displayName;
+			}
+			if (deployment.vmcpInstanceID) {
+				const instance = vmcpInstancesMap.get(deployment.vmcpInstanceID);
+				return instance?.vmcpID && vmcpsMap.get(instance?.vmcpID)?.displayName;
+			}
+			return undefined;
+		};
 		const transformedData = serversData
+			// Legacy children can remain until migration cleanup finishes.
+			.filter((deployment) => !deployment.compositeName)
 			.map((deployment) => {
 				const powerUserWorkspaceID =
 					deployment.powerUserWorkspaceID ||
@@ -202,10 +210,6 @@
 					: powerUserWorkspaceID
 						? deployment.userID
 						: undefined;
-
-				const compositeParent =
-					deployment.compositeName && compositeMapping[deployment.compositeName];
-				const compositeParentName = compositeParent ? getMCPDisplayName(compositeParent) : '';
 
 				const instance = instancesMap.get(deployment.id);
 				const tunnelDisconnected = isMcpTunnelDisconnected(
@@ -220,6 +224,7 @@
 								updateStatusTooltip: undefined
 							}
 						: getMcpServerDeploymentStatus(deployment, doesSupportK8sUpdates);
+				const vmcp = getVMcp(deployment);
 
 				return {
 					...deployment,
@@ -228,13 +233,6 @@
 					registry: powerUserID ? getUserDisplayName(usersMap, powerUserID) : 'Global Registry',
 					type: getServerTypeLabel(deployment),
 					powerUserWorkspaceID,
-					compositeParentName,
-					disabled: compositeParent
-						? isCompositeDescendantDisabled(
-								compositeParent,
-								deployment.catalogEntryID || deployment.mcpCatalogID || deployment.id
-							)
-						: false,
 					isMyServer:
 						(deployment.catalogEntryID && deployment.userID === profile.current.id) ||
 						(powerUserID === profile.current.id && powerUserWorkspaceID === id),
@@ -249,10 +247,11 @@
 						deployment.manifest,
 						deployment.missingRequiredEnvVars,
 						deployment.missingRequiredHeader
-					)
+					),
+					vmcp
 				};
 			})
-			.filter((d) => !d.disabled && (onlyMyServers ? d.isMyServer : true));
+			.filter((d) => !onlyMyServers || d.isMyServer);
 
 		return query
 			? transformedData.filter((d) => d.displayName.toLowerCase().includes(query.toLowerCase()))
@@ -276,8 +275,23 @@
 		}
 	}
 
+	$effect(() => {
+		if (profile.current.loaded) {
+			return vmcpInstances.startWatching();
+		}
+	});
+
 	onMount(async () => {
-		if (!skipLoadOnMount) {
+		loadingVMcps = true;
+		const getVMcps = profile.current.hasAdminAccess?.()
+			? AdminService.listAllVMCPs
+			: UserService.listVMCPs;
+		getVMcps().then((response) => {
+			vmcps = response;
+			loadingVMcps = false;
+		});
+
+		if (!skipLoadMcpsOnMount) {
 			await reload(true);
 		}
 		// Start checking for progressing servers
@@ -320,8 +334,12 @@
 		}
 	}
 
+	function isVMcpServer(server: MCPCatalogServer) {
+		return Boolean(server.vmcpComponentID || server.vmcpID || server.vmcpInstanceID);
+	}
+
 	function canTriggerUpdate(server: MCPCatalogServer) {
-		if (server.compositeName) return false;
+		if (isVMcpServer(server)) return false;
 		if (!isMultiUserServer(server)) return true;
 		return !!server.catalogEntryID && (!!server.powerUserWorkspaceID || !!id);
 	}
@@ -330,10 +348,14 @@
 		return server.configured && supportsMCPBackendDetails(server);
 	}
 
+	function canDeleteServer(server: MCPCatalogServer & { isMyServer?: boolean }) {
+		if (isVMcpServer(server)) return false;
+		return !!(server.isMyServer || (hasAdminAccess && !readonly));
+	}
+
 	async function handleBulkUpdate() {
 		for (const serverId of Object.keys(selected)) {
 			const server = selected[serverId];
-			// if doesn't need update or is child server of composite mcp
 			if (!server.needsUpdate || !canTriggerUpdate(server)) {
 				continue;
 			}
@@ -350,9 +372,7 @@
 	}
 
 	async function handleK8sBulkUpdate(selections: typeof selected) {
-		const serversToUpdate = Object.values(selections).filter(
-			(server) => server.needsK8sUpdate && !server.compositeName
-		);
+		const serversToUpdate = Object.values(selections).filter((server) => server.needsK8sUpdate);
 		return Promise.all(serversToUpdate.map((server) => updateK8sSettings(server)));
 	}
 
@@ -490,9 +510,6 @@
 	}
 
 	async function handleSingleDelete(server: MCPCatalogServer) {
-		if (server.compositeName) {
-			return;
-		}
 		if (!isMultiUserServer(server) && server.catalogEntryID) {
 			await UserService.deleteSingleOrRemoteMcpServer(server.id);
 			// Decrement the count of servers in the catalog
@@ -502,26 +519,17 @@
 			if (entry?.userCount) entry.userCount--;
 		} else {
 			// multi-user
-			try {
-				if (server.powerUserWorkspaceID) {
-					await UserService.deleteWorkspaceMCPCatalogServer(server.powerUserWorkspaceID, server.id);
-				} else if (profile.current.hasAdminAccess?.() && id) {
-					await AdminService.deleteMCPCatalogServer(id, server.id);
-				}
-				// Remove server from list
-				mcpServersAndEntries.current.servers = mcpServersAndEntries.current.servers.filter(
-					(s) => s.id !== server.id
-				);
-				mcpServersAndEntries.current.userConfiguredServers =
-					mcpServersAndEntries.current.userConfiguredServers.filter((s) => s.id !== server.id);
-			} catch (error) {
-				if (error instanceof MCPCompositeDeletionDependencyError) {
-					deleteConflictError = error;
-					return;
-				}
-
-				throw error;
+			if (server.powerUserWorkspaceID) {
+				await UserService.deleteWorkspaceMCPCatalogServer(server.powerUserWorkspaceID, server.id);
+			} else if (profile.current.hasAdminAccess?.() && id) {
+				await AdminService.deleteMCPCatalogServer(id, server.id);
 			}
+			// Remove server from list
+			mcpServersAndEntries.current.servers = mcpServersAndEntries.current.servers.filter(
+				(s) => s.id !== server.id
+			);
+			mcpServersAndEntries.current.userConfiguredServers =
+				mcpServersAndEntries.current.userConfiguredServers.filter((s) => s.id !== server.id);
 		}
 
 		// Immediately refresh capacity banner for admin users after any server deletion
@@ -532,9 +540,11 @@
 
 	async function handleBulkDelete() {
 		for (const id of Object.keys(selected)) {
-			// Skip descendants of composite servers; they cannot be deleted directly
-			if (selected[id].compositeName) continue;
-			await handleSingleDelete(selected[id]);
+			const server = selected[id];
+			if (!canDeleteServer(server)) {
+				continue;
+			}
+			await handleSingleDelete(server);
 		}
 		selected = {};
 	}
@@ -555,35 +565,7 @@
 		);
 	}
 
-	function getAuditLogsUrl(d: MCPCatalogServer) {
-		const isMultiUser = !d.catalogEntryID;
-		const isComposite = !!d.compositeName;
-
-		const useAdminUrl = profile.current.hasAdminAccess?.();
-		if (isComposite) {
-			return useAdminUrl
-				? `/admin/audit-logs?mcp_id=${d.compositeName}`
-				: `/audit-logs?mcp_id=${d.compositeName}`;
-		}
-		return isMultiUser
-			? useAdminUrl
-				? `/admin/audit-logs?mcp_server_display_name=${d.manifest.name}`
-				: `/audit-logs?mcp_server_display_name=${d.manifest.name}`
-			: useAdminUrl
-				? `/admin/audit-logs?mcp_id=${d.id}`
-				: `/audit-logs?mcp_id=${d.id}`;
-	}
-
 	function getMcpCatalogUrl(d: MCPCatalogServer) {
-		// If this is a component of a composite server, link to the parent composite server
-		if (d.compositeName) {
-			const parent = compositeMapping[d.compositeName];
-			if (parent) {
-				// Recursively get the parent's catalog URL
-				return getMcpCatalogUrl(parent);
-			}
-		}
-
 		// The menu label is "View Catalog Entry" whenever the deployment has a
 		// catalogEntryID, so link to the catalog entry in that case. This includes
 		// multi-user servers deployed from a catalog entry, which carry both a
@@ -594,28 +576,24 @@
 		if (d.powerUserWorkspaceID) {
 			// Workspace catalog entry deployment
 			if (d.catalogEntryID) {
-				return `/admin/mcp-catalog/w/${d.powerUserWorkspaceID}/c/${d.catalogEntryID}`;
+				return `/mcp-servers/c/${d.catalogEntryID}?wid=${encodeURIComponent(d.powerUserWorkspaceID)}`;
 			}
 
 			// Workspace multi-user server
-			return `/admin/mcp-catalog/w/${d.powerUserWorkspaceID}/s/${d.id}`;
+			return `/mcp-servers/s/${d.id}?wid=${encodeURIComponent(d.powerUserWorkspaceID)}`;
 		}
 
 		// Global catalog entry deployment
 		if (d.catalogEntryID) {
-			return `/admin/mcp-catalog/c/${d.catalogEntryID}`;
+			return `/mcp-servers/c/${d.catalogEntryID}`;
 		}
 
 		// Global multi-user server
-		return `/admin/mcp-catalog/s/${d.id}`;
+		return `/mcp-servers/s/${d.id}`;
 	}
 
 	function isRestartableServer(d: MCPCatalogServer) {
-		return d.manifest.runtime !== 'remote' && d.manifest.runtime !== 'composite';
-	}
-
-	function canEditDeploymentConfiguration(d: MCPCatalogServer) {
-		return !d.compositeName && d.manifest.runtime !== 'composite';
+		return d.manifest.runtime !== 'remote';
 	}
 
 	function hasEditableDeploymentConfiguration(d: MCPCatalogServer) {
@@ -625,7 +603,7 @@
 </script>
 
 <div class="flex flex-col gap-0.5">
-	{#if loading}
+	{#if loading || loadingVMcps}
 		<div class="my-2 flex items-center justify-center h-72">
 			<Loading class="size-6" />
 		</div>
@@ -714,10 +692,8 @@
 							</div>
 							<p class="flex flex-col">
 								{d.displayName}
-								{#if d.compositeParentName}
-									<span class="text-muted-content text-xs">
-										({d.compositeParentName})
-									</span>
+								{#if d.vmcp}
+									<span class="text-muted-content/75 text-xs font-light">({d.vmcp})</span>
 								{/if}
 							</p>
 							<McpDeprecatedNotice item={d} />
@@ -737,7 +713,9 @@
 							{:else if d.needsUpdate}
 								<div
 									use:tooltip={{
-										text: 'This deployment needs an update. View Diff to see the changes.',
+										text: isVMcpServer(d)
+											? 'In order to update, update the vMCP.'
+											: 'This deployment needs an update. View Diff to see the changes.',
 										classes: ['wrap-break-word', 'w-58']
 									}}
 								>
@@ -768,8 +746,7 @@
 				{/snippet}
 
 				{#snippet actions(d)}
-					{@const isComposite = !!d.compositeName}
-					{@const auditLogsUrl = getAuditLogsUrl(d)}
+					{@const isVmcpComponent = isVMcpServer(d)}
 					<DotDotDot class="hover:dark:bg-base-100/50" classes={{ menu: 'p-0 gap-0' }}>
 						{#snippet icon()}
 							<Ellipsis class="size-4" />
@@ -797,73 +774,69 @@
 										{/if}
 									</span>
 								</a>
-								{#if (d.isMyServer || (hasAdminAccess && !readonly)) && canEditDeploymentConfiguration(d) && hasEditableDeploymentConfiguration(d)}
-									<button
-										class="menu-button"
-										onclick={(e) => {
-											e.stopPropagation();
-											editExistingDialog?.edit({
-												server: d,
-												entry: d.catalogEntryID ? entriesMap[d.catalogEntryID] : undefined
-											});
-											toggle(false);
-										}}
-									>
-										<ServerCog class="size-4" /> Edit Configuration
-									</button>
-								{/if}
-								{#if d.needsUpdate && canTriggerUpdate(d) && (d.isMyServer || (hasAdminAccess && !readonly))}
-									<button
-										class="menu-button-primary"
-										disabled={updating[d.id]?.inProgress || readonly || !!d.compositeName}
-										onclick={(e) => {
-											e.stopPropagation();
-											if (!d) return;
-											showUpgradeConfirm = {
-												type: 'single',
-												server: d
-											};
-											toggle(false);
-										}}
-										use:tooltip={d.compositeName
-											? {
-													text: 'This is a component of a composite server and cannot be updated independently; update the composite MCP server instead',
-													classes: ['w-md'],
-													disablePortal: true
-												}
-											: undefined}
-									>
-										{#if updating[d.id]?.inProgress}
-											<Loading class="size-4" />
-										{:else}
-											<CircleFadingArrowUp class="size-4" />
-										{/if}
-										Update Server
-									</button>
-								{/if}
 
-								{#if d.catalogEntryID && d.needsUpdate}
-									<button
-										class="menu-button-primary"
-										disabled={updating[d.id]?.inProgress || readonly || !!d.compositeName}
-										onclick={(e) => {
-											e.stopPropagation();
-											if (!d.catalogEntryID) return;
+								{#if !isVmcpComponent}
+									{#if (d.isMyServer || (hasAdminAccess && !readonly)) && hasEditableDeploymentConfiguration(d)}
+										<button
+											class="menu-button"
+											onclick={(e) => {
+												e.stopPropagation();
+												editExistingDialog?.edit({
+													server: d,
+													entry: d.catalogEntryID ? entriesMap[d.catalogEntryID] : undefined
+												});
+												toggle(false);
+											}}
+										>
+											<ServerCog class="size-4" /> Edit Configuration
+										</button>
+									{/if}
+									{#if d.needsUpdate && canTriggerUpdate(d) && (d.isMyServer || (hasAdminAccess && !readonly))}
+										<button
+											class="menu-button-primary"
+											disabled={updating[d.id]?.inProgress || readonly}
+											onclick={(e) => {
+												e.stopPropagation();
+												if (!d) return;
+												showUpgradeConfirm = {
+													type: 'single',
+													server: d
+												};
+												toggle(false);
+											}}
+										>
+											{#if updating[d.id]?.inProgress}
+												<Loading class="size-4" />
+											{:else}
+												<CircleFadingArrowUp class="size-4" />
+											{/if}
+											Update Server
+										</button>
+									{/if}
 
-											existingServer = d;
-											updatedServer = entriesMap[d.catalogEntryID];
-											diffDialog?.open();
-											toggle(false);
-										}}
-									>
-										<GitCompare class="size-4" /> View Diff
-									</button>
+									{#if d.catalogEntryID && d.needsUpdate}
+										<button
+											class="menu-button-primary"
+											disabled={updating[d.id]?.inProgress || readonly}
+											onclick={(e) => {
+												e.stopPropagation();
+												if (!d.catalogEntryID) return;
+
+												existingServer = d;
+												updatedServer = entriesMap[d.catalogEntryID];
+												diffDialog?.open();
+												toggle(false);
+											}}
+										>
+											<GitCompare class="size-4" /> View Diff
+										</button>
+									{/if}
 								{/if}
 
 								{#if (d.isMyServer || (hasAdminAccess && !readonly)) && d.needsK8sUpdate}
 									<button
 										class="menu-button-primary bg-warning/10 text-warning hover:bg-warning/20"
-										disabled={updating[d.id]?.inProgress || readonly || !!d.compositeName}
+										disabled={updating[d.id]?.inProgress || readonly}
 										onclick={(e) => {
 											e.stopPropagation();
 											if (!d) return;
@@ -880,6 +853,56 @@
 											<CircleFadingArrowUp class="size-4" />
 										{/if}
 										Update Scheduling Config
+									</button>
+								{/if}
+
+								{#if d.vmcpID}
+									<a href={resolve(`/vmcps/${d.vmcpID}`)} class="menu-button">
+										<Layers class="size-4" />
+										View vMCP
+									</a>
+									<a href={resolve(`/vmcps?view=deployments&id=${d.vmcpID}`)} class="menu-button">
+										<Layers2 class="size-4" />
+										View vMCP Deployments
+									</a>
+								{:else if d.vmcpInstanceID}
+									<button
+										class="menu-button"
+										onclick={async (e) => {
+											e.stopPropagation();
+											toggle(false);
+											try {
+												const instance = await UserService.getVMCPInstance(d.vmcpInstanceID!, {
+													dontLogErrors: true
+												});
+												await goto(resolve(`/vmcps/${instance.vmcpID}`));
+											} catch {
+												errors.append('Failed to open vMCP.');
+											}
+										}}
+									>
+										<Layers class="size-4" />
+										View vMCP
+									</button>
+									<button
+										class="menu-button"
+										onclick={async (e) => {
+											e.stopPropagation();
+											toggle(false);
+											try {
+												const instance = await UserService.getVMCPInstance(d.vmcpInstanceID!, {
+													dontLogErrors: true
+												});
+												await goto(
+													resolve(vmcpInstancePath(instance.vmcpID, instance.id) as `/${string}`)
+												);
+											} catch {
+												errors.append('Failed to open vMCP deployment.');
+											}
+										}}
+									>
+										<Layers class="size-4" />
+										View vMCP Deployment
 									</button>
 								{/if}
 
@@ -912,24 +935,7 @@
 										{/if}
 									</button>
 								{/if}
-
-								<button
-									onclick={(e) => {
-										e.stopPropagation();
-										const isCtrlClick = e.ctrlKey || e.metaKey;
-										openUrl(auditLogsUrl, isCtrlClick);
-									}}
-									class="menu-button text-left"
-								>
-									<Captions class="size-4" />
-									{#if isComposite}
-										View Parent Server <br /> Audit Logs
-									{:else}
-										View Audit Logs
-									{/if}
-								</button>
-
-								{#if d.isMyServer || (hasAdminAccess && !readonly)}
+								{#if !isVmcpComponent && (d.isMyServer || (hasAdminAccess && !readonly))}
 									<button
 										class="menu-button-destructive"
 										onclick={async (e) => {
@@ -941,14 +947,6 @@
 
 											toggle(false);
 										}}
-										use:tooltip={d.compositeName
-											? {
-													text: 'Cannot directly update a descendant of a composite server; update the composite MCP server instead.',
-													classes: ['w-md'],
-													disablePortal: true
-												}
-											: undefined}
-										disabled={!!d.compositeName}
 									>
 										<Trash2 class="size-4" /> Delete Server
 									</button>
@@ -966,10 +964,10 @@
 						(s) => s.needsUpdate && canTriggerUpdate(s)
 					).length}
 					{@const k8sUpgradeableCount = Object.values(currentSelected).filter(
-						(s) => s.needsK8sUpdate && !s.compositeName
+						(s) => s.needsK8sUpdate
 					).length}
-					{@const deletableCount = Object.values(currentSelected).filter(
-						(s) => !s.compositeName
+					{@const deletableCount = Object.values(currentSelected).filter((s) =>
+						canDeleteServer(s)
 					).length}
 
 					<div class="flex grow items-center justify-end gap-2 px-4 py-2">
@@ -1039,7 +1037,9 @@
 						<button
 							class="btn btn-secondary flex items-center gap-1 text-sm font-normal"
 							onclick={() => {
-								selected = currentSelected;
+								selected = Object.fromEntries(
+									Object.entries(currentSelected).filter(([, s]) => canDeleteServer(s))
+								);
 								showDeleteConfirm = {
 									type: 'multi'
 								};
@@ -1144,14 +1144,9 @@
 	{#snippet note()}
 		<p class="text-sm font-light">
 			{#if showK8sUpgradeConfirm?.type === 'multi'}
-				The selected servers ({Object.values(selected).filter(
-					(s) => s.needsK8sUpdate && !s.compositeName
-				).length})
+				The selected servers ({Object.values(selected).filter((s) => s.needsK8sUpdate).length})
 			{:else}
-				The <span class="font-medium"
-					>{showK8sUpgradeConfirm?.server.compositeName ??
-						showK8sUpgradeConfirm?.server.manifest.name}</span
-				> server
+				The <span class="font-medium">{showK8sUpgradeConfirm?.server.manifest.name}</span> server
 			{/if}
 
 			will be redeployed with the latest Kubernetes settings.
@@ -1181,16 +1176,8 @@
 	names={showDeleteConfirm?.type === 'single'
 		? [showDeleteConfirm.server.manifest.name ?? '']
 		: Object.values(selected)
-				.filter((s) => !s.compositeName)
+				.filter(canDeleteServer)
 				.map((s) => s.manifest.name ?? '')}
-/>
-
-<McpMultiDeleteBlockedDialog
-	show={!!deleteConflictError}
-	error={deleteConflictError}
-	onClose={() => {
-		deleteConflictError = undefined;
-	}}
 />
 
 <EditExistingDeployment

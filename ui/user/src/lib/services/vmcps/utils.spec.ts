@@ -1,22 +1,62 @@
-import { createMCPCatalogEntry } from '../../../tests/helpers/mcp';
+import { createMCPCatalogEntry, createVMCP, createVMCPComponent } from '../../../tests/helpers/mcp';
+import { AiClient } from '../user/constants';
 import { SHORT_DESCRIPTION_MAX_LENGTH } from './constants';
 import type { RectLike } from './types';
 import {
 	appendComponentLabel,
 	borderAnchor,
 	buildMcpServerFilterOptions,
+	buildConnectAllSnippets,
 	buildVMcpComponentFilterOptions,
 	buildWirePath,
+	catalogConfigurationFields,
+	configurationForSnapshotUpdate,
+	configurationWithRevealedValues,
 	distanceToRect,
 	filterMcpServersByCategories,
+	filterVMcps,
 	isJoinedComponentLabel,
 	isWorkspaceOwned,
 	joinComponentLabels,
 	matchesQuery,
+	queryMatchScore,
 	sortMcpServers,
-	sortVMcps
+	sortVMcps,
+	vmcpComponentDiffServers,
+	vmcpConnectURL,
+	vmcpHasUserAllowedConfiguration,
+	vmcpInstanceNeedsUserConfiguration,
+	vmcpNeedsAdminConfiguration,
+	vmcpNeedsUpdate,
+	vmcpOutdatedComponents,
+	vmcpUpdateConfigurationTargets
 } from './utils';
 import { describe, expect, it } from 'vitest';
+
+describe('vmcpConnectURL', () => {
+	it('only exposes a connection URL after the vMCP is ready', () => {
+		const vmcp = createVMCP({ id: 'vmcp1waiting' });
+		expect(vmcpConnectURL(vmcp)).toBe('/mcp-connect/vmcp1waiting');
+		vmcp.status = { ready: false };
+		expect(vmcpConnectURL(vmcp)).toBeUndefined();
+		expect(buildConnectAllSnippets(AiClient.Codex, [vmcp], false)[0].value).toBe('');
+		vmcp.status = undefined;
+		expect(vmcpConnectURL(vmcp)).toBeUndefined();
+	});
+});
+
+describe('vmcpNeedsAdminConfiguration', () => {
+	it('recognizes missing administrator configuration without treating startup waits as configuration gaps', () => {
+		const vmcp = createVMCP();
+		vmcp.status = {
+			ready: false,
+			components: [{ name: vmcp.components![0].name, error: 'waiting for component server' }]
+		};
+		expect(vmcpNeedsAdminConfiguration(vmcp)).toBe(false);
+		vmcp.status.components![0].error = 'missing required administrator configuration: API_TOKEN';
+		expect(vmcpNeedsAdminConfiguration(vmcp)).toBe(true);
+	});
+});
 
 function rect(left: number, top: number, width: number, height: number): RectLike {
 	return { left, top, width, height, right: left + width, bottom: top + height };
@@ -28,6 +68,32 @@ function pointsOf(path: string) {
 		return { x, y };
 	});
 }
+
+describe('catalogConfigurationFields', () => {
+	it('returns the catalog config list', () => {
+		const entry = createMCPCatalogEntry({
+			id: 'entry-1',
+			name: 'Slack',
+			manifest: {
+				config: [
+					{
+						key: 'API_TOKEN',
+						name: 'API token',
+						description: 'Token',
+						required: true,
+						sensitive: true,
+						value: '',
+						usage: 'env'
+					}
+				]
+			}
+		});
+
+		expect(catalogConfigurationFields(entry)).toEqual([
+			expect.objectContaining({ key: 'API_TOKEN', usage: 'env' })
+		]);
+	});
+});
 
 describe('isWorkspaceOwned', () => {
 	it('is true for a workspace server', () => {
@@ -73,54 +139,213 @@ describe('matchesQuery', () => {
 	});
 });
 
-describe('sortVMcps', () => {
-	const zeta = createMCPCatalogEntry({
-		id: 'vmcp-z',
-		name: 'Zeta',
-		runtime: 'composite',
-		created: '2020-01-01T00:00:00.000Z'
+describe('queryMatchScore', () => {
+	const entry = createMCPCatalogEntry({
+		id: 'entry-1',
+		name: 'GitHub',
+		manifest: { shortDescription: 'Issues and pull requests', description: 'Source forge' }
 	});
-	const alpha = createMCPCatalogEntry({
-		id: 'vmcp-a',
-		name: 'Alpha',
-		runtime: 'composite',
-		created: '2024-06-01T00:00:00.000Z',
-		manifest: { compositeConfig: { componentServers: [{ catalogEntryID: 'entry-1' }] } }
+	const vmcp = createVMCP({
+		id: 'vmcp-1',
+		displayName: 'Shared Catalog',
+		description: 'A shared gateway',
+		creatorUserID: 'user-1'
+	});
+	const owners = new Map([
+		[
+			'user-1',
+			{
+				id: 'user-1',
+				username: 'alice',
+				email: 'alice@example.com',
+				displayName: 'Alice Example',
+				created: '2026-01-01T00:00:00.000Z',
+				explicitRole: false,
+				role: 0,
+				effectiveRole: 0,
+				groups: [],
+				iconURL: ''
+			}
+		]
+	]);
+
+	it('scores name and displayName matches highest', () => {
+		expect(queryMatchScore(entry, 'github')).toBe(2);
+		expect(queryMatchScore(vmcp, 'shared')).toBe(2);
 	});
 
+	it('scores description and owner matches lower', () => {
+		expect(queryMatchScore(entry, 'forge')).toBe(1);
+		expect(queryMatchScore(vmcp, 'gateway', owners)).toBe(1);
+		expect(queryMatchScore(vmcp, 'alice', owners)).toBe(1);
+	});
+
+	it('returns zero for unrelated text', () => {
+		expect(queryMatchScore(entry, 'slack')).toBe(0);
+	});
+});
+
+describe('sortVMcps', () => {
+	const zeta = createVMCP({
+		id: 'vmcp-z',
+		displayName: 'Zeta',
+		created: '2020-01-01T00:00:00.000Z',
+		components: []
+	});
+	const alpha = createVMCP(
+		{
+			id: 'vmcp-a',
+			displayName: 'Alpha',
+			created: '2024-06-01T00:00:00.000Z'
+		},
+		[createMCPCatalogEntry({ id: 'entry-1', name: 'GitHub' })]
+	);
+
 	it('orders by name, ignoring case', () => {
-		expect(sortVMcps([zeta, alpha], 'name').map((entry) => entry.id)).toEqual(['vmcp-a', 'vmcp-z']);
+		expect(sortVMcps([zeta, alpha], 'name').map((vmcp) => vmcp.id)).toEqual(['vmcp-a', 'vmcp-z']);
 	});
 
 	it('orders by created date, newest first', () => {
-		expect(sortVMcps([zeta, alpha], 'created').map((entry) => entry.id)).toEqual([
+		expect(sortVMcps([zeta, alpha], 'created').map((vmcp) => vmcp.id)).toEqual([
 			'vmcp-a',
 			'vmcp-z'
 		]);
 	});
 
 	it('orders by component server count, largest first', () => {
-		expect(sortVMcps([zeta, alpha], 'componentServers').map((entry) => entry.id)).toEqual([
+		expect(sortVMcps([zeta, alpha], 'componentServers').map((vmcp) => vmcp.id)).toEqual([
 			'vmcp-a',
 			'vmcp-z'
 		]);
 	});
 });
 
+describe('filterVMcps', () => {
+	const shared = createVMCP({
+		id: 'vmcp-shared',
+		displayName: 'Shared Catalog',
+		userID: undefined
+	});
+	const personal = createVMCP({
+		id: 'vmcp-personal',
+		displayName: 'Personal Workspace',
+		userID: 'user-1'
+	});
+	const owners = new Map([
+		[
+			'user-1',
+			{
+				id: 'user-1',
+				username: 'alice',
+				email: 'alice@example.com',
+				created: '2026-01-01T00:00:00.000Z',
+				explicitRole: false,
+				role: 0,
+				effectiveRole: 0,
+				groups: [],
+				iconURL: ''
+			}
+		]
+	]);
+
+	it('finds shared vMCPs without a userID by display name', () => {
+		expect(
+			filterVMcps([shared, personal], { query: 'shared' }, owners).map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-shared']);
+	});
+
+	it('filters by connection status for the current user', () => {
+		const connected = createVMCP({ id: 'vmcp-connected', displayName: 'Connected vMCP' });
+		const disconnected = createVMCP({ id: 'vmcp-disconnected', displayName: 'Disconnected vMCP' });
+		const instances = [
+			{
+				id: 'vmcpi-1',
+				vmcpID: 'vmcp-connected',
+				userID: 'user-1',
+				created: '2026-01-01T00:00:00.000Z'
+			}
+		];
+
+		expect(
+			filterVMcps([connected, disconnected], { status: 'connected' }, owners, {
+				instances,
+				userId: 'user-1'
+			}).map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-connected']);
+		expect(
+			filterVMcps([connected, disconnected], { status: 'not-connected' }, owners, {
+				instances,
+				userId: 'user-1'
+			}).map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-disconnected']);
+	});
+
+	it('filters by update and configuration status', () => {
+		const needsUpdate = createVMCP({ id: 'vmcp-update', displayName: 'Needs Update' });
+		needsUpdate.status = { components: [{ name: 'GitHub', needsUpdate: true }] };
+		const notConfigured = createVMCP({ id: 'vmcp-config', displayName: 'Not Configured' });
+		const instances = [
+			{
+				id: 'vmcpi-1',
+				vmcpID: 'vmcp-config',
+				userID: 'user-1',
+				created: '2026-01-01T00:00:00.000Z',
+				status: { missingRequiredConfiguration: ['component.API_TOKEN'] }
+			}
+		];
+
+		expect(
+			filterVMcps([needsUpdate, notConfigured], { status: 'needs-update' }, owners, {
+				instances,
+				userId: 'user-1'
+			}).map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-update']);
+		expect(
+			filterVMcps([needsUpdate, notConfigured], { status: 'not-configured' }, owners, {
+				instances,
+				userId: 'user-1'
+			}).map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-config']);
+	});
+
+	it('safely handles owners without username or email', () => {
+		const incompleteOwners = new Map([
+			[
+				'user-1',
+				{
+					id: 'user-1',
+					username: undefined as unknown as string,
+					email: undefined as unknown as string,
+					created: '2026-01-01T00:00:00.000Z',
+					explicitRole: false,
+					role: 0,
+					effectiveRole: 0,
+					groups: [],
+					iconURL: ''
+				}
+			]
+		]);
+
+		expect(() =>
+			filterVMcps([shared, personal], { query: 'shared' }, incompleteOwners).map((vmcp) => vmcp.id)
+		).not.toThrow();
+		expect(
+			filterVMcps([shared, personal], { query: 'shared' }, incompleteOwners).map((vmcp) => vmcp.id)
+		).toEqual(['vmcp-shared']);
+	});
+});
+
 describe('vMCP filter options', () => {
-	const first = createMCPCatalogEntry({
-		id: 'vmcp-a',
-		name: 'Alpha',
-		runtime: 'composite',
-		powerUserID: 'user-1',
-		manifest: { compositeConfig: { componentServers: [{ catalogEntryID: 'entry-github' }] } }
-	});
-	const second = createMCPCatalogEntry({
-		id: 'vmcp-b',
-		name: 'Bravo',
-		runtime: 'composite',
-		manifest: { compositeConfig: { componentServers: [{ catalogEntryID: 'entry-github' }] } }
-	});
+	const github = createMCPCatalogEntry({ id: 'entry-github', name: 'GitHub' });
+	const first = createVMCP(
+		{
+			id: 'vmcp-a',
+			displayName: 'Alpha',
+			userID: 'user-1'
+		},
+		[github]
+	);
+	const second = createVMCP({ id: 'vmcp-b', displayName: 'Bravo' }, [github]);
 
 	it('lists component servers without duplicates', () => {
 		expect(
@@ -314,5 +539,234 @@ describe('appendComponentLabel', () => {
 		const next = appendComponentLabel(existing, [existing], added, SHORT_DESCRIPTION_MAX_LENGTH);
 		expect(next).toHaveLength(SHORT_DESCRIPTION_MAX_LENGTH);
 		expect(next?.startsWith(existing)).toBe(true);
+	});
+});
+
+describe('vmcpNeedsUpdate', () => {
+	it('detects when any vMCP component needs an update', () => {
+		const vmcp = createVMCP({ id: 'vmcp-1' });
+		expect(vmcpNeedsUpdate(vmcp)).toBe(false);
+		vmcp.status = {
+			components: [
+				{ name: 'slack', needsUpdate: false },
+				{ name: 'github', needsUpdate: true }
+			]
+		};
+		expect(vmcpNeedsUpdate(vmcp)).toBe(true);
+	});
+});
+
+describe('vmcpHasUserAllowedConfiguration', () => {
+	it('is true when a component has a user-allowed policy', () => {
+		const vmcp = createVMCP({ id: 'vmcp-1' });
+		expect(vmcpHasUserAllowedConfiguration(vmcp)).toBe(false);
+		vmcp.components![0].configuration = [{ key: 'API_TOKEN', policy: 'userAllowed' }];
+		expect(vmcpHasUserAllowedConfiguration(vmcp)).toBe(true);
+	});
+});
+
+describe('vmcpInstanceNeedsUserConfiguration', () => {
+	it('is true when the instance is missing required configuration', () => {
+		expect(vmcpInstanceNeedsUserConfiguration()).toBe(false);
+		expect(
+			vmcpInstanceNeedsUserConfiguration({
+				id: 'vmcpi-1',
+				vmcpID: 'vmcp-1',
+				userID: 'user-1',
+				created: '2026-01-01T00:00:00Z',
+				status: { missingRequiredConfiguration: ['component-1.API_TOKEN'] }
+			})
+		).toBe(true);
+	});
+});
+
+describe('vmcpOutdatedComponents', () => {
+	it('returns outdated components and diff targets from catalog entries', () => {
+		const entry = createMCPCatalogEntry({ id: 'entry-1', name: 'GitHub' });
+		const vmcp = createVMCP(
+			{
+				status: {
+					components: [{ name: 'GitHub', needsUpdate: true }]
+				}
+			},
+			[entry]
+		);
+		const updatedEntry = createMCPCatalogEntry({
+			id: 'entry-1',
+			name: 'GitHub',
+			manifest: { repoURL: 'https://github.com/example/updated' }
+		});
+
+		expect(vmcpOutdatedComponents(vmcp)).toHaveLength(1);
+		expect(vmcpComponentDiffServers(vmcp.components![0], updatedEntry)).toMatchObject({
+			fromServer: {
+				id: 'entry-1',
+				manifest: { name: 'GitHub', runtime: 'npx' }
+			},
+			toServer: {
+				id: 'entry-1',
+				manifest: { name: 'GitHub', repoURL: 'https://github.com/example/updated' }
+			}
+		});
+	});
+
+	it('omits tool previews and informational fields from the diff', () => {
+		const informational = {
+			metadata: { categories: 'Developer Tools' },
+			shortDescription: 'Short description',
+			description: 'Description',
+			icon: 'https://example.com/icon.png',
+			upgradeNote: 'Read before upgrading.'
+		};
+		const entry = createMCPCatalogEntry({ id: 'entry-1', name: 'GitHub', manifest: informational });
+		const vmcp = createVMCP({}, [entry]);
+		const updatedEntry = createMCPCatalogEntry({
+			id: 'entry-1',
+			name: 'GitHub',
+			manifest: {
+				metadata: { categories: 'Productivity' },
+				shortDescription: 'Updated short description',
+				description: 'Updated description',
+				icon: 'https://example.com/updated.png',
+				upgradeNote: 'Updated upgrade note.',
+				repoURL: 'https://github.com/example/updated',
+				toolPreview: [{ id: 'echo', name: 'echo', description: 'Echo input' }]
+			}
+		});
+
+		const { fromServer, toServer } = vmcpComponentDiffServers(vmcp.components![0], updatedEntry);
+
+		for (const field of [...Object.keys(informational), 'toolPreview']) {
+			expect(fromServer?.manifest).not.toHaveProperty(field);
+			expect(toServer?.manifest).not.toHaveProperty(field);
+		}
+		expect(toServer?.manifest.repoURL).toBe('https://github.com/example/updated');
+		expect(updatedEntry.manifest.toolPreview).toHaveLength(1);
+		expect(updatedEntry.manifest.description).toBe('Updated description');
+		expect(vmcp.components![0].catalogEntry.manifest.icon).toBe(informational.icon);
+	});
+});
+
+describe('vmcpUpdateConfigurationTargets', () => {
+	it('uses the latest catalog entry when an outdated component has configuration', () => {
+		const snapshot = createMCPCatalogEntry({ id: 'entry-1', name: 'GitHub' });
+		const latest = createMCPCatalogEntry({
+			id: 'entry-1',
+			name: 'GitHub',
+			manifest: {
+				config: [
+					{
+						key: 'API_TOKEN',
+						name: 'API token',
+						description: 'Token',
+						required: true,
+						sensitive: true,
+						value: '',
+						usage: 'env'
+					}
+				]
+			}
+		});
+		const vmcp = createVMCP(
+			{
+				status: {
+					components: [{ name: 'GitHub', needsUpdate: true }]
+				}
+			},
+			[snapshot]
+		);
+
+		expect(vmcpUpdateConfigurationTargets(vmcp, [latest])).toEqual([
+			{ component: vmcp.components![0], entry: latest }
+		]);
+		expect(vmcpUpdateConfigurationTargets(vmcp, [snapshot])).toEqual([]);
+		expect(vmcpUpdateConfigurationTargets(vmcp, [])).toEqual([]);
+	});
+});
+
+describe('configurationForSnapshotUpdate', () => {
+	function snapshotComponent(
+		config: Array<{
+			key: string;
+			required?: boolean;
+			value?: string;
+			secretBinding?: { name: string; key: string };
+		}>,
+		configuration: Array<{
+			key: string;
+			policy?: 'prohibited' | 'fixed' | 'userAllowed';
+			value?: string;
+		}>
+	) {
+		const entry = createMCPCatalogEntry({
+			id: 'entry-1',
+			name: 'Everything',
+			manifest: {
+				config: config.map((field) => ({
+					key: field.key,
+					name: field.key,
+					description: field.key,
+					required: field.required ?? false,
+					sensitive: false,
+					value: field.value ?? '',
+					usage: 'env' as const,
+					...(field.secretBinding ? { secretBinding: field.secretBinding } : {})
+				}))
+			}
+		});
+		return createVMCPComponent(entry, { configuration });
+	}
+
+	it('keeps required snapshot keys omitted from the latest catalog payload', () => {
+		const component = snapshotComponent(
+			[{ key: 'TEST_KEY_B', required: true }],
+			[{ key: 'TEST_KEY_B', policy: 'fixed', value: '******' }]
+		);
+
+		expect(
+			configurationForSnapshotUpdate(component, [{ key: 'API_TOKEN', policy: 'userAllowed' }])
+		).toEqual([
+			{ key: 'API_TOKEN', policy: 'userAllowed' },
+			{ key: 'TEST_KEY_B', policy: 'fixed' }
+		]);
+	});
+
+	it('does not keep keys already present, optional, or catalog-supplied', () => {
+		const component = snapshotComponent(
+			[
+				{ key: 'TOKEN', required: true },
+				{ key: 'OPTIONAL' },
+				{ key: 'STATIC', required: true, value: 'catalog' },
+				{ key: 'BOUND', required: true, secretBinding: { name: 'config', key: 'token' } }
+			],
+			[
+				{ key: 'TOKEN', policy: 'fixed', value: 'secret' },
+				{ key: 'OPTIONAL', policy: 'prohibited' },
+				{ key: 'STATIC', policy: 'prohibited' },
+				{ key: 'BOUND', policy: 'userAllowed' },
+				{ key: 'GONE', policy: 'fixed', value: 'stale' }
+			]
+		);
+
+		expect(
+			configurationForSnapshotUpdate(component, [{ key: 'TOKEN', policy: 'userAllowed' }])
+		).toEqual([{ key: 'TOKEN', policy: 'userAllowed' }]);
+	});
+});
+
+describe('configurationWithRevealedValues', () => {
+	it('fills fixed policies from revealed secrets', () => {
+		expect(
+			configurationWithRevealedValues(
+				[
+					{ key: 'API_TOKEN', policy: 'fixed', value: '******' },
+					{ key: 'REGION', policy: 'userAllowed' }
+				],
+				{ API_TOKEN: 'secret' }
+			)
+		).toEqual([
+			{ key: 'API_TOKEN', policy: 'fixed', value: 'secret' },
+			{ key: 'REGION', policy: 'userAllowed' }
+		]);
 	});
 });

@@ -53,6 +53,7 @@
 	aria-expanded={open}
 	aria-controls={VMCP_IDS.SETTINGS_PANEL_ID}
 	onclick={() => dialog?.open()}
+	class="dark:hover:bg-base-100"
 >
 	<Settings class="size-4" />
 </IconButton>
@@ -65,7 +66,7 @@
 	onOpen={() => (open = true)}
 	onClose={() => (open = false)}
 >
-	<div class="flex flex-col">
+	<div class="flex flex-col p-4 md:p-0">
 		<label class="flex items-center gap-2 text-sm">
 			<input
 				type="checkbox"

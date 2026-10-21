@@ -2,11 +2,20 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"time"
 )
 
 const (
 	ObotAccessTokenCookie = "obot_access_token"
+
+	// AuthProviderVerifyCookie carries the ID of an in-flight staged-provider verification across
+	// the OAuth round trip, so only the browser that started it can log in through the staged
+	// provider.
+	AuthProviderVerifyCookie = "obot_auth_provider_verify"
+
+	// AuthProviderVerifyWindow is how long a staged-provider verification stays open.
+	AuthProviderVerifyWindow = 15 * time.Minute
 )
 
 // SerializableRequest represents an HTTP request that can be serialized for authentication flows
@@ -18,12 +27,13 @@ type SerializableRequest struct {
 
 // SerializableState represents the authentication state returned from auth providers
 type SerializableState struct {
-	ExpiresOn         *time.Time `json:"expiresOn"`
-	AccessToken       string     `json:"accessToken"`
-	PreferredUsername string     `json:"preferredUsername"`
-	User              string     `json:"user"`
-	Email             string     `json:"email"`
-	SetCookies        []string   `json:"setCookies"`
+	ExpiresOn             *time.Time `json:"expiresOn"`
+	AccessToken           string     `json:"accessToken"`
+	PreferredUsername     string     `json:"preferredUsername"`
+	User                  string     `json:"user"`
+	Email                 string     `json:"email"`
+	SetCookies            []string   `json:"setCookies"`
+	RequirePasswordChange bool       `json:"requirePasswordChange,omitempty"`
 }
 
 // GroupInfo represents information about a user group from an authentication provider
@@ -35,6 +45,16 @@ type GroupInfo struct {
 
 type authProviderURLKey struct{}
 type authProviderGroupIDPrefixKey struct{}
+
+func ClearAuthProviderVerifyCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     AuthProviderVerifyCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+	})
+}
 
 // ContextWithProviderURL adds the auth provider URL to the context
 func ContextWithProviderURL(ctx context.Context, url string) context.Context {

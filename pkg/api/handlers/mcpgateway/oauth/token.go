@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -20,7 +21,6 @@ import (
 	"github.com/obot-platform/obot/pkg/jwt/persistent"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	"github.com/obot-platform/obot/pkg/storage/selectors"
-	"github.com/obot-platform/obot/pkg/utils"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -193,6 +193,11 @@ func (h *handler) doAuthorizationCode(req api.Context, oauthClient v1.OAuthClien
 		AuthProviderUserID:    oauthAuthRequest.Spec.AuthProviderUserID,
 		MCPID:                 oauthAuthRequest.Spec.MCPID,
 	}
+
+	if oauthAuthRequest.Spec.Audience != "" && oauthAuthRequest.Spec.MCPID != oauthAuthRequest.Spec.Audience {
+		tknCtx.AuthorizedMCPIDs = []string{oauthAuthRequest.Spec.Audience}
+	}
+
 	_, tkn, err := h.tokenService.NewToken(req.Context(), tknCtx)
 	if err != nil {
 		return fmt.Errorf("failed to create auth token: %w", err)
@@ -212,6 +217,7 @@ func (h *handler) doAuthorizationCode(req api.Context, oauthClient v1.OAuthClien
 			AuthProviderName:      oauthAuthRequest.Spec.AuthProviderName,
 			AuthProviderUserID:    oauthAuthRequest.Spec.AuthProviderUserID,
 			MCPID:                 oauthAuthRequest.Spec.MCPID,
+			Audience:              oauthAuthRequest.Spec.Audience,
 		},
 	}
 
@@ -279,6 +285,11 @@ func (h *handler) doRefreshToken(req api.Context, oauthClient v1.OAuthClient, re
 		return fmt.Errorf("failed to refresh oauth token: %w", err)
 	}
 
+	// For backwards compatibility, if the Audience field isn't set on the oauthToken, then set it from the Resource field.
+	if oauthToken.Spec.Audience == "" {
+		oauthToken.Spec.Audience, _ = strings.CutPrefix(oauthToken.Spec.Resource, h.baseURL+"/mcp-connect/")
+	}
+
 	now := time.Now()
 	tknCtx := persistent.TokenContext{
 		OAuthScope:            oauthToken.Spec.Scope,
@@ -287,13 +298,18 @@ func (h *handler) doRefreshToken(req api.Context, oauthClient v1.OAuthClient, re
 		ExpiresAt:             persistent.NewTime(now.Add(tokenExpiration)),
 		UserID:                user.GetUID(),
 		UserName:              user.GetName(),
-		UserEmail:             utils.FirstSet(user.GetExtra()["email"]...),
+		UserEmail:             cmp.Or(user.GetExtra()["email"]...),
 		UserGroups:            []string{types.GroupMCP, types.GroupAuthenticated},
 		AuthProviderName:      oauthToken.Spec.AuthProviderName,
 		AuthProviderNamespace: oauthToken.Spec.AuthProviderNamespace,
 		AuthProviderUserID:    oauthToken.Spec.AuthProviderUserID,
 		MCPID:                 oauthToken.Spec.MCPID,
 	}
+
+	if oauthToken.Spec.Audience != "" && oauthToken.Spec.MCPID != oauthToken.Spec.Audience {
+		tknCtx.AuthorizedMCPIDs = []string{oauthToken.Spec.Audience}
+	}
+
 	_, tkn, err := h.tokenService.NewToken(req.Context(), tknCtx)
 	if err != nil {
 		return fmt.Errorf("failed to create auth token: %w", err)
@@ -313,6 +329,7 @@ func (h *handler) doRefreshToken(req api.Context, oauthClient v1.OAuthClient, re
 			AuthProviderName:      oauthToken.Spec.AuthProviderName,
 			AuthProviderUserID:    oauthToken.Spec.AuthProviderUserID,
 			MCPID:                 oauthToken.Spec.MCPID,
+			Audience:              oauthToken.Spec.Audience,
 		},
 	}
 

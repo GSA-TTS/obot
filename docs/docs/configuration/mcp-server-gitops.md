@@ -6,6 +6,8 @@ title: MCP Server GitOps
 
 Obot supports managing MCP servers through Git repositories, enabling GitOps workflows. Instead of manually adding MCP servers one at a time, administrators can source server configurations from Git repositories. This supports collaborative workflows with proper code review, versioning, and automated validation processes.
 
+Catalog sources can also define [vMCPs](../functionality/virtual-mcps.md) whose components refer to entries in those sources.
+
 ### Key Benefits
 
 - **Version Control**: Change tracking, rollback capabilities, and branch-based development
@@ -40,9 +42,11 @@ Connection URLs for MCP servers are derived from catalog entry names. Git-synced
 | GitLab | `https://gitlab.com/org/repo` or `https://gitlab.com/org/repo.git` |
 | GitLab with branch | `https://gitlab.com/org/repo/my-branch` |
 | GitLab with subgroups | `https://gitlab.com/group/subgroup/repo.git` |
+| Bitbucket Cloud | `https://bitbucket.org/workspace/repo` or `https://bitbucket.org/workspace/repo.git` |
+| Bitbucket Cloud with branch | `https://bitbucket.org/workspace/repo/my-branch` |
 | Self-hosted | `https://git.example.com/org/repo.git` |
 
-For GitHub and GitLab a `.git` suffix is optional. For self-hosted instances it is required. To specify a branch on GitHub or GitLab, append it after the repo name (e.g. `/my-branch`). GitLab subgroup repositories require the `.git` suffix to distinguish the subgroup path from a branch name.
+For GitHub, GitLab, and Bitbucket Cloud a `.git` suffix is optional. For self-hosted instances it is required. To specify a branch, append it after the repository name (e.g. `/my-branch` or `.git/my-branch`). GitLab subgroup repositories require the `.git` suffix to distinguish the subgroup path from a branch name. If no branch is specified, Obot uses `main`.
 
 ### Private repositories
 
@@ -52,12 +56,84 @@ To pull from a private repository, enter a **Personal access token** in the opti
 
 - **GitHub**: `repo` (read access is sufficient)
 - **GitLab**: `read_repository` (clone access) + `read_api` (pre-clone size check)
+- **Bitbucket Cloud personal API token**: `read:repository:bitbucket`, belonging to a user with access to the repository. See [Atlassian's API token documentation](https://support.atlassian.com/bitbucket-cloud/docs/using-api-tokens/).
+- **Bitbucket Cloud repository access token**: **Repositories → Read** on the catalog repository. Create one under the repository's **Settings → Security → Access tokens**. See [Atlassian's repository access token documentation](https://support.atlassian.com/bitbucket-cloud/docs/create-a-repository-access-token/).
+
+For private Bitbucket Cloud repositories, enter either token type in the **Personal access token** field. Use a repository URL such as `https://bitbucket.org/workspace/repo`; no username or token is needed in the URL. Public Bitbucket Cloud repositories do not require a token.
 
 If no per-URL token is configured, Obot falls back to the `GITHUB_AUTH_TOKEN` environment variable.
 
+## Selecting Catalog Files
+
+Obot recursively scans for `*.json`, `*.yaml`, and `*.yml` files. Hidden child directories such as `.git` and `.github` are always skipped, so GitHub Actions workflows can live alongside catalog entries. Keep catalog entries outside hidden directories.
+
+To customize discovery, add these files at the catalog repository root. Both accept one pattern per line, ignoring blank lines and `#` comments.
+
+### `.obotcatalogs`: include files
+
+A nonempty pattern list replaces the defaults. Patterns without `/` match filenames at any depth; patterns with `/` match paths relative to the catalog root:
+
+```text
+# Matching filenames anywhere in the repository
+*.mcp.yaml
+
+# YAML files directly inside servers/
+servers/*.yaml
+```
+
+### `.ignoreobotcatalogs`: exclude files or directories
+
+Patterns match root-relative paths and override includes. Matching a directory excludes its entire subtree:
+
+```text
+scripts
+renovate.json
+.pre-commit-config.yaml
+```
+
+Wildcards do not cross `/`, and `**` is not recursive. To exclude a whole directory tree, list the directory itself. Include patterns must match files; a bare directory does not include its contents.
+
+## Validating Catalog Entries
+
+With the `obot` CLI installed, run this from your catalog repository root before pushing changes:
+
+```sh
+obot mcp validate-catalog .
+```
+
+Directory validation honors the same pattern files and hidden-directory skipping as catalog sync, then selects files for `--format`: `*.yaml` and `*.yml` for `yaml` (the default), or `*.json` for `json`. It checks the selected catalog entries and exits with an error if validation fails, making it suitable for CI.
+
+You can also validate individual files:
+
+```sh
+obot mcp validate-catalog servers/github.yaml
+```
+
+Explicit file arguments are validated directly, without applying directory filters. Use `--format json` to require JSON input:
+
+```sh
+obot mcp validate-catalog --format json servers/github.json
+obot mcp validate-catalog --format json .
+```
+
+For system MCP catalog entries, use `obot mcp validate-system-catalog` with the same `--format yaml|json` flag. Both commands default to `yaml`; other format values are rejected.
+
+The previous names, `validate-catalog-yaml` and `validate-system-catalog-yaml`, remain available as compatibility aliases with the same flags and YAML default.
+
+## Converting Legacy Catalog Configuration
+
+Use `obot mcp convert-catalog` to migrate legacy `env`, header, and `serverUserType` fields to the current `config` schema in place:
+
+```sh
+obot mcp convert-catalog servers/github.yaml
+obot mcp convert-catalog --format json servers/github.json
+```
+
+`--format` defaults to `yaml` and accepts `yaml` or `json`. For a directory, only files with the selected format's extensions are converted, honoring `.obotcatalogs` and `.ignoreobotcatalogs`. YAML conversion preserves comments; JSON conversion writes JSON. Unknown fields are retained, and a file that fails conversion is left unchanged. Review the changes before publishing. Composite definitions must be migrated to vMCPs separately. The previous name, `convert-catalog-yaml`, remains a compatibility alias.
+
 ## Configuration Format
 
-MCP server configurations consist of individual YAML files, each defining a single MCP server. These files contain comprehensive metadata including:
+MCP server configurations can use YAML or JSON files, each defining a single MCP server. The examples below use YAML. These files contain comprehensive metadata including:
 
 - **Name and Description**: Human-readable identification
 - **Tool Previews**: Documentation of available tools and their parameters
@@ -75,14 +151,98 @@ Each MCP server is defined in its own YAML file with the following structure:
 ### Basic Information
 
 ```yaml
-entryKey: server-name # optional key for referencing in composite servers
+entryKey: server-name # optional stable key within this source
 name: Server Name
 description: |
   Detailed description of the server's capabilities and features.
   Supports multi-line markdown formatting.
 ```
 
-The optional `entryKey` field defines a stable key for this catalog entry. It must be unique within its source, DNS-friendly, and cannot contain `::`. This is used when [composite MCP servers](#composite-mcp-servers) need to reference entries without knowing Obot's generated internal catalog entry ID.
+The optional `entryKey` field defines a stable key for this catalog entry. It must be unique within its source, DNS-friendly, and cannot contain `::`.
+
+### vMCP definitions
+
+Set top-level `type: vmcp` to synchronize a vMCP. An omitted or empty `type` means `entry`. A vMCP uses the [vMCP manifest fields](../functionality/virtual-mcps.md), plus an optional `entryKey` that keeps its identity stable when its display name changes:
+
+```yaml
+type: vmcp
+entryKey: research
+displayName: Research
+components:
+  - name: Search
+    id: search-component
+    mcpServerCatalogEntryKey: search
+```
+
+Each component's `mcpServerCatalogEntryKey` names an entry's `entryKey` in the same source. To refer to an entry in another source of the same catalog, use `sourceID::entryKey`, where `sourceID` is the source URL without `http://` or `https://` and trailing slashes. Catalog entries used as vMCP components therefore need an `entryKey`. A vMCP can be in its own file or in a YAML/JSON list alongside entries.
+
+For example, to reference `entryKey: search` from the catalog source `https://github.com/example/shared-catalog/`:
+
+```yaml
+components:
+  - name: Search
+    id: search-component
+    mcpServerCatalogEntryKey: github.com/example/shared-catalog::search
+```
+
+Every component must have a nonblank `id`. If a profile uses `allowedComponents`, use that ID as the map key. Keep component IDs stable across updates so saved configuration stays associated with the same component. When adopting an [orphaned vMCP](#migrating-git-synced-composites-to-vmcps), use its existing component IDs.
+
+```yaml
+type: vmcp
+entryKey: research
+displayName: Research
+components:
+  - id: search-component
+    name: Search
+    mcpServerCatalogEntryKey: search
+profiles:
+  - name: everyone
+    subjects:
+      - type: selector
+        id: "*"
+    vmcpPermissions:
+      allowedComponents:
+        search-component:
+          allowedTools: null # Allow all enabled tools for this component.
+```
+
+A component's `configuration` sets a policy for each of its entry's configuration fields: `fixed`, `userAllowed`, or `prohibited`. A `fixed` field can use `secretBinding` instead of a clear-text `value` so Obot reads the value from a Kubernetes Secret when the component server starts:
+
+```yaml
+components:
+  - id: gitlab-component
+    name: GitLab
+    mcpServerCatalogEntryKey: obot-gitlab
+    configuration:
+      - key: GITLAB_PERSONAL_ACCESS_TOKEN
+        policy: fixed
+        secretBinding:
+          name: gitlab-secret # Kubernetes Secret name
+          key: gitlab_key     # Key within that Secret
+```
+
+vMCP secret bindings follow the same rules as [catalog entry secret bindings](#kubernetes-secret-bindings) and are only available in Git catalog sources. A binding cannot be combined with `value`, and the entry's field must not define a static `value`. Catalog synced vMCPs cannot be configured through the Obot UI or API, so sync reports an error and does not create the vMCP when a required `fixed` field has neither a `value` nor a `secretBinding`.
+
+When replacing a migrated composite with a catalog vMCP, keep the same `entryKey` and catalog source. Migration and sync use these to generate the same vMCP ID, preserving existing connections and credentials. Sync marks the vMCP as `adopted` when it takes over management. If the original entry had no `entryKey`, retain its name as the vMCP's `displayName` for matching.
+
+For example, if the original composite had `entryKey: email` and `name: Email`, publish this replacement in the same catalog source after migration:
+
+```yaml
+type: vmcp
+entryKey: email
+displayName: Email
+components:
+  - name: Gmail
+    id: gmail-component
+    mcpServerCatalogEntryKey: obot-gmail
+  - name: Outlook
+    id: outlook-component
+    mcpServerCatalogEntryKey: obot-outlook
+```
+
+The source must also contain entries with `entryKey: obot-gmail` and `entryKey: obot-outlook`. If the original composite had no `entryKey`, omit `entryKey: email` above and keep `displayName: Email` unchanged.
+
+Rather than writing replacements by hand, use `obot mcp generate-vmcp-catalog` to generate them. See [Migrating Git-synced composites to vMCPs](#migrating-git-synced-composites-to-vmcps).
 
 ### Tool Previews
 
@@ -105,6 +265,10 @@ icon: https://example.com/icon.png
 repoURL: https://github.com/owner/repo
 ```
 
+`unsupportedTools` is a comma-separated list of tools that are known not to work well in Obot. Obot marks these tools as unsupported and leaves them unselected by default, but this field is not an access-control restriction: a client connected directly to the MCP server can still discover them through `tools/list` and call them.
+
+To restrict which tools clients can discover and call, create a [virtual MCP (vMCP)](../concepts/mcp-hosting.md#virtual-mcps-vmcps) and configure its exposed tools and access profiles.
+
 ### Environment Variables
 
 ```yaml
@@ -115,6 +279,14 @@ env:
     sensitive: true
     description: Description of this variable
 ```
+
+#### Static values
+
+A field with a `value` is static configuration: users are not asked for it. Obot stores static values
+in its encrypted credential store and omits them from the catalog entry returned by the API, so they
+are not visible to users who can connect to the entry. The value is still clear text in the Git
+repository; use a [secret binding](#kubernetes-secret-bindings) for secrets that should not be
+committed. Removing a `value` from the source removes it from the entry on the next sync.
 
 #### Selectable configuration values
 
@@ -177,83 +349,11 @@ The `serverUserType` field specifies how users interact with the catalog entry:
 
 Catalog entries should set this field explicitly. For compatibility with existing catalogs, some import paths normalize an omitted value to `singleUser` before validation. Any persisted value other than `singleUser` or `multiUser` is rejected at validation time.
 
-Multi-user catalog templates support the `npx`, `uvx`, `containerized`, and `remote` runtimes. They do not support the `composite` runtime.
+Catalog templates support the `npx`, `uvx`, `containerized`, and `remote` runtimes.
 
-### Composite MCP servers
+### Composite runtime removal
 
-Composite MCP servers combine tools from other catalog entries. In GitOps, composite entries can reference component entries in three ways:
-
-- Use a normal internal `catalogEntryID`, such as `default-gmail-8a99d8be`
-- Use a same-source portable key with `{entryKey}`. The target entry must define `entryKey` and must be in the same source.
-- Use a cross-source portable key with `{sourceID}::{entryKey}`. Obot uses the configured source URL without the `https://` prefix as `sourceID`. For example, `https://github.com/company/mcp-catalog` is referenced as `github.com/company/mcp-catalog`. The target entry must define `entryKey`.
-
-Portable references are useful when the target entry is in the same Git catalog sync and does not have an internal generated ID yet, or when you want to use a purely-gitops workflow.
-
-```yaml
-name: Gmail Composite
-runtime: composite
-compositeConfig:
-  componentServers:
-    - catalogEntryID: gmail
-    - catalogEntryID: github.com/company/mcp-catalog::gmail
-```
-
-During sync, Obot resolves portable keys to internal generated catalog entry IDs and stores the internal IDs. If `catalogEntryID` does not contain `::` and does not match an `entryKey` in the same source, Obot treats it as an internal catalog entry ID and leaves it unchanged.
-
-#### Composite configuration fields
-
-| Field | Required | Description |
-|---|---:|---|
-| `compositeConfig.componentServers` | Yes | List of component servers included in the composite server. |
-| `componentServers[].catalogEntryID` | Yes, unless `mcpServerID` is set | Catalog entry reference. This can be an internal catalog entry ID, same-source `entryKey`, or cross-source `{sourceID}::{entryKey}`. |
-| `componentServers[].mcpServerID` | Yes, unless `catalogEntryID` is set | Existing deployed MCP server to include as a component. Use this when a composite should include a multi-user server that has already been deployed. |
-| `componentServers[].toolPrefix` | No | Prefix added to every exposed tool from this component after any `overrideName` is applied. For example, `configured_` turns `echo` into `configured_echo`. |
-| `componentServers[].toolOverrides` | No | Tool allowlist and customization list. If omitted, all tools from the component are exposed. If present, only tools listed with `enabled: true` are exposed; tools not listed are hidden. |
-| `componentServers[].toolOverrides[].name` | Yes | Original tool name returned by the component server. |
-| `componentServers[].toolOverrides[].enabled` | No | Whether this tool is exposed by the composite server. Defaults to `false`, so set `enabled: true` for every tool you want to expose. |
-| `componentServers[].toolOverrides[].overrideName` | No | Replacement tool name before `toolPrefix` is applied. If omitted, the original `name` is used. |
-| `componentServers[].toolOverrides[].overrideDescription` | No | Replacement tool description. Use this for custom tool text in Git-managed catalogs. |
-| `componentServers[].toolOverrides[].description` | No | Reserved for Obot's live/source tool metadata and rejected in Git-synced tool overrides. Use `overrideDescription` instead. |
-
-To get `mcpServerID` for an existing deployed multi-tenant server, open the server in Obot, choose **Connect URL**, and copy the path segment after `/mcp-connect/`. For example, if the connect URL is `https://obot.example.com/mcp-connect/ms1qc7nz`, use `ms1qc7nz` as `mcpServerID`.
-
-When `toolOverrides` is present, it acts as an allowlist. This means adding a tool to the list without `enabled: true` disables that tool, and also hides any other component tools that are not listed. To disable only a few tools, list those disabled tools and also list every tool you still want exposed with `enabled: true`. To rename or redescribe a tool while keeping it available, include `enabled: true`.
-
-This does not expose `web_search_exa`:
-
-```yaml
-name: Research Search Composite
-runtime: composite
-compositeConfig:
-  componentServers:
-    - catalogEntryID: github.com/obot-platform/mcp-catalog::obot-exa-search
-      toolOverrides:
-        - name: web_search_exa
-```
-
-Because `enabled` defaults to `false`, that component exposes no tools. Set `enabled: true` for each tool that should be available:
-
-```yaml
-name: Research Search Composite
-runtime: composite
-compositeConfig:
-  componentServers:
-    - catalogEntryID: github.com/obot-platform/mcp-catalog::obot-exa-search
-      toolPrefix: research_
-      toolOverrides:
-        - name: web_search_exa
-          enabled: true
-          overrideName: web_search
-          overrideDescription: Search the web for current research and source material.
-        - name: company_research_exa
-          enabled: true
-          overrideName: company_research
-          overrideDescription: Find company information and market context.
-        - name: crawling_exa
-          enabled: false
-```
-
-This example exposes `research_web_search` and `research_company_research`, and hides `crawling_exa`. Because `toolOverrides` is an allowlist, any other tools from the Exa component are also hidden unless they are listed with `enabled: true`.
+Catalog entries with `runtime: composite` are no longer supported, including entries imported through GitOps. Obot converts existing composites to vMCPs when it upgrades. Replace the composite definitions in your catalog sources with vMCP definitions, as described in [Migrating Git-synced composites to vMCPs](#migrating-git-synced-composites-to-vmcps).
 
 #### Multi-user template with shared configuration
 
@@ -494,3 +594,95 @@ remoteConfig:
 ```
 
 This example demonstrates all the key components: descriptive content with markdown formatting, tool previews with parameter documentation, metadata classification, and remote runtime configuration with authentication headers.
+
+## Migrating Git-synced composites to vMCPs
+
+When Obot upgrades to a release without composite MCP servers, it converts every composite catalog entry to a [vMCP](../functionality/virtual-mcps.md) at startup. The vMCP keeps the composite's components, tool settings, access, configuration, and users' existing connections and credentials.
+
+Composites that you created in the Obot UI need no further action. A composite that was synced from a Git source becomes an **orphaned** vMCP: Obot keeps serving it, but no catalog source defines it. To manage it through GitOps again, publish a matching vMCP definition in the same source. On its next sync, Obot adopts the vMCP instead of creating a new one, so connections and credentials carry over.
+
+`obot mcp generate-vmcp-catalog` generates those definitions. The previous name, `generate-vmcp-catalog-yaml`, remains a compatibility alias with the same flags and YAML default.
+
+### What the command does
+
+```bash
+obot mcp generate-vmcp-catalog <catalog-source-url> [path] [--format yaml|json] [--mode stdout|file|dir] [--overwrite]
+```
+
+The command asks Obot for every orphaned vMCP in the default catalog that was migrated from a composite synced from `<catalog-source-url>`. It then writes one `type: vmcp` catalog item for each. Each item contains:
+
+- An explicit `entryKey`. This is the composite's original `entryKey`, or the key Obot derived from its name if it had none. Because the key is explicit, you can later rename the vMCP's `displayName` without losing its identity.
+- Each component's existing `id`, name, tool prefix, allowed tools, and tool overrides.
+- Configuration policies without their values. Sync keeps the fixed values Obot already stores for each component ID, so secrets never end up in your repository.
+- The vMCP's profiles, including an empty list if it has none. Omitting `profiles` would give the vMCP an admin-only default profile.
+- For each component, a `mcpServerCatalogEntryKey` that points to the entry the component uses. Entries in the same source are referenced by `entryKey` alone. Entries in another source of the catalog are referenced as `sourceID::entryKey`.
+
+The command only reads from Obot. It doesn't change Obot or your repository.
+
+### Before you begin
+
+- **Use an administrator account.** Sign in with the CLI first (for example, `obot login --url https://obot.example.com`), or set `OBOT_BASE_URL` and `OBOT_TOKEN`.
+- **Finish the upgrade and let the catalog sync.** Component references are built from the catalog entries' current sources. If a source URL changed, entries keep reporting the old URL until the catalog syncs. For example, an upgrade can move the default catalog to a new branch. Obot starts a sync automatically when an upgrade changes the default source URL. If you changed a source yourself, click **Sync** on **Admin → MCP Servers** and wait for it to finish. The command refuses to generate a definition for a component whose entry still reports a removed source.
+- **Know the exact source URL the composite came from.** It must be the URL configured in Obot, including any branch path such as `/v2-schema`. The scheme (`http://` or `https://`) and trailing slashes are ignored when matching.
+
+### Migrate a catalog source
+
+1. **Generate the vMCP definitions** from a checkout of the catalog repository:
+
+   ```bash
+   obot mcp generate-vmcp-catalog https://github.com/example/catalog --mode dir ./vmcps
+   ```
+
+2. **Replace the composites.** In the same repository and branch, delete each `runtime: composite` definition and commit the matching generated file in its place. The vMCP must be published in the source that the composite came from: Obot derives the vMCP's identity from the catalog, source URL, and `entryKey`, so publishing it anywhere else creates a separate vMCP.
+3. **Review the definitions before committing.** Don't change `entryKey` or component `id` values. Changing either breaks the match with the orphaned vMCP or its stored configuration. You can edit display names, descriptions, tool settings, and profiles.
+4. **Validate the source:**
+
+   ```bash
+   obot mcp validate-catalog .
+   ```
+
+5. **Push the change** and click **Sync** on **Admin → MCP Servers**. If sync can't adopt a vMCP, the error appears next to the source on the **Git Source URLs** tab.
+6. **Confirm the adoption** by running the command again. When every vMCP from the source has been adopted, the command prints:
+
+   ```text
+   No orphaned vMCPs from https://github.com/example/catalog are awaiting catalog sync.
+   ```
+
+Once a vMCP is adopted, the catalog source manages it like any other synced item. Make future changes in the source. Removing the vMCP's definition from the source deletes the vMCP.
+
+### Output modes
+
+Use `--format yaml|json` to choose the output format (default: `yaml`) and `--mode` to choose where it goes:
+
+| Mode | Output |
+|------|--------|
+| `stdout` (default) | Every vMCP in one YAML list or JSON array, printed to standard output. |
+| `file` | Every vMCP in one YAML list or JSON array, written to the file at `[path]`. |
+| `dir` | Each vMCP in its own file in the `[path]` directory, named after its display name. If two vMCPs share a display name, the second file name also includes the `entryKey`. Files use `.yaml` or `.json` according to `--format`. |
+
+```bash
+obot mcp generate-vmcp-catalog https://github.com/example/catalog --mode file vmcps.yaml
+obot mcp generate-vmcp-catalog https://github.com/example/catalog --format json --mode file vmcps.json
+```
+
+The command never replaces an existing file unless you pass `--overwrite`. In `stdout` mode, only the generated YAML or JSON goes to standard output and all messages go to standard error, so you can redirect the output to a file.
+
+The command generates definitions for every vMCP it can, even when some vMCPs can't be generated. It prints a `Skipping vMCP` message to standard error for each one it skips, then exits with an error. Scripts can therefore treat a nonzero exit status as "some vMCPs still need attention".
+
+### Troubleshooting
+
+**`No orphaned vMCPs from <url> are awaiting catalog sync.`**
+Either every orphaned vMCP from that source has already been adopted, or the URL doesn't match the source the composites were synced from. Check the URL on the **Git Source URLs** tab, including any branch path.
+
+**`Skipping vMCP "<name>": ...`**
+A catalog vMCP can only reference catalog entries that are synced from a Git source and have an `entryKey`. Fix the cause shown in the message, then run the command again:
+
+| Message ends with | Fix |
+|-------------------|-----|
+| `which has no entryKey; add an entryKey to that entry so the vMCP can reference it` | Add an `entryKey` to that entry in its source, sync the catalog, and run the command again. |
+| `which is no longer a source of catalog "default"; sync the catalog and generate the YAML again` | The entry still reports a source URL that the catalog no longer uses. Sync the catalog and run the command again. |
+| `which is not synced from a catalog source` | The component uses an entry created in the Obot UI. Move that entry into a Git source, or keep managing this vMCP in Obot. |
+| `uses multi-user MCP server ...` or `which no longer exists` | There is no catalog entry the definition can reference. Keep managing this vMCP in Obot. |
+
+**Sync reports `component catalog entry "<sourceID>::<entryKey>" was not found`**
+The reference doesn't match any entry in the catalog's current sources. This usually happens when a source URL changed after you generated the YAML, because `sourceID` includes the full source URL and branch path. Sync the catalog, then run the command again, or update the `sourceID` prefix in the published YAML.

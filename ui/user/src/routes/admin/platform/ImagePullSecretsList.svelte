@@ -1,0 +1,252 @@
+<script lang="ts">
+	import DotDotDot from '$lib/components/DotDotDot.svelte';
+	import Table from '$lib/components/table/Table.svelte';
+	import type { ImagePullSecret, ImagePullSecretType } from '$lib/services';
+	import { canTest } from '$lib/services/admin/utils';
+	import { userDeviceSettings } from '$lib/stores';
+	import { formatTime } from '$lib/time.js';
+	import { displayName, statusClass, statusLabel, statusMessage } from './types';
+	import { Info, Plus, RefreshCw, ShieldCheck, Trash2 } from '@lucide/svelte';
+	import { twMerge } from 'tailwind-merge';
+
+	interface Props {
+		imagePullSecrets: ImagePullSecret[];
+		mutationsDisabled?: boolean;
+		refreshing?: boolean;
+		onCreate?: (type: ImagePullSecretType) => void;
+		onEdit?: (secret: ImagePullSecret, isCtrlClick: boolean) => void;
+		onStatus: (secret: ImagePullSecret) => void;
+		onTest: (secret: ImagePullSecret) => void;
+		onRefresh: (secret: ImagePullSecret) => void;
+		onDelete: (secret: ImagePullSecret) => void;
+		unsavedIds?: ReadonlySet<string>;
+	}
+
+	let {
+		imagePullSecrets,
+		mutationsDisabled = false,
+		refreshing = false,
+		onCreate,
+		onEdit,
+		onStatus,
+		onTest,
+		onRefresh,
+		onDelete,
+		unsavedIds
+	}: Props = $props();
+
+	let tableData = $derived(
+		imagePullSecrets.map((item) => ({
+			...item,
+			displayName: displayName(item),
+			detail:
+				item.manifest.type === 'ecr'
+					? (item.manifest.ecr?.region ?? '-')
+					: (item.manifest.basic?.server ?? '-'),
+			statusLabel: statusLabel(item),
+			statusMessage: statusMessage(item),
+			lastSuccess: item.status?.lastSuccessTime ?? ''
+		}))
+	);
+	let basicSecrets = $derived(tableData.filter((item) => item.manifest.type === 'basic'));
+	let ecrSecrets = $derived(tableData.filter((item) => item.manifest.type === 'ecr'));
+
+	function formatDate(value?: string) {
+		return value ? formatTime(value, userDeviceSettings.timeFormat) : '-';
+	}
+</script>
+
+<div class="flex flex-col gap-8">
+	<section class="flex flex-col gap-3">
+		{@render sectionHeader('Basic Secrets', 'basic')}
+		<Table
+			data={basicSecrets}
+			fields={['displayName', 'detail', 'id']}
+			headers={[
+				{ title: 'Name', property: 'displayName' },
+				{ title: 'Registry', property: 'detail' },
+				{ title: 'Secret', property: 'id' }
+			]}
+			sortable={['displayName', 'detail', 'id']}
+			filterable={['displayName', 'detail']}
+			onClickRow={onEdit ? (row, isCtrlClick) => onEdit?.(row, isCtrlClick) : undefined}
+			noDataMessage="Click '+' to add a basic secret."
+		>
+			{#snippet actions(secret)}
+				<DotDotDot
+					ariaLabel={`Actions for ${displayName(secret)}`}
+					class="shrink-0 hover:dark:bg-base-100/50"
+				>
+					{#snippet children({ toggle })}
+						{#if !unsavedIds?.has(secret.id)}
+							<button
+								class="menu-button"
+								disabled={mutationsDisabled || !canTest(secret)}
+								onclick={(e) => {
+									e.stopPropagation();
+									onTest(secret);
+									toggle(false);
+								}}
+							>
+								<ShieldCheck class="size-4" />
+								Test
+							</button>
+						{/if}
+						<button
+							class="menu-button-destructive"
+							disabled={mutationsDisabled}
+							onclick={(e) => {
+								e.stopPropagation();
+								onDelete(secret);
+								toggle(false);
+							}}
+						>
+							<Trash2 class="size-4" />
+							Delete
+						</button>
+					{/snippet}
+				</DotDotDot>
+			{/snippet}
+			{#snippet onRenderColumn(property, secret)}
+				{#if property === 'displayName'}
+					{displayName(secret)}
+				{:else}
+					{String(secret[property as keyof typeof secret] ?? '-')}
+				{/if}
+			{/snippet}
+		</Table>
+	</section>
+
+	<section class="flex flex-col gap-3">
+		{@render sectionHeader('ECR Secrets', 'ecr')}
+		{@render ecrTable()}
+	</section>
+</div>
+
+{#snippet sectionHeader(title: string, type: ImagePullSecretType)}
+	<div class="flex flex-wrap items-center justify-between gap-3">
+		<div>
+			<h3 class="font-semibold">{title}</h3>
+			<p class="text-muted-content text-sm font-light">
+				{type === 'basic'
+					? 'Basic secrets utilize username/password registry credentials.'
+					: 'ECR secrets utilize AWS IAM role-based ECR access information.'}
+			</p>
+		</div>
+		{#if onCreate && !mutationsDisabled}
+			<button
+				type="button"
+				class="btn btn-primary flex items-center gap-2 text-sm"
+				onclick={() => onCreate?.(type)}
+			>
+				<Plus class="size-4" />
+				{type === 'basic' ? 'Add Basic Secret' : 'Add ECR Secret'}
+			</button>
+		{/if}
+	</div>
+{/snippet}
+
+{#snippet ecrTable()}
+	<Table
+		data={ecrSecrets}
+		fields={['displayName', 'detail', 'id', 'statusLabel', 'lastSuccess', 'statusMessage']}
+		headers={[
+			{ title: 'Name', property: 'displayName' },
+			{ title: 'Region', property: 'detail' },
+			{ title: 'Secret', property: 'id' },
+			{ title: 'Status', property: 'statusLabel' },
+			{ title: 'Last Success', property: 'lastSuccess' },
+			{ title: 'Message', property: 'statusMessage' }
+		]}
+		sortable={['displayName', 'detail', 'id', 'statusLabel', 'lastSuccess']}
+		filterable={['statusLabel']}
+		onClickRow={onEdit ? (row, isCtrlClick) => onEdit?.(row, isCtrlClick) : undefined}
+		noDataMessage="Click '+' to add an ECR secret."
+	>
+		{#snippet actions(secret)}
+			<DotDotDot
+				ariaLabel={`Actions for ${displayName(secret)}`}
+				class="shrink-0 hover:dark:bg-base-100/50"
+			>
+				{#snippet children({ toggle })}
+					{#if !unsavedIds?.has(secret.id)}
+						<button
+							class="menu-button"
+							onclick={(e) => {
+								e.stopPropagation();
+								onStatus(secret);
+								toggle(false);
+							}}
+						>
+							<Info class="size-4" />
+							Status
+						</button>
+						<button
+							class="menu-button"
+							disabled={mutationsDisabled || !canTest(secret)}
+							onclick={(e) => {
+								e.stopPropagation();
+								onTest(secret);
+								toggle(false);
+							}}
+						>
+							<ShieldCheck class="size-4" />
+							Test
+						</button>
+						<button
+							class="menu-button"
+							disabled={mutationsDisabled || refreshing}
+							onclick={(e) => {
+								e.stopPropagation();
+								onRefresh(secret);
+								toggle(false);
+							}}
+						>
+							<RefreshCw class={twMerge('size-4', refreshing && 'animate-spin')} />
+							Refresh Now
+						</button>
+					{/if}
+					<button
+						class="menu-button-destructive"
+						disabled={mutationsDisabled}
+						onclick={(e) => {
+							e.stopPropagation();
+							onDelete(secret);
+							toggle(false);
+						}}
+					>
+						<Trash2 class="size-4" />
+						Delete
+					</button>
+				{/snippet}
+			</DotDotDot>
+		{/snippet}
+		{#snippet onRenderColumn(property, secret)}
+			{#if property === 'displayName'}
+				{displayName(secret)}
+			{:else if property === 'statusLabel'}
+				<span class={twMerge('rounded-full px-2 py-1 text-xs font-medium', statusClass(secret))}>
+					{secret.statusLabel}
+				</span>
+			{:else if property === 'lastSuccess'}
+				{formatDate(secret.status?.lastSuccessTime)}
+			{:else if property === 'statusMessage'}
+				{#if secret.statusMessage}
+					<button
+						class="line-clamp-2 min-w-0 max-w-full overflow-hidden break-words text-left text-red-600 underline-offset-2 hover:underline dark:text-red-300"
+						onclick={(e) => {
+							e.stopPropagation();
+							onStatus(secret);
+						}}
+					>
+						{secret.statusMessage}
+					</button>
+				{:else}
+					<span>-</span>
+				{/if}
+			{:else}
+				{String(secret[property as keyof typeof secret] ?? '-')}
+			{/if}
+		{/snippet}
+	</Table>
+{/snippet}

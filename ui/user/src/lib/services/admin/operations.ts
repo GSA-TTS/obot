@@ -9,7 +9,6 @@ import {
 	doPatch,
 	doPost,
 	doPut,
-	handleResponse,
 	type Fetcher,
 	type ErrorHandler,
 	type PaginatedResponse
@@ -31,7 +30,9 @@ import type {
 	AccessControlRuleManifest,
 	K8sServerDetail,
 	MCPAllowedSecretBindingTarget,
-	MCPSubField
+	MCPSubField,
+	VMCP,
+	VMCPInstance
 } from '../user/types';
 import type {
 	MCPCatalog,
@@ -41,6 +42,9 @@ import type {
 	MCPCatalogServerManifest,
 	ModelAccessPolicy,
 	ModelAccessPolicyManifest,
+	ModelProxySettings,
+	ModelProxySettingsUpdateManifest,
+	ModelProxyUsage,
 	AuthProvider,
 	MCPFilter,
 	MCPFilterManifest,
@@ -52,7 +56,6 @@ import type {
 	AuditLogType,
 	ScheduledAuditLogExportInput,
 	K8sSettings,
-	AppK8sSettings,
 	ServerK8sSettings,
 	ImagePullSecret,
 	ImagePullSecretCapability,
@@ -62,7 +65,6 @@ import type {
 	ImagePullSecretTestResponse,
 	GitCredential,
 	GitCredentialManifest,
-	MCPCompositeDeletionDependency,
 	MCPTunnel,
 	MCPTunnelManifest,
 	TunnelConnection,
@@ -140,9 +142,9 @@ import type {
 	MDMDevice,
 	MDMEnrollmentKey,
 	MDMEnrollmentKeyCreateResponse,
-	LocalAuthUser
+	LocalAuthUser,
+	ProductTelemetryConsent
 } from './types';
-import { MCPCompositeDeletionDependencyError } from './types';
 
 type ItemsResponse<T> = { items: T[] | null };
 type RequestOptions = { fetch?: Fetcher; dontLogErrors?: boolean; signal?: AbortSignal };
@@ -367,6 +369,39 @@ export async function deconfigureAuthProvider(
 	await doPost(`/auth-providers/${authProviderID}/deconfigure`, {}, opts);
 }
 
+export async function stageAuthProvider(
+	authProviderID: string,
+	envs: Record<string, string>,
+	opts?: { fetch?: Fetcher }
+): Promise<void> {
+	await doPost(`/auth-providers/${authProviderID}/stage`, envs, opts);
+}
+
+export async function unstageAuthProvider(
+	authProviderID: string,
+	opts?: { fetch?: Fetcher }
+): Promise<void> {
+	await doDelete(`/auth-providers/${authProviderID}/stage`, opts);
+}
+
+// Returns the URL that starts the one-time login used to prove the staged provider works.
+export async function verifyAuthProvider(
+	authProviderID: string,
+	opts?: { fetch?: Fetcher }
+): Promise<string> {
+	const response = (await doPost(`/auth-providers/${authProviderID}/verify`, {}, opts)) as {
+		redirectURL: string;
+	};
+	return response.redirectURL;
+}
+
+export async function activateAuthProvider(
+	authProviderID: string,
+	opts?: { fetch?: Fetcher }
+): Promise<void> {
+	await doPost(`/auth-providers/${authProviderID}/activate`, {}, opts);
+}
+
 // Local auth provider users
 
 export async function listLocalAuthUsers(opts?: { fetch?: Fetcher }): Promise<LocalAuthUser[]> {
@@ -377,17 +412,23 @@ export async function listLocalAuthUsers(opts?: { fetch?: Fetcher }): Promise<Lo
 export async function createLocalAuthUser(
 	email: string,
 	password: string,
+	requirePasswordChange = true,
 	opts?: { fetch?: Fetcher }
 ): Promise<LocalAuthUser> {
-	return (await doPost('/local-auth/users', { email, password }, opts)) as LocalAuthUser;
+	return (await doPost(
+		'/local-auth/users',
+		{ email, password, requirePasswordChange },
+		opts
+	)) as LocalAuthUser;
 }
 
 export async function setLocalAuthUserPassword(
 	id: string,
 	password: string,
+	requirePasswordChange = true,
 	opts?: { fetch?: Fetcher }
 ): Promise<void> {
-	await doPost(`/local-auth/users/${id}/password`, { password }, opts);
+	await doPost(`/local-auth/users/${id}/password`, { password, requirePasswordChange }, opts);
 }
 
 export async function deleteLocalAuthUser(id: string, opts?: { fetch?: Fetcher }): Promise<void> {
@@ -505,8 +546,9 @@ export async function listDeviceSkillOccurrences(
 
 // EULA
 
-export async function getEula() {
+export async function getEula(opts?: RequestOptions) {
 	const response = (await doGet('/eula', {
+		...opts,
 		dontLogErrors: true
 	})) as {
 		accepted: boolean;
@@ -520,6 +562,21 @@ export async function acceptEula() {
 	})) as {
 		accepted: boolean;
 	};
+}
+
+// Product analytics
+
+export async function getProductTelemetryConsent(
+	opts?: RequestOptions
+): Promise<ProductTelemetryConsent> {
+	return (await doGet('/product-telemetry-consent', opts)) as ProductTelemetryConsent;
+}
+
+export async function updateProductTelemetryConsent(
+	consent: boolean,
+	opts?: RequestOptions
+): Promise<ProductTelemetryConsent> {
+	return (await doPut('/product-telemetry-consent', { consent }, opts)) as ProductTelemetryConsent;
 }
 
 // Group role assignments
@@ -671,10 +728,6 @@ export async function refreshImagePullSecret(
 export async function listK8sSettings(opts?: { fetch?: Fetcher }) {
 	const response = (await doGet('/k8s-settings', opts)) as K8sSettings;
 	return response;
-}
-
-export async function getAppK8sSettings(opts?: { fetch?: Fetcher }) {
-	return (await doGet('/app-k8s-settings', opts)) as AppK8sSettings;
 }
 
 export async function updateK8sSettings(settings: K8sSettings, opts?: { fetch?: Fetcher }) {
@@ -874,6 +927,17 @@ export async function createMCPCatalogEntry(
 		...response,
 		isCatalogEntry: true
 	};
+}
+
+export async function revealMCPCatalogEntry(
+	catalogID: string,
+	entryID: string,
+	opts?: { fetch?: Fetcher; dontLogErrors?: boolean }
+): Promise<Record<string, string>> {
+	return (await doPost(`/mcp-catalogs/${catalogID}/entries/${entryID}/reveal`, {}, opts)) as Record<
+		string,
+		string
+	>;
 }
 
 export async function updateMCPCatalogEntry(
@@ -1145,33 +1209,8 @@ export async function updateMCPCatalogServer(
 	return response;
 }
 
-export async function mcpServerDeleteResponseHandler(
-	resp: Response,
-	path: string,
-	opts?: { dontLogErrors?: boolean }
-): Promise<unknown> {
-	if (resp.status === 409 && resp.headers.get('Content-Type')?.includes('application/json')) {
-		const body = (await resp.json()) as {
-			message?: string;
-			dependencies: MCPCompositeDeletionDependency[];
-		};
-
-		if (body.dependencies && body.dependencies.length > 0) {
-			throw new MCPCompositeDeletionDependencyError(
-				body.message ??
-					'All dependencies on this MCP server must be removed before it can be deleted',
-				body.dependencies
-			);
-		}
-	}
-
-	return handleResponse(resp, path, opts);
-}
-
 export async function deleteMCPCatalogServer(catalogID: string, serverID: string): Promise<void> {
-	await doDelete(`/mcp-catalogs/${catalogID}/servers/${serverID}`, {
-		responseHandler: mcpServerDeleteResponseHandler
-	});
+	await doDelete(`/mcp-catalogs/${catalogID}/servers/${serverID}`);
 }
 
 export async function listMcpCatalogServerInstances(
@@ -1629,6 +1668,23 @@ export async function validateModelProvider(
 		...opts,
 		dontLogErrors: true
 	});
+}
+
+// Model proxy
+
+export async function getModelProxySettings(opts?: RequestOptions): Promise<ModelProxySettings> {
+	return (await doGet('/model-proxy', opts)) as ModelProxySettings;
+}
+
+export async function getModelProxyUsage(opts?: RequestOptions): Promise<ModelProxyUsage> {
+	return (await doGet('/model-proxy/usage', opts)) as ModelProxyUsage;
+}
+
+export async function updateModelProxySettings(
+	settings: ModelProxySettingsUpdateManifest,
+	opts?: RequestOptions
+): Promise<ModelProxySettings> {
+	return (await doPut('/model-proxy', settings, opts)) as ModelProxySettings;
 }
 
 // Models
@@ -2588,7 +2644,7 @@ export async function updateMDMConfigurationEnforcement(
 	return (await doPut(`/mdm/configurations/${id}/enforcement`, input, opts)) as MDMConfiguration;
 }
 
-// Enforcement decisions
+// Enforcement events
 
 export async function listEnforcementDecisions(
 	filters?: EnforcementDecisionURLFilters,
@@ -2687,4 +2743,19 @@ export async function downloadMDMConfig(
 		parseContentDispositionFilename(resp.headers.get('content-disposition')) ??
 		`obot-sentry-config-${configurationId}.zip`;
 	return { blob, filename };
+}
+
+// vMCPs
+
+export async function listAllVMCPs(opts?: { fetch?: Fetcher }): Promise<VMCP[]> {
+	const response = (await doGet('/vmcps?all=true', opts)) as ItemsResponse<VMCP>;
+	return response.items ?? [];
+}
+
+export async function listAllVMCPInstances(opts?: {
+	fetch?: Fetcher;
+	dontLogErrors?: boolean;
+}): Promise<VMCPInstance[]> {
+	const response = (await doGet('/vmcp-instances?all=true', opts)) as ItemsResponse<VMCPInstance>;
+	return response.items ?? [];
 }

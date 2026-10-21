@@ -4,6 +4,10 @@
 - **Date:** 2026-09-03
 - **Supersedes:** None
 - **Superseded by:** None
+- **Amended:** 2026-10-05 — the gateway-served runtime set is `RuntimeRemote` +
+  `RuntimeVMCP`, not `RuntimeRemote` + `RuntimeComposite`. See "Amendment"
+  below. Deployment packaging is recorded separately in
+  [`2026-10-05-cloud-foundry-deployment-packaging.md`](2026-10-05-cloud-foundry-deployment-packaging.md).
 
 ## Related issues
 
@@ -93,3 +97,53 @@ deferred as too large for the POC and unnecessary for remote/composite servers.
 - `GSA-TTS/mcp-server-hub` → `planning/cloud_gov_plan.md`,
   `planning/cloud_gov_roadmap.md`
 - `WINDDOWN.md` (this repo)
+
+## Amendment (2026-10-05)
+
+When this work was rebased from its original base (upstream `3fabdab1b`) onto
+`v0.26.2`, the gateway-served runtime set turned out to be named incorrectly.
+
+**What changed:** `runtimeIsGatewayServed` tested for `RuntimeRemote ||
+RuntimeComposite`. The correct set is `RuntimeRemote || RuntimeVMCP`.
+
+**Why the original was wrong:** upstream retains `RuntimeComposite` *only* to
+identify legacy resources during migration — `apiclient/types/mcpserver.go`
+says so explicitly, and `pkg/controller/handlers/compositemigration/` rewrites
+those resources into vmcp servers. The runtime that is actually gateway-served
+is `RuntimeVMCP`, which `pkg/mcp/vmcp.go` constructs and which both the docker
+and Kubernetes backends short-circuit alongside `RuntimeRemote`:
+
+```go
+// pkg/mcp/docker.go, pkg/mcp/kubernetes.go
+if server.Runtime == types.RuntimeRemote || server.Runtime == types.RuntimeVMCP {
+```
+
+**Impact of the original error:** composite/vmcp servers would have been
+rejected with a 404 by a backend that is in fact capable of serving them, while
+a legacy `composite` resource mid-migration would have been accepted. Neither
+was observed, because the backend was never run. This is exactly the class of
+defect that the "builds successfully" verification standard at wind-down could
+not catch.
+
+**Also added in the same change:** `pkg/mcp/cloudfoundry_test.go`, covering the
+runtime partition, the unsupported-operation error type (the API layer
+type-asserts on `*ErrNotSupportedByBackend` to return 404 rather than 500), the
+`shutdownServer` never-errors invariant, `transformObotHostname` identity, and
+`remoteConfig` granting no network exceptions. The original change shipped with
+no tests, which is how the runtime-set error survived.
+
+**Verification (2026-10-05, branch `cloudgov-phase1` @ `v0.26.2`):**
+`go build ./...`, `go test ./pkg/mcp/...`, `go test ./pkg/services/...`,
+`make lint-go` (0 issues, golangci-lint v2.13.0), and `pnpm check` (0 errors)
+all pass. The wind-down-era gate was `go build ./pkg/mcp/` alone, which is
+exactly what let the runtime-set error through.
+
+**Incidental fix:** `make lint-go` never actually linted in a fresh
+environment. The `setup-env` target installs golangci-lint with `go install`
+(writing to `GOBIN`/`GOPATH/bin`) and `lint-go` then invoked it by **bare
+name**, so on any runner without that directory on `PATH` the target failed
+with `No such file or directory` *before* linting — presenting as a tooling
+error rather than a skipped gate. The `Makefile` now resolves the install
+directory explicitly and invokes the binary by absolute path, so the target
+either lints or fails loudly. This is an upstream defect and a candidate for
+upstreaming.

@@ -5,6 +5,8 @@ const (
 	MCPServerFinalizer             = "obot.obot.ai/mcp-server"
 	MCPServerCatalogEntryFinalizer = "obot.obot.ai/mcp-server-catalog-entry"
 	MCPServerInstanceFinalizer     = "obot.obot.ai/mcp-server-instance"
+	VMCPFinalizer                  = "obot.obot.ai/vmcp"
+	VMCPInstanceFinalizer          = "obot.obot.ai/vmcp-instance"
 	AccessControlRuleFinalizer     = "obot.obot.ai/access-control-rule"
 	SystemMCPServerFinalizer       = "obot.obot.ai/system-mcp-server"
 	NanobotAgentFinalizer          = "obot.obot.ai/nanobot-agent"
@@ -14,7 +16,6 @@ const (
 	HostedAgentPoolFinalizer       = "obot.obot.ai/hosted-agent-pool"
 
 	ModelProviderSyncAnnotation         = "obot.ai/model-provider-sync"
-	AuthProviderSyncAnnotation          = "obot.ai/auth-provider-sync"
 	MCPCatalogSyncAnnotation            = "obot.ai/mcp-catalog-sync"
 	SystemMCPCatalogSyncAnnotation      = "obot.ai/system-mcp-catalog-sync"
 	SkillRepositorySyncAnnotation       = "obot.ai/skill-repository-sync"
@@ -22,4 +23,8 @@ const (
 	AgentCatalogSyncAnnotation          = "obot.ai/agent-catalog-sync"
 	MCPServerCatalogEntrySyncAnnotation = "obot.ai/mcp-server-catalog-entry-sync"
 	ModelInfoSourceSyncAnnotation       = "obot.ai/model-info-source-sync"
+
+	// AuditLogCredentialRemovedAnnotation records that a server's legacy token exchange and
+	// audit log credential has been removed, so the sweep runs once and not on every reconcile.
+	AuditLogCredentialRemovedAnnotation = "obot.ai/audit-log-credential-removed"
 )

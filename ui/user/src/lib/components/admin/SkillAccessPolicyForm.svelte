@@ -3,7 +3,6 @@
 	import Loading from '$lib/icons/Loading.svelte';
 	import {
 		AdminService,
-		type AccessControlRuleSubject,
 		type OrgUser,
 		type OrgGroup,
 		type SkillAccessPolicy,
@@ -13,13 +12,17 @@
 	import type { Skill } from '$lib/services/nanobot/types';
 	import { errors } from '$lib/stores';
 	import { goto } from '$lib/url';
-	import { getUserDisplayName } from '$lib/utils';
+	import {
+		convertSubjectsToTableData,
+		resolveSubjects,
+		resolveSubjectFromGroup,
+		resolveSubjectPickerById
+	} from '../../subjectResolver';
 	import Confirm from '../Confirm.svelte';
 	import IconButton from '../primitives/IconButton.svelte';
 	import Table from '../table/Table.svelte';
 	import SearchSkills from './SearchSkills.svelte';
 	import SearchUsers from './SearchUsers.svelte';
-	import { resolveSubjects } from './subjectResolver';
 	import { Plus, Trash2 } from '@lucide/svelte';
 	import { onMount, untrack } from 'svelte';
 	import { fly } from 'svelte/transition';
@@ -160,48 +163,6 @@
 		);
 	}
 
-	function convertSubjectsToTableData(
-		subjects: AccessControlRuleSubject[],
-		users: OrgUser[],
-		groups: OrgGroup[]
-	) {
-		const userMap = new Map(users?.map((user) => [user.id, user]));
-		const groupMap = new Map(groups?.map((group) => [group.id, group]));
-
-		return (
-			subjects
-				.map((subject) => {
-					if (subject.type === 'user') {
-						return {
-							id: subject.id,
-							displayName: getUserDisplayName(userMap, subject.id),
-							type: 'User'
-						};
-					}
-
-					if (subject.type === 'group') {
-						const group = groupMap.get(subject.id);
-						if (!group) {
-							return undefined;
-						}
-
-						return {
-							id: subject.id,
-							displayName: group.name,
-							type: 'Group'
-						};
-					}
-
-					return {
-						id: subject.id,
-						displayName: subject.id === '*' ? 'All Obot Users' : subject.id,
-						type: 'Selector'
-					};
-				})
-				.filter((subject) => subject !== undefined) ?? []
-		);
-	}
-
 	function validate(policy: typeof skillAccessPolicy) {
 		if (!policy) return false;
 
@@ -310,7 +271,7 @@
 								variant="danger"
 								onclick={() => {
 									skillAccessPolicy.subjects = skillAccessPolicy.subjects?.filter(
-										(subject) => subject.id !== d.id
+										(subject) => resolveSubjectPickerById(subject) !== d.id
 									);
 								}}
 								tooltip={{ text: 'Delete User/Group' }}
@@ -387,7 +348,7 @@
 					<button
 						class="btn btn-secondary text-sm"
 						onclick={() => {
-							goto('/admin/skill-access-policies');
+							goto('/skills?view=access-policies');
 						}}
 					>
 						Cancel
@@ -460,10 +421,10 @@
 
 <SearchUsers
 	bind:this={addUserGroupDialog}
-	filterIds={skillAccessPolicy.subjects?.map((subject) => subject.id) ?? []}
+	filterIds={skillAccessPolicy.subjects?.map(resolveSubjectPickerById) ?? []}
 	onAdd={async (users: OrgUser[], groups: OrgGroup[]) => {
 		const existingSubjectIds = new Set(
-			skillAccessPolicy.subjects?.map((subject) => subject.id) ?? []
+			skillAccessPolicy.subjects?.map(resolveSubjectPickerById) ?? []
 		);
 		const newSubjects = [
 			...users
@@ -474,10 +435,7 @@
 				})),
 			...groups
 				.filter((group: OrgGroup) => !existingSubjectIds.has(group.id))
-				.map((group: OrgGroup) => ({
-					type: group.id === '*' ? ('selector' as const) : ('group' as const),
-					id: group.id
-				}))
+				.map((group: OrgGroup) => resolveSubjectFromGroup(group))
 		];
 		skillAccessPolicy.subjects = [...(skillAccessPolicy.subjects ?? []), ...newSubjects];
 	}}
@@ -490,7 +448,7 @@
 		if (!skillAccessPolicy.id) return;
 		saving = true;
 		await AdminService.deleteSkillAccessPolicy(skillAccessPolicy.id);
-		goto('/admin/skill-access-policies');
+		goto('/skills?view=access-policies');
 	}}
 	oncancel={() => (deletingPolicy = false)}
 />

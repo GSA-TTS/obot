@@ -20,6 +20,7 @@ const sidebars = {
 			label: "Features",
 			items: [
 				"functionality/overview",
+				"functionality/virtual-mcps",
 				"functionality/mcp-servers",
 				"functionality/mcp-tunnels",
 				"functionality/mcp-access-policies",
@@ -30,7 +31,7 @@ const sidebars = {
 				"functionality/obot-agent-management",
 				"functionality/model-access-policies",
 				"functionality/llm-gateway",
-				"functionality/message-policies",
+				"functionality/ai-judge-policies",
 				"functionality/skills",
 				"functionality/skill-access-policies",
 				"functionality/device-management",
@@ -74,6 +75,7 @@ const sidebars = {
 				"configuration/mcp-server-egress-control",
 				"configuration/audit-log-export",
 				"configuration/mcp-server-oauth-configuration",
+				"configuration/product-analytics",
 				"configuration/server-configuration",
 				{
 					type: "category",

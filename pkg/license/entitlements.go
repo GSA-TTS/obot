@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -33,7 +34,8 @@ var (
 		"GET /oauth/mcp/callback/",
 		"POST /oauth/",
 		"PUT /oauth/",
-		"GET /api/oauth/composite/{mcp_id}",
+		"GET /api/oauth/vmcp/{mcp_id}",
+		"GET /api/oauth/vmcp/{mcp_id}/",
 		"/api/llm-proxy/",
 		"/api/skills",
 		"/api/skills/",
@@ -60,6 +62,20 @@ type ProviderEntitlementGate struct {
 
 // fake is a fake handler that does fake things
 type fake struct{}
+
+// GetDistributionFromEntitlements returns the product distribution represented by the entitlements.
+func GetDistributionFromEntitlements(entitlements []string) types.ProductTelemetryDistribution {
+	switch {
+	case slices.Contains(entitlements, CloudEntitlement):
+		return types.ProductTelemetryDistributionCloud
+	case slices.Contains(entitlements, EnterpriseEntitlement):
+		return types.ProductTelemetryDistributionEnterprise
+	case slices.Contains(entitlements, CommunityEntitlement):
+		return types.ProductTelemetryDistributionRegistered
+	default:
+		return types.ProductTelemetryDistributionUnregistered
+	}
+}
 
 func NewProviderEntitlementGate(licenseProvider *Provider, client kclient.Client) *ProviderEntitlementGate {
 	mux := http.NewServeMux()

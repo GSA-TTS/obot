@@ -1,4 +1,5 @@
 import { sveltekit } from '@sveltejs/kit/vite';
+import tailwindcss from '@tailwindcss/vite';
 import { playwright } from '@vitest/browser-playwright';
 import { defineConfig, loadEnv } from 'vite';
 
@@ -35,7 +36,7 @@ export default defineConfig(({ mode }) => {
 							'/oauth2': proxyConfig
 						}
 		},
-		plugins: [sveltekit()],
+		plugins: [tailwindcss(), sveltekit()],
 		optimizeDeps: {
 			// Only reachable via lazily-imported route nodes, so Vite would otherwise
 			// discover them mid-navigation and re-bundle, failing in-flight route
@@ -49,6 +50,8 @@ export default defineConfig(({ mode }) => {
 					extends: true,
 					test: {
 						name: 'client',
+						// Concurrent browser files can exhaust the short interaction timeout.
+						fileParallelism: false,
 						// Timeout for browser tests - prevent hanging on element lookups
 						testTimeout: 2000,
 						browser: {

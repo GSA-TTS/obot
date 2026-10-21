@@ -11,6 +11,7 @@ import (
 	skillrepo "github.com/obot-platform/obot/pkg/controller/handlers/skillrepository"
 	gclient "github.com/obot-platform/obot/pkg/gateway/client"
 	gatewaytypes "github.com/obot-platform/obot/pkg/gateway/types"
+	gitpkg "github.com/obot-platform/obot/pkg/git"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	"github.com/obot-platform/obot/pkg/system"
 	kclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -189,7 +190,7 @@ func parseSkillRepositoryRequest(req api.Context) (*types.SkillRepositoryManifes
 		return nil, nil, types.NewErrBadRequest("repoURL is required")
 	}
 	var err error
-	manifest.RepoURL, err = skillrepo.NormalizeRepositoryURL(originalRepoURL)
+	manifest.RepoURL, err = gitpkg.NormalizeRepositoryURL(originalRepoURL)
 	if err != nil {
 		return nil, nil, types.NewErrBadRequest("invalid repoURL: %v", err)
 	}
@@ -260,12 +261,12 @@ func revealRepositoryTokens(req api.Context, repoName string) (map[string]string
 
 func convertSkillRepository(repo v1.SkillRepository, tokenEnv map[string]string) types.SkillRepository {
 	manifest := types.SkillRepositoryManifest{
-		DisplayName:     repo.Spec.DisplayName,
-		RepoURL:         repo.Spec.RepoURL,
-		Ref:             repo.Spec.Ref,
-		GitCredentialID: repo.Spec.GitCredentialID,
+		DisplayName:          repo.Spec.DisplayName,
+		RepoURL:              repo.Spec.RepoURL,
+		Ref:                  repo.Spec.Ref,
+		GitCredentialID:      repo.Spec.GitCredentialID,
+		SourceURLCredentials: maskCatalogCredentials([]string{repo.Spec.RepoURL}, tokenEnv),
 	}
-	manifest.SourceURLCredentials = maskCatalogCredentials([]string{repo.Spec.RepoURL}, tokenEnv)
 	return types.SkillRepository{
 		Metadata:                MetadataFrom(&repo),
 		SkillRepositoryManifest: manifest,

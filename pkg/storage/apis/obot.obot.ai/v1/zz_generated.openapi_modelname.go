@@ -511,6 +511,11 @@ func (in MCPServerInstanceSpec) OpenAPIModelName() string {
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
+func (in MCPServerInstanceStatus) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.MCPServerInstanceStatus"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
 func (in MCPServerList) OpenAPIModelName() string {
 	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.MCPServerList"
 }
@@ -786,21 +791,6 @@ func (in OAuthTokenStatus) OpenAPIModelName() string {
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
-func (in OktaGroupMigration) OpenAPIModelName() string {
-	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.OktaGroupMigration"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
-func (in OktaGroupMigrationList) OpenAPIModelName() string {
-	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.OktaGroupMigrationList"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
-func (in OktaGroupMigrationSpec) OpenAPIModelName() string {
-	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.OktaGroupMigrationSpec"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
 func (in PodSecurityAdmissionSettings) OpenAPIModelName() string {
 	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.PodSecurityAdmissionSettings"
 }
@@ -853,6 +843,46 @@ func (in ProjectV2) OpenAPIModelName() string {
 // OpenAPIModelName returns the OpenAPI model name for this type.
 func (in ProjectV2List) OpenAPIModelName() string {
 	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.ProjectV2List"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ProviderConfigurationChange) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.ProviderConfigurationChange"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ProviderConfigurationChangeList) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.ProviderConfigurationChangeList"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ProviderConfigurationChangeSpec) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.ProviderConfigurationChangeSpec"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ProviderConfigurationChangeStatus) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.ProviderConfigurationChangeStatus"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ProviderRevision) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.ProviderRevision"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ProviderSync) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.ProviderSync"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ProviderSyncList) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.ProviderSyncList"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ProviderSyncSpec) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.ProviderSyncSpec"
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
@@ -1078,4 +1108,49 @@ func (in UserRoleChangeList) OpenAPIModelName() string {
 // OpenAPIModelName returns the OpenAPI model name for this type.
 func (in UserRoleChangeSpec) OpenAPIModelName() string {
 	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.UserRoleChangeSpec"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VMCP) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.VMCP"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VMCPComponentStatus) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.VMCPComponentStatus"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VMCPInstance) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.VMCPInstance"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VMCPInstanceList) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.VMCPInstanceList"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VMCPInstanceSpec) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.VMCPInstanceSpec"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VMCPInstanceStatus) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.VMCPInstanceStatus"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VMCPList) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.VMCPList"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VMCPSpec) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.VMCPSpec"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VMCPStatus) OpenAPIModelName() string {
+	return "com.github.obot-platform.obot.pkg.storage.apis.obot.obot.ai.v1.VMCPStatus"
 }

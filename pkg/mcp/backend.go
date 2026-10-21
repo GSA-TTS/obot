@@ -16,6 +16,7 @@ import (
 	mmmcpconfig "github.com/obot-platform/mmmcp/config"
 	"github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/system"
+	"github.com/obot-platform/obot/pkg/version"
 )
 
 const (
@@ -57,6 +58,8 @@ type ErrNotSupportedByBackend struct {
 }
 
 type mmmcpFileConfig struct {
+	Name    string            `json:"name" yaml:"name"`
+	Version string            `json:"version" yaml:"version"`
 	Servers []mmmcpFileServer `json:"servers" yaml:"servers"`
 }
 
@@ -258,7 +261,7 @@ func ServerHookConfig(server ServerConfig) (Hooks, HookServerConfigs) {
 			MCPServerName:        system.SystemMCPServerPrefix + webhook.Name,
 			MCPServerDisplayName: webhook.DisplayName,
 			SystemMCPServer:      true,
-			Audiences:            slices.Clone(server.Audiences),
+			Audiences:            []string{webhook.Audience},
 		}
 	}
 	return hooks, servers
@@ -266,10 +269,20 @@ func ServerHookConfig(server ServerConfig) (Hooks, HookServerConfigs) {
 
 // MMMCPConfig converts a server configuration into mmmcp's runtime configuration.
 func MMMCPConfig(server ServerConfig, env map[string][]byte) *mmmcpconfig.Config {
-	if server.Runtime == types.RuntimeComposite {
-		passthroughHeaders := make([]string, 0, len(server.PassthroughHeaderNames)+1)
-		passthroughHeaders = append(passthroughHeaders, "Authorization")
-		passthroughHeaders = append(passthroughHeaders, server.PassthroughHeaderNames...)
+	serverName := server.MCPServerDisplayName
+	if serverName == "" {
+		serverName = server.MCPServerName
+	}
+	config := &mmmcpconfig.Config{
+		Name:    serverName,
+		Version: version.Get().String(),
+	}
+
+	if server.Runtime == types.RuntimeVMCP {
+		// Component connections are authenticated by the gateway's composite OAuth
+		// handler, not the frontend Authorization header: pooled sessions replay
+		// the headers of the request that opened them long after it expires.
+		passthroughHeaders := slices.Clone(server.PassthroughHeaderNames)
 
 		servers := make([]mmmcpconfig.Server, 0, len(server.Components))
 		for _, component := range server.Components {
@@ -285,15 +298,18 @@ func MMMCPConfig(server ServerConfig, env map[string][]byte) *mmmcpconfig.Config
 			}
 
 			servers = append(servers, mmmcpconfig.Server{
+				DiscoveryRevision:  server.ConfigHash,
 				Name:               component.DisplayName,
 				Prefix:             component.ToolPrefix,
 				URL:                component.URL,
 				PassthroughHeaders: passthroughHeaders,
 				Tools:              tools,
+				DisableTools:       component.DisableTools,
 			})
 		}
 
-		return &mmmcpconfig.Config{Servers: servers}
+		config.Servers = servers
+		return config
 	}
 
 	replacer := strings.NewReplacer("/", "-", ":", "-", "?", "-")
@@ -303,25 +319,34 @@ func MMMCPConfig(server ServerConfig, env map[string][]byte) *mmmcpconfig.Config
 		completeEnv[k] = string(v)
 	}
 
-	name := replacer.Replace(server.MCPServerDisplayName)
-	if name == "" {
-		name = replacer.Replace(server.MCPServerName)
+	if server.Runtime == types.RuntimeNPX {
+		// npx audits the installed tree against the registry before it execs the server. The
+		// result is only logged, nothing here can act on it, and the audit endpoint is
+		// intermittently unresponsive.
+		completeEnv["NPM_CONFIG_AUDIT"] = "false"
 	}
 
-	return &mmmcpconfig.Config{Servers: []mmmcpconfig.Server{{
-		Name:               name,
+	componentName := replacer.Replace(serverName)
+
+	config.Servers = []mmmcpconfig.Server{{
+		Name:               componentName,
 		URL:                server.URL,
 		Headers:            keyValueSliceToMap(server.Headers),
 		PassthroughHeaders: server.PassthroughHeaderNames,
 		Command:            server.Command,
 		Args:               slices.Clone(server.Args),
 		Env:                completeEnv,
-	}}}
+	}}
+	return config
 }
 
 func constructMCPServerMMMCPYAML(server ServerConfig, env map[string][]byte) ([]byte, error) {
 	config := MMMCPConfig(server, env)
-	fileConfig := mmmcpFileConfig{Servers: make([]mmmcpFileServer, 0, len(config.Servers))}
+	fileConfig := mmmcpFileConfig{
+		Name:    config.Name,
+		Version: config.Version,
+		Servers: make([]mmmcpFileServer, 0, len(config.Servers)),
+	}
 	for _, server := range config.Servers {
 		args := make([]string, len(server.Args))
 		for i, arg := range server.Args {

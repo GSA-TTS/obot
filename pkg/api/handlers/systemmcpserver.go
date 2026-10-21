@@ -157,11 +157,7 @@ func (h *SystemMCPServerHandler) Configure(req api.Context) error {
 			delete(envVars, key)
 		}
 	}
-	var headers []types.MCPHeader
-	if systemServer.Spec.Manifest.RemoteConfig != nil {
-		headers = systemServer.Spec.Manifest.RemoteConfig.Headers
-	}
-	missing, err := mcp.ValidateConfiguredOptions(systemServer.Spec.Manifest.Env, headers, envVars)
+	missing, err := mcp.ValidateConfiguredOptions(systemServer.Spec.Manifest.Config, envVars)
 	if err != nil {
 		return types.NewErrBadRequest("invalid configuration: %v", err)
 	}
@@ -239,7 +235,7 @@ func (h *SystemMCPServerHandler) Restart(req api.Context) error {
 		return err
 	}
 
-	if systemServer.Spec.Manifest.Runtime == types.RuntimeRemote || systemServer.Spec.Manifest.Runtime == types.RuntimeComposite {
+	if systemServer.Spec.Manifest.Runtime == types.RuntimeRemote {
 		return types.NewErrBadRequest("system MCP server %s has runtime %s, which does not support restart", systemServer.Name, systemServer.Spec.Manifest.Runtime)
 	}
 
@@ -300,7 +296,7 @@ func (h *SystemMCPServerHandler) RestartNanobotAgentDeployments(req api.Context)
 			continue
 		}
 
-		_, serverConfig, err := h.mcpSessionManager.ServerForAction(req.Context(), server.Name, req.User.GetUID())
+		_, serverConfig, err := h.mcpSessionManager.ServerForAction(req.Context(), server.Name, req.User)
 		if err != nil {
 			failed = append(failed, map[string]string{
 				"serverID": server.Name,
@@ -351,7 +347,7 @@ func (h *SystemMCPServerHandler) Logs(req api.Context) error {
 		return err
 	}
 
-	if systemServer.Spec.Manifest.Runtime == types.RuntimeRemote || systemServer.Spec.Manifest.Runtime == types.RuntimeComposite {
+	if systemServer.Spec.Manifest.Runtime == types.RuntimeRemote {
 		return types.NewErrBadRequest("system MCP server %s has runtime %s, which does not support logs retrieval", systemServer.Name, systemServer.Spec.Manifest.Runtime)
 	}
 
@@ -438,7 +434,7 @@ func (h *SystemMCPServerHandler) GetDetails(req api.Context) error {
 		return err
 	}
 
-	if systemServer.Spec.Manifest.Runtime == types.RuntimeRemote || systemServer.Spec.Manifest.Runtime == types.RuntimeComposite {
+	if systemServer.Spec.Manifest.Runtime == types.RuntimeRemote {
 		return types.NewErrBadRequest("system MCP server %s has runtime %s, which does not support details retrieval", systemServer.Name, systemServer.Spec.Manifest.Runtime)
 	}
 
@@ -526,15 +522,12 @@ func convertSystemMCPServer(server v1.SystemMCPServer, credEnv map[string]string
 		})
 	}
 
-	for _, env := range server.Spec.Manifest.Env {
-		if (env.Required && env.Value == "" && credEnv[env.Key] == "") || (credEnv[env.Key] != "" && !mcp.ConfigurationOptionValueValid(env.MCPHeader, credEnv)) {
-			result.MissingRequiredEnvVars = append(result.MissingRequiredEnvVars, env.Key)
-		}
-	}
-	if server.Spec.Manifest.RemoteConfig != nil {
-		for _, header := range server.Spec.Manifest.RemoteConfig.Headers {
-			if (header.Required && header.Value == "" && credEnv[header.Key] == "") || (credEnv[header.Key] != "" && !mcp.ConfigurationOptionValueValid(header, credEnv)) {
-				result.MissingRequiredHeaders = append(result.MissingRequiredHeaders, header.Key)
+	for _, field := range server.Spec.Manifest.Config {
+		if (field.Required && field.Value == "" && credEnv[field.Key] == "") || (credEnv[field.Key] != "" && !mcp.ConfigurationOptionValueValid(field.ToHeader(), credEnv)) {
+			if field.Usage == types.Header {
+				result.MissingRequiredHeaders = append(result.MissingRequiredHeaders, field.Key)
+			} else {
+				result.MissingRequiredEnvVars = append(result.MissingRequiredEnvVars, field.Key)
 			}
 		}
 	}

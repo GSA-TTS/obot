@@ -1,0 +1,1278 @@
+package mcp
+
+import (
+	"context"
+	"reflect"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/obot-platform/mmmcp/config"
+	"github.com/obot-platform/obot/apiclient/types"
+	"github.com/obot-platform/obot/pkg/storage"
+	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
+	storagescheme "github.com/obot-platform/obot/pkg/storage/scheme"
+	"github.com/obot-platform/obot/pkg/system"
+	vmcpaccess "github.com/obot-platform/obot/pkg/vmcp"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/watch"
+	kuser "k8s.io/apiserver/pkg/authentication/user"
+	kclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+const (
+	vmcpTestListenPort = 18080
+)
+
+type vmcpWatchSignalingStorage struct {
+	storage.Client
+	once     sync.Once
+	watching chan struct{}
+}
+
+// vmcpInitialEventsStorage supplies the watch-list behavior that the Kubernetes
+// API server provides but controller-runtime's fake watch does not emulate.
+type vmcpInitialEventsStorage struct {
+	storage.Client
+}
+
+// vmcpWatchNotifyingStorage reports each watch it opens, so a test can tell what
+// a caller is waiting on.
+type vmcpWatchNotifyingStorage struct {
+	storage.Client
+	watches chan kclient.ObjectList
+}
+
+type vmcpServerConfigResult struct {
+	config ServerConfig
+	err    error
+}
+
+func TestRestrictComponentTools(t *testing.T) {
+	renamed := types.ToolOverride{
+		Name:                "find",
+		OverrideName:        "search",
+		OverrideDescription: "Search documents",
+		Enabled:             true,
+	}
+	for _, tt := range []struct {
+		name        string
+		component   ComponentServer
+		allowed     []types.VMCPToolReference
+		componentID string
+		want        []types.ToolOverride
+		disabled    bool
+	}{
+		{
+			name: "component wildcard preserves enabled and disabled overrides",
+			component: ComponentServer{Tools: []types.ToolOverride{
+				renamed,
+				{
+					Name:    "delete",
+					Enabled: false,
+				},
+			}},
+			componentID: "docs",
+			allowed: []types.VMCPToolReference{
+				{
+					ComponentID: "docs",
+					Name:        "*",
+				},
+			},
+			want: []types.ToolOverride{
+				renamed,
+				{
+					Name:    "delete",
+					Enabled: false,
+				},
+			},
+		},
+		{
+			name:        "component wildcard without overrides stays unrestricted",
+			componentID: "docs",
+			allowed: []types.VMCPToolReference{
+				{
+					ComponentID: "docs",
+					Name:        "*",
+				},
+			},
+		},
+		{
+			name:        "wildcard on another component grants nothing",
+			componentID: "docs",
+			allowed: []types.VMCPToolReference{
+				{
+					ComponentID: "other",
+					Name:        "*",
+				},
+			},
+			disabled: true,
+		},
+		{
+			name:      "all preserves overrides",
+			component: ComponentServer{Tools: []types.ToolOverride{renamed}},
+			want:      []types.ToolOverride{renamed},
+		},
+		{
+			name:     "empty grant disables tools",
+			allowed:  []types.VMCPToolReference{},
+			disabled: true,
+		},
+		{
+			name: "grants original name despite prefix and rename",
+			component: ComponentServer{ToolPrefix: "docs", Tools: []types.ToolOverride{
+				renamed,
+				{
+					Name:    "delete",
+					Enabled: false,
+				},
+			}},
+			componentID: "docs-component",
+			allowed: []types.VMCPToolReference{
+				{
+					ComponentID: "docs-component",
+					Name:        "find",
+				},
+				{
+					ComponentID: "docs-component",
+					Name:        "delete",
+				},
+			},
+			want: []types.ToolOverride{renamed},
+		},
+		{
+			name:        "same named tool on another component does not grant access",
+			component:   ComponentServer{Tools: []types.ToolOverride{renamed}},
+			componentID: "docs-component",
+			allowed: []types.VMCPToolReference{
+				{
+					ComponentID: "other-component",
+					Name:        "find",
+				},
+			},
+			disabled: true,
+		},
+		{
+			name:        "creates override for granted upstream tool",
+			componentID: "docs-component",
+			allowed: []types.VMCPToolReference{
+				{
+					ComponentID: "docs-component",
+					Name:        "find",
+				},
+			},
+			want: []types.ToolOverride{
+				{
+					Name:    "find",
+					Enabled: true,
+				},
+			},
+		},
+		{
+			name:        "wrong component has no grant",
+			componentID: "docs-component",
+			allowed: []types.VMCPToolReference{
+				{
+					ComponentID: "files-component",
+					Name:        "find",
+				},
+			},
+			disabled: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := restrictComponentTools(&tt.component, tt.allowed, tt.componentID); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(tt.component.Tools, tt.want) || tt.component.DisableTools != tt.disabled {
+				t.Fatalf("got tools %#v, disabled %v; want %#v, disabled %v", tt.component.Tools, tt.component.DisableTools, tt.want, tt.disabled)
+			}
+		})
+	}
+}
+
+func TestServerConfigForVMCPBuildsAggregateConfig(t *testing.T) {
+	const (
+		vmcpID = "vmcp1shared"
+		userID = "user-1"
+	)
+	instanceID := "vmcpi1-shared-instance"
+	otherInstanceID := "vmcpi1-other-user-instance"
+
+	vmcp := &v1.VMCP{
+		Name:      vmcpID,
+		Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPSpec{
+			Manifest: types.VMCPManifest{
+				DisplayName: "Shared VMCP",
+				Profiles: []types.VMCPProfile{
+					{
+						Subjects:    []types.Subject{{Type: types.SubjectTypeUser, ID: userID}},
+						Permissions: types.VMCPProfilePermissions{AllowedComponents: map[string]types.VMCPComponentSet{"search-component": {AllowedTools: []string{"find"}}}},
+					},
+					{
+						Subjects:    []types.Subject{{Type: types.SubjectTypeSelector, ID: "*"}},
+						Permissions: types.VMCPProfilePermissions{AllowedComponents: map[string]types.VMCPComponentSet{"files-component": {AllowedTools: []string{"read"}}}},
+					},
+				},
+				Components: []types.VMCPComponent{
+					{
+						ID:              "search-component",
+						Name:            "search",
+						ForceSingleUser: true,
+						CatalogEntry: types.MCPServerCatalogEntrySnapshot{
+							Manifest: types.MCPServerCatalogEntryManifest{
+								Name:    "Cached Search",
+								Runtime: types.RuntimeRemote,
+							},
+						},
+						ToolPrefix: "search",
+						ToolOverrides: []types.ToolOverride{
+							{
+								Name:                "find",
+								OverrideName:        "find_documents",
+								Description:         "Find a document",
+								OverrideDescription: "Search the document index",
+								Enabled:             true,
+							},
+						},
+					},
+					{
+						ID:   "files-component",
+						Name: "files",
+						CatalogEntry: types.MCPServerCatalogEntrySnapshot{
+							Manifest: types.MCPServerCatalogEntryManifest{
+								Name:    "Cached Files",
+								Runtime: types.RuntimeRemote,
+							},
+						},
+						ToolPrefix: "files",
+					},
+				},
+			},
+		},
+	}
+	instance := syncedVMCPInstance(&v1.VMCPInstance{
+		Name:      instanceID,
+		Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPInstanceSpec{
+			Manifest: types.VMCPInstanceManifest{
+				VMCPID:       vmcpID,
+				ComponentSet: map[string]types.VMCPComponentSet{"search-component": {AllowedTools: []string{"find", "not_granted"}}},
+			},
+			UserID: userID,
+		},
+	}, vmcp)
+	otherUserInstance := &v1.VMCPInstance{
+		Name:      otherInstanceID,
+		Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPInstanceSpec{
+			Manifest: types.VMCPInstanceManifest{VMCPID: vmcpID},
+			UserID:   "user-2",
+		},
+	}
+	otherVMCPInstance := &v1.VMCPInstance{
+		Name:      "vmcpi1-other-vmcp-instance",
+		Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPInstanceSpec{
+			Manifest: types.VMCPInstanceManifest{VMCPID: "vmcp1other"},
+			UserID:   userID,
+		},
+	}
+
+	searchServer := vmcpComponentServer(
+		"search-server",
+		instanceID,
+		userID,
+		"search-component",
+		"Search service",
+		"https://search.example.test/mcp",
+	)
+	filesServer := vmcpComponentServer(
+		"files-server",
+		"",
+		"",
+		"files-component",
+		"Files service",
+		"https://files.example.test/mcp",
+	)
+	filesServer.Spec.VMCPID = vmcpID
+	filesConnection := syncedVMCPConnection(t, &v1.MCPServerInstance{
+		Name: "msi1files", Namespace: system.DefaultNamespace,
+		Spec: v1.MCPServerInstanceSpec{UserID: userID, VMCPInstanceID: instanceID, VMCPComponentID: "files-component", MCPServerName: filesServer.Name},
+	}, vmcp, instance)
+	otherUserServer := vmcpComponentServer(
+		"aaa-search-server-other-user",
+		otherInstanceID,
+		"user-2",
+		"search-component",
+		"Wrong user service",
+		"https://wrong-user.example.test/mcp",
+	)
+
+	storageClient := newVMCPTestStorage(vmcp, instance, otherUserInstance, otherVMCPInstance, searchServer, filesServer, otherUserServer, filesConnection)
+	manager := &SessionManager{
+		storageClient:  storageClient,
+		httpListenPort: vmcpTestListenPort,
+		baseURL:        "https://obot.example.test",
+	}
+
+	serverConfig, err := manager.ServerConfigForVMCP(t.Context(), vmcpID, &kuser.DefaultInfo{UID: userID})
+	if err != nil {
+		t.Fatalf("ServerConfigForVMCP() error = %v", err)
+	}
+	// API clients mint a loopback token for the vMCP, which requires an audience.
+	wantAudiences := []string{"https://obot.example.test/mcp-connect/" + instanceID, "https://obot.example.test/mcp-connect/" + vmcpID}
+	if !slices.Equal(serverConfig.Audiences, wantAudiences) {
+		t.Fatalf("vMCP audiences = %v, want %v", serverConfig.Audiences, wantAudiences)
+	}
+	if serverConfig.Runtime != types.RuntimeVMCP {
+		t.Fatalf("vMCP runtime = %q, want %q", serverConfig.Runtime, types.RuntimeVMCP)
+	}
+	if serverConfig.MCPServerName != instanceID {
+		t.Fatalf("vMCP MCP server name = %q, want %q", serverConfig.MCPServerName, vmcpID)
+	}
+	if serverConfig.MCPServerDisplayName != vmcp.Spec.Manifest.DisplayName {
+		t.Fatalf("vMCP display name = %q, want %q", serverConfig.MCPServerDisplayName, vmcp.Spec.Manifest.DisplayName)
+	}
+	// Audit rows record the vMCP, not the per-user instance that serves the connection.
+	if serverConfig.AuditLogMetadata["mcpID"] != vmcpID || serverConfig.AuditLogMetadata["mcpServerDisplayName"] != vmcp.Spec.Manifest.DisplayName || serverConfig.AuditLogMetadata["userID"] != userID {
+		t.Fatalf("missing vMCP audit attribution: %#v", serverConfig.AuditLogMetadata)
+	}
+	if len(serverConfig.Components) != 2 {
+		t.Fatalf("component count = %d, want 2", len(serverConfig.Components))
+	}
+
+	components := make(map[string]ComponentServer, len(serverConfig.Components))
+	for _, component := range serverConfig.Components {
+		components[component.Name] = component
+	}
+	searchComponent, ok := components[searchServer.Name]
+	if !ok {
+		t.Fatalf("vMCP config omitted component %q: %#v", searchServer.Name, serverConfig.Components)
+	}
+	if searchComponent.DisplayName != "search" {
+		t.Fatalf("search component display name = %q, want search", searchComponent.DisplayName)
+	}
+	wantSearchURL := system.LocalMCPConnectURL(searchServer.Name, vmcpTestListenPort)
+	if searchComponent.URL != wantSearchURL {
+		t.Fatalf("search component URL = %q, want %q", searchComponent.URL, wantSearchURL)
+	}
+	if searchComponent.ToolPrefix != "search" {
+		t.Fatalf("search component tool prefix = %q, want search", searchComponent.ToolPrefix)
+	}
+	wantTools := []types.ToolOverride{
+		{
+			Name:                "find",
+			OverrideName:        "find_documents",
+			Description:         "Find a document",
+			OverrideDescription: "Search the document index",
+			Enabled:             true,
+		},
+	}
+	if !reflect.DeepEqual(searchComponent.Tools, wantTools) {
+		t.Fatalf("search component tool overrides = %#v, want %#v", searchComponent.Tools, wantTools)
+	}
+
+	filesComponent, ok := components[filesServer.Name]
+	if !ok {
+		t.Fatalf("vMCP config omitted component %q: %#v", filesServer.Name, serverConfig.Components)
+	}
+	wantFilesURL := system.LocalMCPConnectURL(filesConnection.Name, vmcpTestListenPort)
+	if filesComponent.DisplayName != "files" || filesComponent.URL != wantFilesURL {
+		t.Fatalf("files component metadata = %#v, want display name and local URL", filesComponent)
+	}
+	if filesComponent.ToolPrefix != "files" {
+		t.Fatalf("files component tool prefix = %q, want files", filesComponent.ToolPrefix)
+	}
+	if filesComponent.Tools != nil {
+		t.Fatalf("files component tool overrides = %#v, want nil", filesComponent.Tools)
+	}
+
+	mmmcpConfig := MMMCPConfig(serverConfig, nil)
+	if mmmcpConfig.Name != vmcp.Spec.Manifest.DisplayName {
+		t.Fatalf("MMMCP name = %q, want %q", mmmcpConfig.Name, vmcp.Spec.Manifest.DisplayName)
+	}
+	if len(mmmcpConfig.Servers) != 2 {
+		t.Fatalf("MMMCP server count = %d, want 2", len(mmmcpConfig.Servers))
+	}
+	var searchMMMCP *config.Server
+	var filesMMMCP *config.Server
+	for i := range mmmcpConfig.Servers {
+		server := &mmmcpConfig.Servers[i]
+		switch server.Name {
+		case "search":
+			searchMMMCP = server
+		case "files":
+			filesMMMCP = server
+		}
+	}
+	if searchMMMCP == nil || filesMMMCP == nil {
+		t.Fatalf("MMMCP config components = %#v, want search and files", mmmcpConfig.Servers)
+	}
+	if searchMMMCP.DisableTools || !filesMMMCP.DisableTools {
+		t.Fatal("only the search component should expose tools")
+	}
+	if searchMMMCP.Prefix != "search" || searchMMMCP.URL != wantSearchURL {
+		t.Fatalf("MMMCP search component = %#v, want prefix and URL", *searchMMMCP)
+	}
+	if len(searchMMMCP.Tools) != 1 {
+		t.Fatalf("MMMCP search tool overrides = %#v, want one", searchMMMCP.Tools)
+	}
+	if searchMMMCP.Tools[0].Name != "find" || searchMMMCP.Tools[0].OverrideName != "find_documents" || searchMMMCP.Tools[0].Description != "Find a document" || searchMMMCP.Tools[0].OverrideDescription != "Search the document index" || !searchMMMCP.Tools[0].Enabled {
+		t.Fatalf("MMMCP search tool override = %#v, want copied override", searchMMMCP.Tools[0])
+	}
+	if filesMMMCP.Prefix != "files" || filesMMMCP.URL != wantFilesURL || len(filesMMMCP.Tools) != 0 {
+		t.Fatalf("MMMCP files component = %#v, want prefix, URL, and no overrides", *filesMMMCP)
+	}
+
+	var servers v1.MCPServerList
+	if err := storageClient.List(t.Context(), &servers); err != nil {
+		t.Fatalf("list component servers: %v", err)
+	}
+	if len(servers.Items) != 3 {
+		t.Fatalf("MCPServer count = %d, want 3; resolving a vMCP must not deploy a wrapper", len(servers.Items))
+	}
+	for _, server := range servers.Items {
+		if server.Name == vmcpID {
+			t.Fatalf("vMCP resolution created wrapper MCPServer %q", vmcpID)
+		}
+	}
+}
+
+// A personal vMCP answers to its owner alone. The owner keeps every tool their
+// instance references even when no profile grants it, and no one else reaches a
+// tool even when a profile grants everything to everyone.
+func TestServerConfigForVMCPPersonalOwnership(t *testing.T) {
+	const (
+		vmcpID     = "vmcp1personalowner"
+		instanceID = "vmcpi1personalowner"
+		ownerID    = "7"
+		otherID    = "9"
+	)
+	for _, tt := range []struct {
+		name         string
+		userID       string
+		profiles     []types.VMCPProfile
+		wantTools    []types.ToolOverride
+		wantDisabled bool
+	}{
+		{
+			name:   "owner keeps referenced tools that no profile grants",
+			userID: ownerID,
+			profiles: []types.VMCPProfile{
+				{
+					Subjects: []types.Subject{
+						{
+							Type: types.SubjectTypeUser,
+							ID:   otherID,
+						},
+					},
+					Permissions: types.VMCPProfilePermissions{AllowedComponents: map[string]types.VMCPComponentSet{"search-component": {AllowedTools: []string{"find"}}}},
+				},
+			},
+			wantTools: []types.ToolOverride{
+				{
+					Name:    "find",
+					Enabled: true,
+				},
+			},
+		},
+		{
+			name:   "non-owner is denied by a profile granting everyone every tool",
+			userID: otherID,
+			profiles: []types.VMCPProfile{
+				{
+					Subjects: []types.Subject{
+						{
+							Type: types.SubjectTypeSelector,
+							ID:   "*",
+						},
+					},
+					Permissions: types.VMCPProfilePermissions{AllowAllComponents: true},
+				},
+			},
+			wantDisabled: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			vmcp := &v1.VMCP{
+				Name:      vmcpID,
+				Namespace: system.DefaultNamespace,
+				Spec: v1.VMCPSpec{
+					UserID: ownerID,
+					Manifest: types.VMCPManifest{
+						DisplayName: "Personal VMCP",
+						Profiles:    tt.profiles,
+						Components: []types.VMCPComponent{
+							{
+								ID:              "search-component",
+								Name:            "search",
+								ForceSingleUser: true,
+								CatalogEntry: types.MCPServerCatalogEntrySnapshot{
+									Manifest: types.MCPServerCatalogEntryManifest{
+										Name:    "Cached Search",
+										Runtime: types.RuntimeRemote,
+									},
+								},
+								ToolOverrides: []types.ToolOverride{{Name: "find", Enabled: true}},
+							},
+						},
+					},
+				},
+			}
+			instance := syncedVMCPInstance(&v1.VMCPInstance{
+				Name:      instanceID,
+				Namespace: system.DefaultNamespace,
+				Spec: v1.VMCPInstanceSpec{
+					UserID: tt.userID,
+					Manifest: types.VMCPInstanceManifest{
+						VMCPID:       vmcpID,
+						ComponentSet: map[string]types.VMCPComponentSet{"search-component": {AllowedTools: []string{"find"}}},
+					},
+				},
+			}, vmcp)
+			searchServer := vmcpComponentServer(
+				"search-server",
+				instanceID,
+				tt.userID,
+				"search-component",
+				"Search service",
+				"https://search.example.test/mcp",
+			)
+			manager := &SessionManager{
+				storageClient:  newVMCPTestStorage(vmcp, instance, searchServer),
+				httpListenPort: vmcpTestListenPort,
+			}
+
+			serverConfig, err := manager.ServerConfigForVMCP(t.Context(), vmcpID, &kuser.DefaultInfo{UID: tt.userID})
+			if err != nil {
+				t.Fatalf("ServerConfigForVMCP() error = %v", err)
+			}
+			if len(serverConfig.Components) != 1 {
+				t.Fatalf("component count = %d, want 1", len(serverConfig.Components))
+			}
+			component := serverConfig.Components[0]
+			if component.DisableTools != tt.wantDisabled {
+				t.Fatalf("component tools disabled = %v, want %v", component.DisableTools, tt.wantDisabled)
+			}
+			if !reflect.DeepEqual(component.Tools, tt.wantTools) {
+				t.Fatalf("component tool overrides = %#v, want %#v", component.Tools, tt.wantTools)
+			}
+		})
+	}
+}
+
+func TestServerConfigForVMCPOmitsDisabledComponents(t *testing.T) {
+	const userID = "1"
+	vmcp := &v1.VMCP{Name: "vmcp1disabled", Namespace: system.DefaultNamespace, Spec: v1.VMCPSpec{Manifest: types.VMCPManifest{
+		Components: []types.VMCPComponent{{ID: "enabled", Name: "enabled"}, {ID: "disabled", Name: "disabled"}},
+		Profiles: []types.VMCPProfile{{
+			Subjects:    []types.Subject{{Type: types.SubjectTypeSelector, ID: "*"}},
+			Permissions: types.VMCPProfilePermissions{AllowedComponents: map[string]types.VMCPComponentSet{"enabled": {AllowedTools: []string{}}}},
+		}},
+	}}}
+	enabled := vmcpComponentServer("ms1enabled", "", "", "enabled", "enabled", "https://enabled.example.com/mcp")
+	enabled.Spec.VMCPID = vmcp.Name
+	disabled := vmcpComponentServer("ms1disabled", "", "", "disabled", "disabled", "https://disabled.example.com/mcp")
+	disabled.Spec.VMCPID = vmcp.Name
+	instance := syncedVMCPInstance(&v1.VMCPInstance{
+		Name: "vmcpi1user", Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPInstanceSpec{UserID: userID, Manifest: types.VMCPInstanceManifest{VMCPID: vmcp.Name}},
+	}, vmcp)
+	// Only the enabled component has a connection: a disabled component must not be waited on.
+	connection := syncedVMCPConnection(t, &v1.MCPServerInstance{
+		Name: "msi1enabled", Namespace: system.DefaultNamespace,
+		Spec: v1.MCPServerInstanceSpec{UserID: userID, VMCPInstanceID: instance.Name, VMCPComponentID: "enabled", MCPServerName: enabled.Name},
+	}, vmcp, instance)
+	manager := &SessionManager{storageClient: newVMCPTestStorage(vmcp, instance, enabled, disabled, connection)}
+
+	cfg, err := manager.ServerConfigForVMCP(t.Context(), vmcp.Name, &kuser.DefaultInfo{UID: userID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An entry without tools still enables the component; a missing entry disables it.
+	if len(cfg.Components) != 1 || cfg.Components[0].Name != enabled.Name || !cfg.Components[0].DisableTools {
+		t.Fatalf("components = %#v, want only the enabled component with tools disabled", cfg.Components)
+	}
+}
+
+func TestServerConfigForVMCPRejectsEmptyBeforeCreatingInstance(t *testing.T) {
+	vmcp := &v1.VMCP{
+		Name:      "vmcp1empty",
+		Namespace: system.DefaultNamespace,
+	}
+	storage := newVMCPTestStorage(vmcp)
+	manager := &SessionManager{storageClient: storage}
+	if _, err := manager.ServerConfigForVMCP(t.Context(), vmcp.Name, &kuser.DefaultInfo{UID: "user"}); err == nil || !strings.Contains(err.Error(), "without components") {
+		t.Fatalf("expected empty VMCP connection error, got %v", err)
+	}
+	var instances v1.VMCPInstanceList
+	if err := storage.List(t.Context(), &instances); err != nil {
+		t.Fatal(err)
+	}
+	if len(instances.Items) != 0 {
+		t.Fatal("rejected connection created an instance")
+	}
+}
+
+func TestServerConfigForVMCPChecksStaticOAuthStatusBeforeCreatingInstance(t *testing.T) {
+	vmcp := &v1.VMCP{
+		Name:      "vmcp1salesforce",
+		Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPSpec{
+			UserID: "user",
+			Manifest: types.VMCPManifest{
+				Components: []types.VMCPComponent{{
+					ID:                      "salesforce",
+					Name:                    "Salesforce",
+					MCPServerCatalogEntryID: "salesforce-entry",
+					CatalogEntry: types.MCPServerCatalogEntrySnapshot{Manifest: types.MCPServerCatalogEntryManifest{
+						Runtime: types.RuntimeRemote,
+						RemoteConfig: &types.RemoteCatalogConfig{
+							FixedURL:            "https://api.salesforce.com/platform/mcp/v1/platform/sobject-all",
+							StaticOAuthRequired: true,
+						},
+					}},
+				}},
+			},
+		},
+		Status: v1.VMCPStatus{Components: []v1.VMCPComponentStatus{{
+			Name:                      "Salesforce",
+			OAuthCredentialCheckHash:  "checked",
+			OAuthCredentialConfigured: false,
+			Error:                     "OAuth setup pending",
+		}}},
+	}
+	storage := newVMCPTestStorage(vmcp)
+	manager := &SessionManager{storageClient: storage}
+	_, err := manager.ServerConfigForVMCP(t.Context(), vmcp.Name, &kuser.DefaultInfo{UID: "user"})
+	if err == nil || !strings.Contains(err.Error(), "Salesforce requires administrator static OAuth configuration") {
+		t.Fatalf("expected static OAuth setup error, got %v", err)
+	}
+	var instances v1.VMCPInstanceList
+	if err := storage.List(t.Context(), &instances); err != nil {
+		t.Fatal(err)
+	}
+	if len(instances.Items) != 0 {
+		t.Fatal("rejected connection created an instance")
+	}
+	var current v1.VMCP
+	if err := storage.Get(t.Context(), kclient.ObjectKeyFromObject(vmcp), &current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Components[0].OAuthCredentialConfigured = true
+	if err := storage.Update(t.Context(), &current); err != nil {
+		t.Fatal(err)
+	}
+	instance := syncedVMCPInstance(&v1.VMCPInstance{
+		Name: "vmcpi1salesforce", Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPInstanceSpec{UserID: "user", Manifest: types.VMCPInstanceManifest{VMCPID: vmcp.Name}},
+	}, vmcp)
+	server := &v1.MCPServer{
+		Name: "ms1salesforce", Namespace: system.DefaultNamespace,
+		Spec: v1.MCPServerSpec{VMCPID: vmcp.Name, VMCPComponentID: "salesforce"},
+	}
+	connection := syncedVMCPConnection(t, &v1.MCPServerInstance{
+		Name: "msi1salesforce", Namespace: system.DefaultNamespace,
+		Spec: v1.MCPServerInstanceSpec{
+			UserID: "user", VMCPInstanceID: instance.Name,
+			VMCPComponentID: "salesforce", MCPServerName: server.Name,
+		},
+	}, vmcp, instance)
+	for _, object := range []kclient.Object{instance, server, connection} {
+		if err := storage.Create(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	if _, err := manager.ServerConfigForVMCP(ctx, vmcp.Name, &kuser.DefaultInfo{UID: "user"}); err != nil {
+		t.Fatalf("configured static OAuth credential was rejected with stale component status: %v", err)
+	}
+}
+
+func TestServerConfigForVMCPCreatesGeneratedInstance(t *testing.T) {
+	const (
+		vmcpID = "vmcp1personal"
+		userID = "user-without-instance"
+	)
+	vmcp := &v1.VMCP{
+		Name:      vmcpID,
+		Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPSpec{
+			Manifest: types.VMCPManifest{
+				DisplayName: "Personal VMCP",
+				Components:  []types.VMCPComponent{{ID: "component"}},
+			},
+		},
+	}
+	storageClient := newVMCPTestStorage(vmcp, &v1.MCPServer{
+		Name: "ms1shared", Namespace: system.DefaultNamespace,
+		Spec: v1.MCPServerSpec{VMCPID: vmcpID, VMCPComponentID: "component"},
+	})
+	wantConfigHash := syncedVMCPInstance(&v1.VMCPInstance{Spec: v1.VMCPInstanceSpec{
+		UserID: userID, Manifest: types.VMCPInstanceManifest{VMCPID: vmcpID},
+	}}, vmcp).Status.ConfigurationCheckHash
+	watching := make(chan struct{})
+	creation := make(chan error, 1)
+	go func() {
+		select {
+		case <-watching:
+		case <-t.Context().Done():
+			return
+		}
+		var instances v1.VMCPInstanceList
+		if err := storageClient.List(t.Context(), &instances); err != nil {
+			creation <- err
+			return
+		}
+		instances.Items[0].Status.ConfigurationCheckHash = wantConfigHash
+		if err := storageClient.Update(t.Context(), &instances.Items[0]); err != nil {
+			creation <- err
+			return
+		}
+		creation <- storageClient.Create(t.Context(), syncedVMCPConnection(t, &v1.MCPServerInstance{
+			Name: "msi1generated", Namespace: system.DefaultNamespace,
+			Spec: v1.MCPServerInstanceSpec{UserID: userID, VMCPInstanceID: instances.Items[0].Name, VMCPComponentID: "component", MCPServerName: "ms1shared"},
+		}, vmcp, &instances.Items[0]))
+	}()
+	manager := &SessionManager{
+		storageClient:  &vmcpWatchSignalingStorage{Client: storageClient, watching: watching},
+		httpListenPort: vmcpTestListenPort,
+	}
+
+	first, err := manager.ServerConfigForVMCP(t.Context(), vmcpID, &kuser.DefaultInfo{UID: userID})
+	if err != nil {
+		t.Fatalf("first ServerConfigForVMCP() error = %v", err)
+	}
+	if createErr := <-creation; createErr != nil {
+		t.Fatal(createErr)
+	}
+	if first.ConfigHash != wantConfigHash {
+		t.Fatalf("configuration hash = %q, want controller revision %q", first.ConfigHash, wantConfigHash)
+	}
+	second, err := manager.ServerConfigForVMCP(t.Context(), vmcpID, &kuser.DefaultInfo{UID: userID})
+	if err != nil {
+		t.Fatalf("second ServerConfigForVMCP() error = %v", err)
+	}
+	if first.Runtime != types.RuntimeVMCP || second.Runtime != types.RuntimeVMCP {
+		t.Fatalf("vMCP runtimes = %q and %q, want %q", first.Runtime, second.Runtime, types.RuntimeVMCP)
+	}
+	if !strings.HasPrefix(first.MCPServerName, system.VMCPInstancePrefix) || first.MCPServerDisplayName != vmcp.Spec.Manifest.DisplayName {
+		t.Fatalf("first vMCP identity = %#v, want vMCP identity", first)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("repeated resolution changed vMCP config: first %#v, second %#v", first, second)
+	}
+
+	var instances v1.VMCPInstanceList
+	if err := storageClient.List(t.Context(), &instances); err != nil {
+		t.Fatalf("list VMCP instances: %v", err)
+	}
+	if len(instances.Items) != 1 {
+		t.Fatalf("VMCP instance count = %d, want 1 after repeated resolution", len(instances.Items))
+	}
+	instance := instances.Items[0]
+	if !slices.Equal(instance.Finalizers, []string{v1.VMCPInstanceFinalizer}) {
+		t.Fatalf("missing instance credential cleanup finalizer: %v", instance.Finalizers)
+	}
+	if !strings.HasPrefix(instance.Name, system.VMCPInstancePrefix) {
+		t.Fatalf("created VMCP instance name = %q, want prefix %q", instance.Name, system.VMCPInstancePrefix)
+	}
+	if instance.Spec.UserID != userID || instance.Spec.Manifest.VMCPID != vmcpID {
+		t.Fatalf("created VMCP instance identity = %#v, want user %q and vMCP %q", instance.Spec, userID, vmcpID)
+	}
+}
+
+func TestServerConfigForVMCPWaitsForComponentServer(t *testing.T) {
+	const (
+		vmcpID = "vmcp1notready"
+		userID = "user-1"
+	)
+	instanceID := "vmcpi1-not-ready-instance"
+	vmcp := &v1.VMCP{
+		Name:      vmcpID,
+		Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPSpec{
+			Manifest: types.VMCPManifest{
+				DisplayName: "Not Ready VMCP",
+				Profiles: []types.VMCPProfile{{
+					Subjects:    []types.Subject{{Type: types.SubjectTypeUser, ID: userID}},
+					Permissions: types.VMCPProfilePermissions{AllowAllComponents: true},
+				}},
+				Components: []types.VMCPComponent{
+					{
+						ID:              "first-component",
+						Name:            "first",
+						ForceSingleUser: true,
+					},
+					{
+						ID:              "second-component",
+						Name:            "second",
+						ForceSingleUser: true,
+					},
+				},
+			},
+		},
+	}
+	instance := syncedVMCPInstance(&v1.VMCPInstance{
+		Name:      instanceID,
+		Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPInstanceSpec{
+			Manifest: types.VMCPInstanceManifest{
+				VMCPID: vmcpID,
+			},
+			UserID: userID,
+		},
+	}, vmcp)
+	storageClient := newVMCPTestStorage(vmcp, instance)
+	watching := make(chan struct{})
+	signalingStorage := &vmcpWatchSignalingStorage{
+		Client:   storageClient,
+		watching: watching,
+	}
+	createErr := make(chan error, 2)
+	go func() {
+		<-watching
+		createErr <- storageClient.Create(t.Context(), vmcpComponentServer(
+			"second-component-server",
+			instanceID,
+			userID,
+			"second-component",
+			"Second component",
+			"https://second.example.test/mcp",
+		))
+		createErr <- storageClient.Create(t.Context(), vmcpComponentServer(
+			"first-component-server",
+			instanceID,
+			userID,
+			"first-component",
+			"First component",
+			"https://first.example.test/mcp",
+		))
+	}()
+	manager := &SessionManager{storageClient: signalingStorage}
+
+	serverConfig, err := manager.ServerConfigForVMCP(t.Context(), vmcpID, &kuser.DefaultInfo{UID: userID})
+	if err != nil {
+		t.Fatalf("ServerConfigForVMCP() error = %v", err)
+	}
+	for range 2 {
+		if err := <-createErr; err != nil {
+			t.Fatalf("create component server: %v", err)
+		}
+	}
+	if len(serverConfig.Components) != 2 ||
+		serverConfig.Components[0].Name != "first-component-server" ||
+		serverConfig.Components[1].Name != "second-component-server" {
+		t.Fatalf("components = %#v, want both servers in manifest order", serverConfig.Components)
+	}
+}
+
+func (s *vmcpWatchSignalingStorage) Watch(ctx context.Context, list kclient.ObjectList, opts ...kclient.ListOption) (watch.Interface, error) {
+	watcher, err := s.Client.Watch(ctx, list, opts...)
+	if err == nil {
+		s.once.Do(func() {
+			close(s.watching)
+		})
+	}
+	return watcher, err
+}
+
+func vmcpComponentServer(name, instanceID, userID, componentID, displayName, url string) *v1.MCPServer {
+	return &v1.MCPServer{
+		Name:      name,
+		Namespace: system.DefaultNamespace,
+		Spec: v1.MCPServerSpec{
+			Manifest: types.MCPServerManifest{
+				Name:    displayName,
+				Runtime: types.RuntimeRemote,
+				RemoteConfig: &types.RemoteRuntimeConfig{
+					URL: url,
+				},
+			},
+			UserID:          userID,
+			VMCPInstanceID:  instanceID,
+			VMCPComponentID: componentID,
+		},
+	}
+}
+
+func newVMCPTestStorage(objects ...kclient.Object) storage.Client {
+	return &vmcpInitialEventsStorage{Client: fake.NewClientBuilder().
+		WithScheme(storagescheme.Scheme).
+		WithIndex(&v1.VMCPInstance{}, "metadata.name", func(obj kclient.Object) []string { return []string{obj.GetName()} }).
+		WithIndex(&v1.MCPServerInstance{}, "spec.vmcpInstanceID", func(obj kclient.Object) []string { return []string{obj.(*v1.MCPServerInstance).Spec.VMCPInstanceID} }).
+		WithIndex(&v1.VMCP{}, "spec.legacySlug", func(obj kclient.Object) []string { return []string{obj.(*v1.VMCP).Spec.LegacySlug} }).
+		WithIndex(&v1.VMCPInstance{}, "spec.legacySlug", func(obj kclient.Object) []string { return []string{obj.(*v1.VMCPInstance).Spec.LegacySlug} }).
+		WithIndex(&v1.MCPServer{}, "spec.vmcpID", func(obj kclient.Object) []string {
+			return []string{obj.(*v1.MCPServer).Spec.VMCPID}
+		}).
+		WithIndex(&v1.VMCPInstance{}, "spec.userID", func(obj kclient.Object) []string {
+			return []string{obj.(*v1.VMCPInstance).Spec.UserID}
+		}).
+		WithIndex(&v1.VMCPInstance{}, "spec.manifest.vmcpID", func(obj kclient.Object) []string {
+			return []string{obj.(*v1.VMCPInstance).Spec.Manifest.VMCPID}
+		}).
+		WithIndex(&v1.MCPServer{}, "spec.vmcpInstanceID", func(obj kclient.Object) []string {
+			return []string{obj.(*v1.MCPServer).Spec.VMCPInstanceID}
+		}).
+		WithObjects(objects...).
+		Build()}
+}
+
+func (s *vmcpInitialEventsStorage) Watch(ctx context.Context, list kclient.ObjectList, opts ...kclient.ListOption) (watch.Interface, error) {
+	upstream, err := s.Client.Watch(ctx, list, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	initialList := list.DeepCopyObject().(kclient.ObjectList)
+	listOptions := &kclient.ListOptions{}
+	listOptions.ApplyOptions(opts)
+	listOptions.Raw = nil
+	if err := s.List(ctx, initialList, listOptions); err != nil {
+		upstream.Stop()
+		return nil, err
+	}
+	objects, err := meta.ExtractList(initialList)
+	if err != nil {
+		upstream.Stop()
+		return nil, err
+	}
+
+	result := make(chan watch.Event)
+	proxy := watch.NewProxyWatcher(result)
+	go func() {
+		defer close(result)
+		defer upstream.Stop()
+		for _, object := range objects {
+			select {
+			case result <- watch.Event{Type: watch.Added, Object: object}:
+			case <-proxy.StopChan():
+				return
+			}
+		}
+		for {
+			select {
+			case event, ok := <-upstream.ResultChan():
+				if !ok {
+					return
+				}
+				select {
+				case result <- event:
+				case <-proxy.StopChan():
+					return
+				}
+			case <-proxy.StopChan():
+				return
+			}
+		}
+	}()
+	return proxy, nil
+}
+
+func TestServerConfigForMultiUserVMCPUsesSharedServers(t *testing.T) {
+	vmcp := &v1.VMCP{Name: "vmcp1multi", Namespace: system.DefaultNamespace, Spec: v1.VMCPSpec{Manifest: types.VMCPManifest{
+		Components: []types.VMCPComponent{{ID: "one", Name: "one"}},
+		Profiles:   []types.VMCPProfile{{Subjects: []types.Subject{{Type: types.SubjectTypeSelector, ID: "*"}}, Permissions: types.VMCPProfilePermissions{AllowAllComponents: true}}},
+	}}}
+	shared := vmcpComponentServer("ms1shared", "", "", "one", "one", "https://example.com/mcp")
+	shared.Spec.VMCPID = vmcp.Name
+	stale := vmcpComponentServer("ms1stale", "vmcpi1stale", "1", "one", "wrong", "https://wrong.example.com")
+	storage := newVMCPTestStorage(vmcp, shared, stale)
+	manager := &SessionManager{storageClient: storage}
+	for _, userID := range []string{"1", "2"} {
+		instanceID := "vmcpi1user" + userID
+		if err := storage.Create(t.Context(), syncedVMCPInstance(&v1.VMCPInstance{
+			Name: instanceID, Namespace: system.DefaultNamespace,
+			Spec: v1.VMCPInstanceSpec{UserID: userID, Manifest: types.VMCPInstanceManifest{VMCPID: vmcp.Name}},
+		}, vmcp)); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Create(t.Context(), syncedVMCPConnection(t, &v1.MCPServerInstance{
+			Name: "msi1user" + userID, Namespace: system.DefaultNamespace,
+			Spec: v1.MCPServerInstanceSpec{UserID: userID, VMCPInstanceID: instanceID, VMCPComponentID: "one", MCPServerName: shared.Name},
+		}, vmcp, &v1.VMCPInstance{})); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := manager.ServerConfigForVMCP(t.Context(), vmcp.Name, &kuser.DefaultInfo{UID: userID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Components) != 1 || cfg.Components[0].Name != shared.Name {
+			t.Fatalf("user %s: wrong shared components: %#v", userID, cfg.Components)
+		}
+		if cfg.MCPServerName != instanceID {
+			t.Fatalf("wrong aggregate identity: %s", cfg.MCPServerName)
+		}
+		// Every user's connection audits under the vMCP itself, so one ID covers the whole vMCP.
+		if cfg.AuditLogMetadata["mcpID"] != vmcp.Name || cfg.AuditLogMetadata["userID"] != userID {
+			t.Fatalf("wrong shared vMCP audit attribution: %#v", cfg.AuditLogMetadata)
+		}
+	}
+}
+
+func TestValidateSecretBindingsVMCP(t *testing.T) {
+	component := func(runtime types.Runtime, usage types.Usage) types.VMCPComponent {
+		return types.VMCPComponent{
+			Name: "gitlab",
+			Configuration: []types.VMCPConfigurationPolicy{{
+				Key:           "TOKEN",
+				Policy:        types.VMCPConfigurationPolicyFixed,
+				SecretBinding: &types.MCPSecretBinding{Name: "gitlab-secret", Key: "gitlab_key"},
+			}},
+			CatalogEntry: types.MCPServerCatalogEntrySnapshot{Manifest: types.MCPServerCatalogEntryManifest{
+				Runtime: runtime,
+				Config:  []types.MCPConfig{{Key: "TOKEN", Required: true, Usage: usage}},
+			}},
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		component types.VMCPComponent
+		backend   string
+		wantError string
+	}{
+		{
+			name:      "kubernetes",
+			component: component(types.RuntimeNPX, types.Env),
+			backend:   RuntimeBackendKubernetes,
+		},
+		{
+			name:      "docker",
+			component: component(types.RuntimeNPX, types.Env),
+			backend:   "docker",
+			wantError: "requires the kubernetes MCP runtime backend",
+		},
+		{
+			name:      "remote header",
+			component: component(types.RuntimeRemote, types.Header),
+			backend:   RuntimeBackendKubernetes,
+		},
+		{
+			name:      "remote env",
+			component: component(types.RuntimeRemote, types.Env),
+			backend:   RuntimeBackendKubernetes,
+			wantError: "only supported for headers on remote runtime",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateSecretBindingsVMCP(types.VMCPManifest{Components: []types.VMCPComponent{tc.component}}, tc.backend)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("ValidateSecretBindingsVMCP() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("ValidateSecretBindingsVMCP() error = %v, want %q", err, tc.wantError)
+			}
+		})
+	}
+}
+
+// syncedVMCPInstance records the configuration check the VMCPInstance controller
+// performs for an instance, using its saved configuration annotation if any. Call
+// it after the vMCP's components and profiles are final.
+func syncedVMCPInstance(instance *v1.VMCPInstance, vmcp *v1.VMCP) *v1.VMCPInstance {
+	return syncedVMCPInstanceForUser(instance, vmcp, &kuser.DefaultInfo{UID: instance.Spec.UserID})
+}
+
+// syncedVMCPInstanceForUser is syncedVMCPInstance for profiles that match on more
+// than the user ID, such as groups.
+func syncedVMCPInstanceForUser(instance *v1.VMCPInstance, vmcp *v1.VMCP, user kuser.Info) *v1.VMCPInstance {
+	enabled := vmcpaccess.EnabledComponents(user, *vmcp, vmcpaccess.ComponentsForInstance(*vmcp, *instance))
+	instance.Status.ConfigurationCheckHash = vmcpaccess.ConfigurationCheckHash(enabled, instance.Annotations[v1.VMCPInstanceConfigurationSyncAnnotation])
+	return instance
+}
+
+// syncedVMCPConnection records the configuration sync the MCPServerInstance
+// controller performs for a shared component connection.
+func syncedVMCPConnection(t *testing.T, connection *v1.MCPServerInstance, vmcp *v1.VMCP, instance *v1.VMCPInstance) *v1.MCPServerInstance {
+	t.Helper()
+	i := slices.IndexFunc(vmcp.Spec.Manifest.Components, func(component types.VMCPComponent) bool {
+		return component.ID == connection.Spec.VMCPComponentID
+	})
+	if i < 0 {
+		t.Fatalf("vMCP %s has no component %s", vmcp.Name, connection.Spec.VMCPComponentID)
+	}
+	connection.Spec.Config = vmcpaccess.ConnectionConfiguration(vmcp.Spec.Manifest.Components[i])
+	connection.Status.VMCPConfigurationHash = vmcpaccess.ConnectionConfigurationHash(connection.Spec.Config, *instance)
+	return connection
+}
+
+func (s *vmcpWatchNotifyingStorage) Watch(ctx context.Context, list kclient.ObjectList, opts ...kclient.ListOption) (watch.Interface, error) {
+	watcher, err := s.Client.Watch(ctx, list, opts...)
+	if err == nil {
+		s.watches <- list
+	}
+	return watcher, err
+}
+
+// waitForVMCPWatch blocks until the caller watches the given list type.
+func waitForVMCPWatch(t *testing.T, watches <-chan kclient.ObjectList, want kclient.ObjectList) {
+	t.Helper()
+	for {
+		select {
+		case list := <-watches:
+			if reflect.TypeOf(list) == reflect.TypeOf(want) {
+				return
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("no watch for %T", want)
+		}
+	}
+}
+
+// The user's saved configuration reaches a dedicated component server through two
+// controllers. Reading it before both finish returns stale or missing values.
+func TestServerConfigForVMCPWaitsForDedicatedComponentConfiguration(t *testing.T) {
+	const userID = "1"
+	vmcp := &v1.VMCP{Name: "vmcp1personal", Namespace: system.DefaultNamespace, Spec: v1.VMCPSpec{
+		UserID:   userID,
+		Manifest: types.VMCPManifest{Components: []types.VMCPComponent{{ID: "github", Name: "GitHub", ForceSingleUser: true}}},
+	}}
+	instance := &v1.VMCPInstance{
+		Name:        "vmcpi1configured",
+		Namespace:   system.DefaultNamespace,
+		Annotations: map[string]string{v1.VMCPInstanceConfigurationSyncAnnotation: "saved"},
+		Spec:        v1.VMCPInstanceSpec{UserID: userID, Manifest: types.VMCPInstanceManifest{VMCPID: vmcp.Name}},
+		Status:      v1.VMCPInstanceStatus{ConfigurationCheckHash: "before-save", UserConfigurationHash: "before-save"},
+	}
+	server := vmcpComponentServer("ms1github", instance.Name, userID, "github", "GitHub", "https://github.example.test/mcp")
+	server.Status.VMCPUserConfigurationHash = "before-save"
+	watches := make(chan kclient.ObjectList, 16)
+	storageClient := &vmcpWatchNotifyingStorage{Client: newVMCPTestStorage(vmcp, instance, server), watches: watches}
+	manager := &SessionManager{storageClient: storageClient}
+
+	result := make(chan vmcpServerConfigResult, 1)
+	go func() {
+		config, err := manager.ServerConfigForVMCP(t.Context(), vmcp.Name, &kuser.DefaultInfo{UID: userID})
+		result <- vmcpServerConfigResult{config: config, err: err}
+	}()
+
+	waitForVMCPWatch(t, watches, &v1.VMCPInstanceList{})
+	requireVMCPStillWaiting(t, result, "returned before the instance processed the saved configuration")
+	instance.Status.ConfigurationCheckHash = vmcpaccess.ConfigurationCheckHash(vmcp.Spec.Manifest.Components, "saved")
+	instance.Status.UserConfigurationHash = "after-save"
+	require.NoError(t, storageClient.Update(t.Context(), instance))
+
+	waitForVMCPWatch(t, watches, &v1.MCPServerList{})
+	requireVMCPStillWaiting(t, result, "returned before the component server received the saved configuration")
+	server.Status.VMCPUserConfigurationHash = "after-save"
+	require.NoError(t, storageClient.Update(t.Context(), server))
+
+	select {
+	case got := <-result:
+		require.NoError(t, got.err)
+		require.Len(t, got.config.Components, 1)
+		require.Equal(t, server.Name, got.config.Components[0].Name)
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServerConfigForVMCP did not return after configuration synced")
+	}
+}
+
+// A first connection with nothing to configure launches right after creating its
+// instance, often before the VMCPInstance controller records the user configuration
+// hash. Comparing component servers against that empty hash never matches once the
+// controllers sync them, so the instance must be processed first.
+func TestServerConfigForVMCPWaitsForNewInstanceWithoutConfiguration(t *testing.T) {
+	const userID = "1"
+	vmcp := &v1.VMCP{Name: "vmcp1oauth", Namespace: system.DefaultNamespace, Spec: v1.VMCPSpec{
+		UserID:   userID,
+		Manifest: types.VMCPManifest{Components: []types.VMCPComponent{{ID: "gmail", Name: "Gmail", ForceSingleUser: true}}},
+	}}
+	instance := &v1.VMCPInstance{
+		Name:      "vmcpi1new",
+		Namespace: system.DefaultNamespace,
+		Spec:      v1.VMCPInstanceSpec{UserID: userID, Manifest: types.VMCPInstanceManifest{VMCPID: vmcp.Name}},
+	}
+	// The component server was synced after the controller processed the instance.
+	server := vmcpComponentServer("ms1gmail", instance.Name, userID, "gmail", "Gmail", "https://gmail.example.test/mcp")
+	server.Status.VMCPUserConfigurationHash = "processed"
+	watches := make(chan kclient.ObjectList, 16)
+	storageClient := &vmcpWatchNotifyingStorage{Client: newVMCPTestStorage(vmcp, instance, server), watches: watches}
+	manager := &SessionManager{storageClient: storageClient}
+
+	result := make(chan vmcpServerConfigResult, 1)
+	go func() {
+		config, err := manager.ServerConfigForVMCP(t.Context(), vmcp.Name, &kuser.DefaultInfo{UID: userID})
+		result <- vmcpServerConfigResult{config: config, err: err}
+	}()
+
+	waitForVMCPWatch(t, watches, &v1.VMCPInstanceList{})
+	requireVMCPStillWaiting(t, result, "returned before the controller processed the new instance")
+	syncedVMCPInstance(instance, vmcp)
+	instance.Status.UserConfigurationHash = "processed"
+	require.NoError(t, storageClient.Update(t.Context(), instance))
+
+	select {
+	case got := <-result:
+		require.NoError(t, got.err)
+		require.Len(t, got.config.Components, 1)
+		require.Equal(t, server.Name, got.config.Components[0].Name)
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServerConfigForVMCP did not return after the controller processed the instance")
+	}
+}
+
+func TestServerConfigForVMCPWaitsForSharedConnectionConfiguration(t *testing.T) {
+	const userID = "1"
+	vmcp := &v1.VMCP{Name: "vmcp1shared", Namespace: system.DefaultNamespace, Spec: v1.VMCPSpec{
+		UserID:   userID,
+		Manifest: types.VMCPManifest{Components: []types.VMCPComponent{{ID: "github", Name: "GitHub"}}},
+	}}
+	instance := syncedVMCPInstance(&v1.VMCPInstance{
+		Name:      "vmcpi1shared",
+		Namespace: system.DefaultNamespace,
+		Spec:      v1.VMCPInstanceSpec{UserID: userID, Manifest: types.VMCPInstanceManifest{VMCPID: vmcp.Name}},
+		Status:    v1.VMCPInstanceStatus{UserConfigurationHash: "after-save"},
+	}, vmcp)
+	server := vmcpComponentServer("ms1github", "", "", "github", "GitHub", "https://github.example.test/mcp")
+	server.Spec.VMCPID = vmcp.Name
+	connection := syncedVMCPConnection(t, &v1.MCPServerInstance{
+		Name: "msi1github", Namespace: system.DefaultNamespace,
+		Spec: v1.MCPServerInstanceSpec{UserID: userID, VMCPInstanceID: instance.Name, VMCPComponentID: "github", MCPServerName: server.Name},
+	}, vmcp, &v1.VMCPInstance{Status: v1.VMCPInstanceStatus{UserConfigurationHash: "before-save"}})
+	watches := make(chan kclient.ObjectList, 16)
+	storageClient := &vmcpWatchNotifyingStorage{Client: newVMCPTestStorage(vmcp, instance, server, connection), watches: watches}
+	manager := &SessionManager{storageClient: storageClient}
+
+	result := make(chan vmcpServerConfigResult, 1)
+	go func() {
+		config, err := manager.ServerConfigForVMCP(t.Context(), vmcp.Name, &kuser.DefaultInfo{UID: userID})
+		result <- vmcpServerConfigResult{config: config, err: err}
+	}()
+
+	waitForVMCPWatch(t, watches, &v1.MCPServerInstanceList{})
+	requireVMCPStillWaiting(t, result, "returned before the connection received the saved configuration")
+	require.NoError(t, storageClient.Update(t.Context(), syncedVMCPConnection(t, connection, vmcp, instance)))
+
+	select {
+	case got := <-result:
+		require.NoError(t, got.err)
+		require.Len(t, got.config.Components, 1)
+		require.Equal(t, connection.Name, got.config.Components[0].MCPServerInstanceID)
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServerConfigForVMCP did not return after configuration synced")
+	}
+}
+
+// requireVMCPStillWaiting fails if ServerConfigForVMCP returns while the
+// configuration it needs is still being synchronized.
+func requireVMCPStillWaiting(t *testing.T, result <-chan vmcpServerConfigResult, msg string) {
+	t.Helper()
+	select {
+	case got := <-result:
+		t.Fatalf("%s: config=%#v err=%v", msg, got.config, got.err)
+	case <-time.After(250 * time.Millisecond):
+	}
+}

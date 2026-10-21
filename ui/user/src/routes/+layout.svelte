@@ -11,12 +11,15 @@
 		version,
 		mcpServersAndEntries,
 		mcpTunnelConnections,
+		vmcpInstances,
 		defaultModelAliases,
 		userDeviceSettings,
 		license,
 		accessibleModels,
-		appNotification
+		appNotification,
+		productTelemetryConsent
 	} from '$lib/stores';
+	import { clearProductAnalyticsConsentDeferral } from '$lib/stores/productTelemetryConsent.svelte';
 	import '../app.css';
 	import type { PageData } from './$types';
 	import { apply, isSupported } from '@oddbird/popover-polyfill/fn';
@@ -46,6 +49,9 @@
 
 		if (data.profile) {
 			profile.initialize(data.profile);
+			if (data.profile.unauthorized) {
+				clearProductAnalyticsConsentDeferral();
+			}
 		}
 
 		if (data.version) {
@@ -55,6 +61,11 @@
 		if (data.appNotification) {
 			appNotification.initialize(data.appNotification);
 		}
+
+		productTelemetryConsent.initialize(
+			data.productTelemetryConsent,
+			data.productTelemetryConsentAvailable
+		);
 
 		license.initialize(data.license);
 
@@ -92,25 +103,45 @@
 
 	$effect(() => {
 		const pathname = page.url.pathname;
-		const isMcpCatalogRoute =
-			pathname === '/mcp-catalog' ||
-			pathname === '/admin/mcp-catalog' ||
-			pathname === '/mcp-servers';
-		if (profile.current.loaded) {
-			untrack(() => mcpServersAndEntries.initialize(isMcpCatalogRoute));
+		const view = page.url.searchParams.get('view');
+		const isPageRequiresMcpServers =
+			pathname.startsWith('/mcp-servers') || pathname.startsWith('/vmcps');
+		const forceRefresh =
+			(pathname === '/mcp-servers' || pathname === '/vmcps') &&
+			(!view || ['servers', 'vmcps'].includes(view));
+		const scope = profile.current.hasAdminAccess?.() ? 'admin' : 'user';
+		// A restricted session is walled off from every one of these endpoints, so prefetching the
+		// catalog only produces a wall of 403s (and races to create the same identity).
+		if (
+			profile.current.loaded &&
+			!profile.current.requirePasswordChange &&
+			isPageRequiresMcpServers
+		) {
+			untrack(() => mcpServersAndEntries.initialize({ forceRefresh, scope }));
 		}
 	});
 
 	$effect(() => {
 		const pathname = page.url.pathname;
-		const usesMcpTunnelStatus =
-			pathname.startsWith('/mcp-servers') ||
-			pathname.startsWith('/mcp-catalog') ||
-			pathname.startsWith('/admin/mcp-catalog') ||
-			pathname.startsWith('/admin/mcp-deployments');
+		const view = page.url.searchParams.get('view');
+		const isSingleMcpServerView =
+			pathname.startsWith('/mcp-servers/c/') || pathname.startsWith('/mcp-servers/s/');
+		const isValidMcpServersView =
+			pathname === '/mcp-servers' &&
+			(!view || ['servers', 'deployments', 'tunnels'].includes(view));
+		const isValidVmcpsView =
+			pathname === '/vmcps' && (!view || ['deployments', 'vmcps'].includes(view));
+		const usesMcpTunnelStatus = isSingleMcpServerView || isValidMcpServersView || isValidVmcpsView;
 
 		if (profile.current.loaded && usesMcpTunnelStatus) {
 			return mcpTunnelConnections.startPolling();
+		}
+	});
+
+	$effect(() => {
+		const onVmcps = page.url.pathname === '/vmcps' || page.url.pathname.startsWith('/vmcps/');
+		if (profile.current.loaded && onVmcps) {
+			return vmcpInstances.startWatching();
 		}
 	});
 </script>

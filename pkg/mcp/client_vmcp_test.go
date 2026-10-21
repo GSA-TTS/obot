@@ -1,0 +1,142 @@
+package mcp
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/obot-platform/obot/apiclient/types"
+	"github.com/obot-platform/obot/pkg/api/authz"
+	gatewayclient "github.com/obot-platform/obot/pkg/gateway/client"
+	gatewaydb "github.com/obot-platform/obot/pkg/gateway/db"
+	gatewaytypes "github.com/obot-platform/obot/pkg/gateway/types"
+	"github.com/obot-platform/obot/pkg/jwt/persistent"
+	"github.com/obot-platform/obot/pkg/principal"
+	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
+	sservices "github.com/obot-platform/obot/pkg/storage/services"
+	"github.com/obot-platform/obot/pkg/system"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apiserver/pkg/authentication/user"
+)
+
+func TestListToolsThroughSharedVMCPComponentConnection(t *testing.T) {
+	parent := &v1.VMCP{
+		Name: "vmcp1shared", Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPSpec{Manifest: types.VMCPManifest{
+			Components: []types.VMCPComponent{{ID: "one"}},
+			Profiles: []types.VMCPProfile{{
+				Subjects:    []types.Subject{{Type: types.SubjectTypeUser, ID: "7"}},
+				Permissions: types.VMCPProfilePermissions{AllowAllComponents: true},
+			}},
+		}},
+	}
+	instance := syncedVMCPInstance(&v1.VMCPInstance{
+		Name: "vmcpi1one", Namespace: system.DefaultNamespace,
+		Spec: v1.VMCPInstanceSpec{
+			UserID: "7", Manifest: types.VMCPInstanceManifest{VMCPID: parent.Name},
+		},
+	}, parent)
+	backing := &v1.MCPServer{
+		Name: "ms1shared", Namespace: system.DefaultNamespace,
+		Spec: v1.MCPServerSpec{
+			VMCPID: parent.Name, VMCPComponentID: "one",
+			Manifest: types.MCPServerManifest{
+				Runtime:      types.RuntimeRemote,
+				RemoteConfig: &types.RemoteRuntimeConfig{URL: "https://upstream.example.com/mcp"},
+			},
+		},
+	}
+	connection := syncedVMCPConnection(t, &v1.MCPServerInstance{
+		Name: "msi1one", Namespace: system.DefaultNamespace,
+		Spec: v1.MCPServerInstanceSpec{
+			UserID: "7", VMCPInstanceID: instance.Name,
+			VMCPComponentID: "one", MCPServerName: backing.Name,
+		},
+	}, parent, instance)
+	storage := newVMCPTestStorage(parent, instance, backing, connection)
+	services, err := sservices.New(sservices.Config{DSN: "sqlite://:memory:"})
+	require.NoError(t, err)
+	db, err := gatewaydb.New(services.DB.DB, services.DB.SQLDB, true)
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate())
+	gateway := gatewayclient.New(t.Context(), db, storage, nil, nil, nil, nil, time.Hour, 10, 90, 90, 90, true)
+	t.Cleanup(func() { require.NoError(t, gateway.Close()) })
+
+	mcpServer := gomcp.NewServer(&gomcp.Implementation{Name: "component"}, nil)
+	gomcp.AddTool(mcpServer, &gomcp.Tool{Name: "hello"}, func(context.Context, *gomcp.CallToolRequest, struct{}) (*gomcp.CallToolResult, struct{}, error) {
+		return &gomcp.CallToolResult{}, struct{}{}, nil
+	})
+	transport := gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return mcpServer }, nil)
+	var tokens *persistent.TokenService
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, err := tokens.DecodeToken(r.Context(), strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/mcp-connect/")
+		allowed, err := authz.UserCanConnectToMCP(r.Context(), storage, nil, &user.DefaultInfo{
+			UID: claims.UserID, Groups: claims.UserGroups,
+			Extra: map[string][]string{"authorized_mcp_ids": {claims.MCPID}},
+		}, id)
+		if err != nil || !allowed {
+			http.Error(w, "component connection denied", http.StatusForbidden)
+			return
+		}
+		transport.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+	tokens, err = persistent.NewTokenService(endpoint.URL, gateway)
+	require.NoError(t, err)
+	require.NoError(t, tokens.EnsureJWK(t.Context()))
+	sm := &SessionManager{
+		backend: &kubernetesBackend{},
+		baseURL: endpoint.URL, storageClient: storage, gatewayClient: gateway, tokenService: tokens,
+		remoteURLValidationConfig: RemoteMCPURLValidationConfig{AllowLocalhostMCP: true},
+	}
+	t.Cleanup(sm.Close)
+	server, config, err := sm.ServerForAction(t.Context(), connection.Name, &user.DefaultInfo{UID: "7"})
+	require.NoError(t, err)
+	require.Equal(t, backing.Name, server.Name)
+	require.Equal(t, backing.Name, config.MCPServerName)
+	require.Equal(t, connection.Name, config.MCPServerInstanceID)
+	tools, err := sm.ListTools(t.Context(), config)
+	require.NoError(t, err)
+	require.Len(t, tools, 1)
+	require.Equal(t, "hello", tools[0].Name)
+
+	admin := &user.DefaultInfo{UID: "7", Extra: map[string][]string{"obot_groups": types.RoleAdmin.Groups()}}
+	// The caller supplies the full identity; building the config needs no user lookup.
+	sm.gatewayClient = nil
+	parent.Spec.Manifest.Profiles[0].Subjects = []types.Subject{{Type: types.SubjectTypeObotGroup, ID: types.GroupAdmin}}
+	aggregate, err := sm.serverConfigForVMCP(t.Context(), parent, instance, admin)
+	require.NoError(t, err)
+	require.Len(t, aggregate.Components, 1)
+	require.False(t, aggregate.Components[0].DisableTools, "Obot admins must retain their profile's tools")
+
+	admin.Extra["obot_groups"] = types.RoleBasic.Groups()
+	// The VMCPInstance controller rechecks the instance when the user's role changes.
+	syncedVMCPInstanceForUser(instance, parent, admin)
+	aggregate, err = sm.serverConfigForVMCP(t.Context(), parent, instance, admin)
+	require.NoError(t, err)
+	require.Empty(t, aggregate.Components, "losing the admin role must revoke its tools")
+
+	sm.gatewayClient = gateway
+	owner := &gatewaytypes.User{Username: "owner", Role: types.RoleAdmin}
+	owner.ID = 7
+	require.NoError(t, db.WithContext(t.Context()).Create(owner).Error)
+	require.NoError(t, storage.Update(t.Context(), parent))
+	agent := &user.DefaultInfo{UID: "hosted-agent:test", Extra: map[string][]string{principal.HostedAgentOwnerExtra: {"7"}}}
+	aggregate, err = sm.ServerConfigForVMCP(t.Context(), parent.Name, agent)
+	require.NoError(t, err)
+	require.Equal(t, "7", aggregate.UserID)
+	require.Len(t, aggregate.Components, 1)
+	require.False(t, aggregate.Components[0].DisableTools)
+	_, actionConfig, err := sm.ServerForAction(t.Context(), parent.Name, agent)
+	require.NoError(t, err)
+	require.Equal(t, aggregate, actionConfig)
+}

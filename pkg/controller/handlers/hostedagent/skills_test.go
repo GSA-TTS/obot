@@ -15,7 +15,7 @@ import (
 )
 
 // fakeRepo writes a skill directory and returns a clone function serving it.
-func fakeRepo(t *testing.T, files map[string]string) (func(context.Context, string, string, string) (string, string, func(), error), *int) {
+func fakeRepo(t *testing.T, files map[string]string) (func(context.Context, string, string, string, int) (string, string, func(), error), *int) {
 	t.Helper()
 	dir := t.TempDir()
 	for name, content := range files {
@@ -28,7 +28,7 @@ func fakeRepo(t *testing.T, files map[string]string) (func(context.Context, stri
 		}
 	}
 	calls := 0
-	return func(context.Context, string, string, string) (string, string, func(), error) {
+	return func(context.Context, string, string, string, int) (string, string, func(), error) {
 		calls++
 		return dir, "sha", func() {}, nil
 	}, &calls
@@ -99,13 +99,28 @@ func TestSkillFilesArePlacedInTheSandbox(t *testing.T) {
 // place files outside the skills directory.
 func TestSkillNameCannotEscapeTheSkillsDirectory(t *testing.T) {
 	for _, tt := range []struct{ name, want string }{
-		{"pdf", "pdf"},
-		{"../../etc/passwd", "etc-passwd"},
-		{"a/b", "a-b"},
-		{"..", "skill"},
+		{
+			name: "pdf",
+			want: "pdf",
+		},
+		{
+			name: "../../etc/passwd",
+			want: "etc-passwd",
+		},
+		{
+			name: "a/b",
+			want: "a-b",
+		},
+		{
+			name: "..",
+			want: "skill",
+		},
 		// With no manifest name the object name is used, which is still a
 		// stable, unique directory.
-		{"", "sk1"},
+		{
+			name: "",
+			want: "sk1",
+		},
 	} {
 		skill := &v1.Skill{
 			Name: "sk1",

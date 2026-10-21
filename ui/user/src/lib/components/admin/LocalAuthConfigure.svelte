@@ -3,6 +3,7 @@
 		type ResponsiveDialogAnimate
 	} from '$lib/components/ResponsiveDialog.svelte';
 	import SensitiveInput from '$lib/components/SensitiveInput.svelte';
+	import LocalAuthInitialUserForm from '$lib/components/admin/LocalAuthInitialUserForm.svelte';
 	import IconButton from '$lib/components/primitives/IconButton.svelte';
 	import { MultiValueInput } from '$lib/components/ui/multi-value-input';
 	import { LOCAL_AUTH_MIN_PASSWORD_LENGTH } from '$lib/constants';
@@ -28,29 +29,39 @@
 		provider?: AuthProvider;
 		values?: Record<string, string>;
 		readonly?: boolean;
+		bootstrap?: boolean;
 		// Save the email-domains config. Returns an error message, or undefined on success.
 		onConfigure: (form: Record<string, string>) => Promise<string | undefined>;
 		// Called after the modal closes, with the number of local users that currently exist.
 		onClose?: (userCount: number) => void;
 		animate?: ResponsiveDialogAnimate;
+		// First-time onboarding: skip domain collection, auto-configure, and collect a single
+		// initial user instead of the full users-management flow.
 		required?: boolean;
 		additionalActions?: Snippet;
+		// True when this dialog is the first step of a provider switch. The account created here is
+		// signed in with immediately to prove the switch works, so a forced password change would
+		// put that sign-in behind the restricted-session wall. The toggle stays available.
+		switching?: boolean;
 	}
 
 	const {
 		provider,
 		values,
 		readonly,
+		bootstrap = false,
 		onConfigure,
 		onClose,
 		animate,
 		required,
-		additionalActions
+		additionalActions,
+		switching
 	}: Props = $props();
 
 	const DOMAINS_KEY = 'OBOT_AUTH_PROVIDER_EMAIL_DOMAINS';
 
 	let dialog = $state<ReturnType<typeof ResponsiveDialog>>();
+	let createInitialUserDialog = $state<ReturnType<typeof ResponsiveDialog>>();
 	// The modal is a two-step flow: configure the provider, then manage its users. Users can only
 	// be created once the provider is configured (the server needs the allowed-domains credential),
 	// so an unconfigured provider opens on 'config' and a configured one opens straight on 'users'.
@@ -67,17 +78,27 @@
 	let newUserError = $state<string>();
 	let draftError = $state<string>();
 
-	let newUsers = $state<{ email: string; password: string }[]>([]);
+	let newUsers = $state<{ email: string; password: string; requirePasswordChange: boolean }[]>([]);
 	let draftingNewUser = $state(false);
 	let draftEmail = $state('');
 	let draftPassword = $state('');
+	let draftRequirePasswordChange = $state(true);
 	let shakingDraft = $state(false);
-	let draftReset = $state<{ id: LocalAuthUser['id']; password: string }>();
+	let draftReset = $state<{
+		id: LocalAuthUser['id'];
+		password: string;
+		requirePasswordChange: boolean;
+	}>();
 	let shakingReset = $state(false);
-	let resetPassword = new SvelteMap<LocalAuthUser['id'], string>();
+	let resetPassword = new SvelteMap<
+		LocalAuthUser['id'],
+		{ password: string; requirePasswordChange: boolean }
+	>();
 	let deleteUsers = new SvelteSet<LocalAuthUser['id']>();
 
 	let shakeTimeout: ReturnType<typeof setTimeout> | undefined;
+	let initialUserDialogOpen = $state(false);
+	let initialUserCount = $state(0);
 
 	const DRAFT_EMAIL_ID = 'local-user-email-draft';
 	const DRAFT_PASSWORD_ID = 'local-user-password-draft';
@@ -89,7 +110,11 @@
 		newUsers.length > 0 || resetPassword.size > 0 || deleteUsers.size > 0
 	);
 
-	export function open() {
+	const canAddUser = $derived(
+		!bootstrap || users.length - deleteUsers.size + newUsers.length === 0
+	);
+
+	function resetDialogState() {
 		domains = values?.[DOMAINS_KEY] ?? '*';
 		configError = undefined;
 		userError = undefined;
@@ -99,6 +124,7 @@
 		draftingNewUser = false;
 		draftEmail = '';
 		draftPassword = '';
+		draftRequirePasswordChange = !switching && !bootstrap;
 		draftReset = undefined;
 		shakingDraft = false;
 		shakingReset = false;
@@ -106,13 +132,29 @@
 		resetPassword.clear();
 		deleteUsers.clear();
 		users = [];
-		step = provider?.configured ? 'users' : 'config';
-		dialog?.open();
-		if (step === 'users') showUsers();
+	}
+
+	function openBootstrapSetup() {
+		initialUserCount = 0;
+		initialUserDialogOpen = true;
+		createInitialUserDialog?.open();
+	}
+
+	export function open() {
+		if (required) {
+			openBootstrapSetup();
+		} else {
+			resetDialogState();
+			step = provider?.configured ? 'users' : 'config';
+			dialog?.open();
+			if (step === 'users') showUsers();
+		}
 	}
 
 	export function close() {
 		dialog?.close();
+		initialUserDialogOpen = false;
+		createInitialUserDialog?.close();
 	}
 
 	async function handleContinue(e?: SubmitEvent) {
@@ -253,6 +295,8 @@
 	}
 
 	function addNewUser() {
+		if (!canAddUser) return;
+
 		if (draftingNewUser) {
 			attentionDraftNewUser('Finish or remove the new user before adding another.');
 			return;
@@ -264,6 +308,7 @@
 		newUserError = undefined;
 		draftEmail = '';
 		draftPassword = '';
+		draftRequirePasswordChange = !switching && !bootstrap;
 		draftingNewUser = true;
 	}
 
@@ -299,11 +344,13 @@
 
 		newUsers.push({
 			email: draftEmail.trim(),
-			password: draftPassword
+			password: draftPassword,
+			requirePasswordChange: draftRequirePasswordChange
 		});
 		draftingNewUser = false;
 		draftEmail = '';
 		draftPassword = '';
+		draftRequirePasswordChange = !switching && !bootstrap;
 		newUserError = undefined;
 		return true;
 	}
@@ -312,6 +359,7 @@
 		draftingNewUser = false;
 		draftEmail = '';
 		draftPassword = '';
+		draftRequirePasswordChange = !switching && !bootstrap;
 		newUserError = undefined;
 	}
 
@@ -338,9 +386,11 @@
 		}
 
 		draftError = undefined;
+		const pending = resetPassword.get(user.id);
 		draftReset = {
 			id: user.id,
-			password: resetPassword.get(user.id) ?? ''
+			password: pending?.password ?? '',
+			requirePasswordChange: pending?.requirePasswordChange ?? true
 		};
 	}
 
@@ -356,7 +406,10 @@
 			return false;
 		}
 
-		resetPassword.set(draftReset.id, draftReset.password);
+		resetPassword.set(draftReset.id, {
+			password: draftReset.password,
+			requirePasswordChange: draftReset.requirePasswordChange
+		});
 		draftReset = undefined;
 		draftError = undefined;
 		return true;
@@ -386,6 +439,11 @@
 	}
 
 	function undoDelete(user: LocalAuthUser) {
+		if (bootstrap && (newUsers.length > 0 || draftingNewUser)) {
+			userError = ['Remove the new account before restoring the existing account.'];
+			return;
+		}
+
 		deleteUsers.delete(user.id);
 	}
 
@@ -404,7 +462,7 @@
 				return `Passwords must be at least ${LOCAL_AUTH_MIN_PASSWORD_LENGTH} characters.`;
 			}
 		}
-		for (const [id, password] of resetPassword) {
+		for (const [id, { password }] of resetPassword) {
 			if (deleteUsers.has(id)) continue;
 			if (password.length < LOCAL_AUTH_MIN_PASSWORD_LENGTH) {
 				return `Passwords must be at least ${LOCAL_AUTH_MIN_PASSWORD_LENGTH} characters.`;
@@ -443,14 +501,18 @@
 				deleteUsers.delete(id);
 			}
 
-			for (const [id, password] of [...resetPassword]) {
-				await AdminService.setLocalAuthUserPassword(id, password);
+			for (const [id, { password, requirePasswordChange }] of [...resetPassword]) {
+				await AdminService.setLocalAuthUserPassword(id, password, requirePasswordChange);
 				resetPassword.delete(id);
 			}
 
 			while (newUsers.length > 0) {
 				const user = newUsers[0];
-				await AdminService.createLocalAuthUser(user.email.trim(), user.password);
+				await AdminService.createLocalAuthUser(
+					user.email.trim(),
+					user.password,
+					user.requirePasswordChange
+				);
 				newUsers.shift();
 			}
 			await refreshUsers();
@@ -478,22 +540,8 @@
 	hideClose={required}
 >
 	{#snippet titleContent()}
-		<div class="flex items-center gap-2">
-			{#if darkMode.isDark}
-				{@const url = provider?.iconDark ?? provider?.icon}
-				<img
-					src={url}
-					alt={provider?.name}
-					class={twMerge('size-9 rounded-md p-1', !provider?.iconDark && 'bg-base-300')}
-				/>
-			{:else}
-				<img src={provider?.icon} alt={provider?.name} class="bg-base-200 size-9 rounded-md p-1" />
-			{/if}
-			Set Up {provider?.name}
-		</div>
+		{@render setupTitle()}
 	{/snippet}
-
-	{@render infoContent()}
 
 	{#if step === 'config'}
 		<form class="flex flex-col gap-4" onsubmit={handleContinue}>
@@ -550,14 +598,25 @@
 			{/if}
 
 			<p class="text-muted-content text-sm font-light">
-				These users sign in with an email address and password. Grant them roles from the Users page
-				after their first sign-in.
+				{#if bootstrap && users.length <= 1}
+					Create your first account, then sign in with it to become Owner automatically. You can add
+					more users after signing in.
+				{:else}
+					These users sign in with an email address and password. Grant them roles from the Users
+					page after their first sign-in.
+				{/if}
+			</p>
+
+			<p class="text-muted-content text-sm font-light">
+				Local users belong to this provider. If you later switch to a different auth provider,
+				signing in through it can create a new Obot user, and these users and their work will not
+				transfer.
 			</p>
 
 			<form class="flex flex-col gap-4 grow max-w-full overflow-hidden" onsubmit={handleSave}>
 				<div class="flex items-center justify-between gap-2">
 					<h4 class="text-sm font-semibold">Users</h4>
-					{#if !readonly}
+					{#if !readonly && canAddUser}
 						{@render addNewUserButton()}
 					{/if}
 				</div>
@@ -589,14 +648,21 @@
 								class:draft-shake={shakingReset && isDraftResetting}
 							>
 								<div class="flex items-center justify-between gap-2">
-									<span
-										class={twMerge(
-											'truncate text-sm',
-											isDeleted && 'text-muted-content line-through'
-										)}
-									>
-										{user.email}
-									</span>
+									<div class="flex min-w-0 items-center gap-2">
+										<span
+											class={twMerge(
+												'truncate text-sm',
+												isDeleted && 'text-muted-content line-through'
+											)}
+										>
+											{user.email}
+										</span>
+										{#if user.requirePasswordChange && !isDeleted}
+											<span class="badge badge-warning shrink-0 text-xs">
+												Password change required
+											</span>
+										{/if}
+									</div>
 									{#if !readonly}
 										<div class="flex shrink-0 items-center gap-1">
 											{#if isDeleted}
@@ -674,8 +740,18 @@
 											/>
 											<span class="text-muted-content pt-0.5 text-xs">
 												At least {LOCAL_AUTH_MIN_PASSWORD_LENGTH} characters. Share it with the user over
-												a secure channel; they can't change it themselves yet.
+												a secure channel.
 											</span>
+										</label>
+
+										<label class="flex items-center gap-2 text-sm font-light">
+											<input
+												class="checkbox checkbox-sm"
+												type="checkbox"
+												disabled={saving}
+												bind:checked={draftReset.requirePasswordChange}
+											/>
+											Require the user to change this password at next sign-in
 										</label>
 
 										{#if draftError}
@@ -775,8 +851,18 @@
 								/>
 								<span class="text-muted-content pt-0.5 text-xs">
 									At least {LOCAL_AUTH_MIN_PASSWORD_LENGTH} characters. Share it with the user over a
-									secure channel; they can't change it themselves yet.
+									secure channel.
 								</span>
+							</label>
+
+							<label class="flex items-center gap-2 text-sm font-light">
+								<input
+									class="checkbox checkbox-sm"
+									type="checkbox"
+									disabled={saving}
+									bind:checked={draftRequirePasswordChange}
+								/>
+								Require the user to change this password at next sign-in
 							</label>
 
 							{#if newUserError}
@@ -810,18 +896,44 @@
 	{/if}
 </ResponsiveDialog>
 
-{#snippet infoContent()}
-	<div class="notification-info flex flex-col items-start gap-1 mb-4">
-		<div class="flex items-center gap-1">
-			<p class="text-sm font-semibold">Set up initially with local authentication!</p>
-		</div>
-		<div>
-			<p class="text-xs font-light">
-				Once you're ready for production, we support other authentication providers such as Google,
-				GitHub, and Okta, or get access to additional authentication providers such as Entra, Okta,
-				JumpCloud, and Auth0, with a one-time registration.
-			</p>
-		</div>
+<ResponsiveDialog
+	bind:this={createInitialUserDialog}
+	class="w-xl"
+	onClose={() => {
+		initialUserDialogOpen = false;
+		onClose?.(initialUserCount);
+	}}
+	{animate}
+	disableClickOutside
+	hideClose
+>
+	{#if initialUserDialogOpen}
+		<LocalAuthInitialUserForm
+			{provider}
+			{readonly}
+			{onConfigure}
+			{additionalActions}
+			onCreated={(count) => {
+				initialUserCount = count;
+				close();
+			}}
+		/>
+	{/if}
+</ResponsiveDialog>
+
+{#snippet setupTitle()}
+	<div class="flex items-center gap-2">
+		{#if darkMode.isDark}
+			{@const url = provider?.iconDark ?? provider?.icon}
+			<img
+				src={url}
+				alt={provider?.name}
+				class={twMerge('size-9 rounded-md p-1', !provider?.iconDark && 'bg-base-300')}
+			/>
+		{:else}
+			<img src={provider?.icon} alt={provider?.name} class="bg-base-200 size-9 rounded-md p-1" />
+		{/if}
+		Set Up {provider?.name}
 	</div>
 {/snippet}
 

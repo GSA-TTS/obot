@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { MCPAllowedSecretBindingTarget, MCPSubField } from '$lib/services';
+	import type { MCPAllowedSecretBindingTarget, MCPConfig, MCPSubField } from '$lib/services';
 	import { version } from '$lib/stores';
 	import Select from '../Select.svelte';
 	import Toggle from '../Toggle.svelte';
@@ -9,7 +9,7 @@
 	import { untrack } from 'svelte';
 
 	interface Props {
-		data: MCPSubField & { secretBindingSource?: string };
+		data: (MCPSubField | MCPConfig) & { secretBindingSource?: string };
 		id: string;
 		serverUserType?: 'singleUser' | 'multiUser';
 		readonly?: boolean;
@@ -44,11 +44,17 @@
 		return Boolean(field.secretBinding) || field.secretBindingSource === 'secret';
 	}
 
+	function isFileConfiguration(field: MCPSubField | MCPConfig) {
+		return 'usage' in field
+			? field.usage === 'file' || field.usage === 'dynamicFile'
+			: Boolean(field.file);
+	}
+
 	let selectedType = $state(
 		untrack(() =>
 			data.options && data.options.length > 0
 				? 'options'
-				: (data.value?.length ?? 0) > 0 || usesSecretBindingSource(data)
+				: (data.value?.length ?? 0) > 0 || data.static || usesSecretBindingSource(data)
 					? 'static'
 					: 'user_supplied'
 		)
@@ -56,9 +62,16 @@
 
 	let missingKey = $derived(showRequired && !data.key.trim());
 	let missingName = $derived(showRequired && !data.name.trim());
+	// A static field without a value keeps the value Obot already stores for it.
 	let missingValue = $derived(
-		showRequired && !data.value?.trim() && (data.options ?? []).length === 0
+		showRequired && !data.value?.trim() && !data.static && (data.options ?? []).length === 0
 	);
+	let displayedSecretBindingTargets = $derived.by(() => {
+		if (secretBindingTargets) return secretBindingTargets;
+		if (!readonly || !data.secretBinding) return undefined;
+
+		return [{ name: data.secretBinding.name, keys: [data.secretBinding.key] }];
+	});
 
 	$effect(() => {
 		if (urlTemplateVariable) {
@@ -66,7 +79,11 @@
 			data.secretBindingSource = 'value';
 			data.required = true;
 			data.sensitive = false;
-			data.file = false;
+			if ('usage' in data) {
+				data.usage = 'interpolated';
+			} else {
+				data.file = false;
+			}
 		} else if (data && usesSecretBindingSource(data)) {
 			data.sensitive = true;
 		}
@@ -149,6 +166,7 @@
 					data.value = '';
 					data.description = '';
 					data.sensitive = false;
+					data.static = false;
 
 					if (option.id === 'user_supplied' || option.id === 'options') {
 						data.secretBinding = undefined;
@@ -171,10 +189,10 @@
 		{@render nameAndDescriptionInputs()}
 	{/if}
 	{#if selectedType === 'static'}
-		{#if secretBindingTargets && !version.current.hideK8sDetails}
+		{#if displayedSecretBindingTargets && !version.current.hideK8sDetails}
 			<SecretBindingPicker
 				bind:field={data}
-				targets={secretBindingTargets}
+				targets={displayedSecretBindingTargets}
 				{readonly}
 				{showRequired}
 			/>
@@ -182,24 +200,24 @@
 		{#if !usesSecretBindingSource(data)}
 			<div class="flex w-full flex-col gap-1">
 				<label for={`env-value-${id}`} class="sr-only">Static Value</label>
-				{#if data.file}
+				{#if isFileConfiguration(data)}
 					<textarea
 						id={`env-value-${id}`}
 						class="text-input-filled bg-base-100 min-h-24 w-full resize-y shadow-none"
 						class:error={missingValue}
 						bind:value={data.value}
 						disabled={readonly}
+						placeholder={data.static ? 'Stored value; leave blank to keep it' : undefined}
 						rows={(data.value ?? '').split('\n').length + 1}
 						aria-required={!readonly ? 'true' : undefined}
-						aria-invalid={missingValue}
-					></textarea>
+						aria-invalid={missingValue}></textarea>
 				{:else}
 					<input
 						id={`env-value-${id}`}
 						class="text-input-filled bg-base-100 w-full shadow-none"
 						class:error={missingValue}
 						bind:value={data.value}
-						placeholder="e.g. 123abcdef456"
+						placeholder={data.static ? 'Stored value; leave blank to keep it' : 'e.g. 123abcdef456'}
 						disabled={readonly || (data.options ?? []).length > 0}
 						type={data.sensitive ? 'password' : 'text'}
 						aria-required={!readonly ? 'true' : undefined}

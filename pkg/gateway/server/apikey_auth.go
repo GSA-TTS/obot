@@ -104,10 +104,10 @@ func (a *APIKeyAuthenticator) authenticateHostedAgent(req *http.Request, instanc
 	// sandbox's /mcp-connect URLs. A template names servers portably, as
 	// <source>::<key>, so leaving them unresolved here would have authorization
 	// compare a local request ID against a reference that can never equal it --
-	// denying an agent the very servers it was configured with.
-	mcpIDs, unresolved := hostedagentrefs.New(a.storage, system.DefaultNamespace).
+	// denying an agent the very servers it was configured with. A reference
+	// naming nothing installed here grants nothing.
+	mcpIDs, _ := hostedagentrefs.New(a.storage, system.DefaultNamespace).
 		MCPServers(req.Context(), slices.Concat(agent.Spec.Manifest.MCPServers, instance.Spec.Manifest.MCPServers))
-	_ = unresolved // a reference naming nothing installed here grants nothing
 	// Resolved by the same function the controller uses to write the sandbox's
 	// model endpoints, so the credential grants exactly the models the config
 	// offers. A second implementation could only ever disagree, and disagreeing
@@ -183,31 +183,30 @@ func (a *APIKeyAuthenticator) AuthenticateRequest(req *http.Request) (*authentic
 	}
 
 	// Get the user from the database
-	u, err := a.client.UserByID(req.Context(), fmt.Sprintf("%d", apiKey.UserID))
+	u, authProviderGroups, err := a.client.UserByIDWithEffectiveRole(req.Context(), apiKey.UserID)
 	if err != nil {
 		return nil, false, nil
 	}
 
 	attribution := principal.NewAPIKeyAttribution(apiKey.ID, apiKey.UserID, apiKey.Name)
+	groups := apiKey.Groups(u)
 	extra := map[string][]string{
 		"email":                   {u.Email},
 		"authorized_mcp_ids":      apiKey.MCPServerIDs,
+		"obot_groups":             u.Role.RoleGroups(),
 		principal.APIKeyIDExtra:   {fmt.Sprintf("%d", attribution.ID)},
 		principal.APIKeyNameExtra: {attribution.Name},
 	}
 
-	// Look up auth provider group memberships so that group-based access
-	// rules (e.g. skill access policies) work for API-key-authenticated
-	// requests such as those made by nanobot.
-	if authGroupIDs, err := a.client.ListGroupIDsForUser(req.Context(), u.ID); err == nil {
-		extra["auth_provider_groups"] = authGroupIDs
+	if authProviderGroups != nil {
+		extra["auth_provider_groups"] = authProviderGroups
 	}
 
 	return &authenticator.Response{
 		User: &user.DefaultInfo{
 			Name:   u.Username,
 			UID:    fmt.Sprintf("%d", u.ID),
-			Groups: apiKey.Groups(u),
+			Groups: groups,
 			Extra:  extra,
 		},
 	}, true, nil

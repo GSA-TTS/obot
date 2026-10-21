@@ -82,6 +82,11 @@ type kubernetesDeploymentCacheEntry struct {
 	podName string
 }
 
+type podHealthCheckState struct {
+	podUID                  ktypes.UID
+	firstServiceUnavailable time.Time
+}
+
 func newKubernetesBackend(
 	httpListenPort int,
 	authEnabled bool,
@@ -156,12 +161,13 @@ func (k *kubernetesBackend) ensureServerDeployment(ctx context.Context, server S
 		server.Webhooks[i] = webhook
 	}
 
-	if server.Runtime == types.RuntimeRemote || server.Runtime == types.RuntimeComposite {
-		// Remove any existing deployment for remote and composite servers
+	if server.Runtime == types.RuntimeRemote || server.Runtime == types.RuntimeVMCP {
+		// Remove any existing deployment for remote and vMCP servers
 		return server, k.deployServerObjects(ctx, server, nil)
 	}
 
-	serverConfigHash := utils.Digest(server)
+	// Also has the files so we update the dynamic files if we need to.
+	serverConfigHash := serverID(server) + utils.Digest(server.Files)
 	cachedDeployment := k.getDeploymentCache(server.MCPServerName)
 
 	shouldDeploy := cachedDeployment == nil || cachedDeployment.hash != serverConfigHash
@@ -400,7 +406,7 @@ func (k *kubernetesBackend) shutdownServer(ctx context.Context, id string, hardS
 }
 
 func (k *kubernetesBackend) k8sObjects(ctx context.Context, server ServerConfig) ([]kclient.Object, error) {
-	if server.Runtime == types.RuntimeRemote || server.Runtime == types.RuntimeComposite {
+	if server.Runtime == types.RuntimeRemote || server.Runtime == types.RuntimeVMCP {
 		return nil, nil
 	}
 
@@ -494,7 +500,14 @@ func (k *kubernetesBackend) k8sObjects(ctx context.Context, server ServerConfig)
 	// caller (sm.ServerToServerConfig), so any rotation naturally bumps
 	// this revision via utils.Digest(secretEnvData) - no separate term
 	// needed.
-	annotations["obot-revision"] = utils.Digest(utils.Digest(secretEnvData) + utils.Digest(nonDynamicFileData) + utils.Digest(server.Webhooks) + utils.Digest(headerData))
+	hashInput := map[string]any{
+		"command":       server.Command,
+		"args":          server.Args,
+		"files":         nonDynamicFileData,
+		"secretEnvData": secretEnvData,
+		"headers":       headerData,
+	}
+	annotations["obot-revision"] = utils.Digest(hashInput)
 
 	// Fetch K8s settings
 	k8sSettings := k.getK8sSettings(ctx)
@@ -748,17 +761,19 @@ func (k *kubernetesBackend) k8sObjects(ctx context.Context, server ServerConfig)
 	return objs, nil
 }
 
-// getNewestPod finds and returns the most recently created pod from the list.
+// getNewestPod returns the most recently created non-terminating pod.
 func getNewestPod(pods []corev1.Pod) (*corev1.Pod, error) {
-	if len(pods) == 0 {
-		return nil, fmt.Errorf("no pods provided")
-	}
-
-	newest := &pods[0]
+	var newest *corev1.Pod
 	for i := range pods {
-		if pods[i].CreationTimestamp.After(newest.CreationTimestamp.Time) {
+		if !pods[i].DeletionTimestamp.IsZero() {
+			continue
+		}
+		if newest == nil || pods[i].CreationTimestamp.After(newest.CreationTimestamp.Time) {
 			newest = &pods[i]
 		}
+	}
+	if newest == nil {
+		return nil, fmt.Errorf("no non-terminating pods found")
 	}
 
 	return newest, nil
@@ -766,11 +781,14 @@ func getNewestPod(pods []corev1.Pod) (*corev1.Pod, error) {
 
 // analyzePodStatus examines a pod's status to determine if we should retry waiting for it
 // or if we should fail immediately. Returns (shouldRetry, error).
-func analyzePodStatus(ctx context.Context, pod *corev1.Pod, server ServerConfig) (bool, error) {
-	return analyzePodStatusWithClient(ctx, pod, server, &http.Client{Timeout: time.Second})
+func analyzePodStatus(ctx context.Context, pod *corev1.Pod, server ServerConfig, health *podHealthCheckState) (bool, error) {
+	return analyzePodStatusWithClient(ctx, pod, server, &http.Client{Timeout: time.Second}, health)
 }
 
-func analyzePodStatusWithClient(ctx context.Context, pod *corev1.Pod, server ServerConfig, client *http.Client) (bool, error) {
+func analyzePodStatusWithClient(ctx context.Context, pod *corev1.Pod, server ServerConfig, client *http.Client, health *podHealthCheckState) (bool, error) {
+	if health.podUID != pod.UID {
+		*health = podHealthCheckState{podUID: pod.UID}
+	}
 	// Check pod phase first
 	switch pod.Status.Phase {
 	case corev1.PodFailed:
@@ -835,10 +853,33 @@ func analyzePodStatusWithClient(ctx context.Context, pod *corev1.Pod, server Ser
 		return false, fmt.Errorf("%w: pod was evicted: %s", ErrPodSchedulingFailed, pod.Status.Message)
 	}
 
-	// If this is a command-based MCP server, then check for a 500 from the health check.
+	// Probe once so the deployment watch can observe a replacement pod after a transient failure.
 	if pod.Status.PodIP != "" && (server.Runtime == types.RuntimeNPX || server.Runtime == types.RuntimeUVX) {
-		if err := ensureHTTPGetOK(ctx, client, fmt.Sprintf("http://%s:%d%s", pod.Status.PodIP, defaultContainerPort, server.HealthzPath)); err != nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s:%d%s", pod.Status.PodIP, defaultContainerPort, server.HealthzPath), http.NoBody)
+		if err != nil {
 			return false, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return true, err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			// Preserve older nanobot's permanent tool-discovery failure detection across watch callbacks.
+			if health.firstServiceUnavailable.IsZero() {
+				health.firstServiceUnavailable = time.Now()
+			} else if time.Since(health.firstServiceUnavailable) > serviceUnavailableGracePeriod {
+				return false, fmt.Errorf("%w: service unavailable: %s", ErrHealthCheckFailed, body)
+			}
+		} else {
+			health.firstServiceUnavailable = time.Time{}
+		}
+		if resp.StatusCode == http.StatusInternalServerError {
+			return false, fmt.Errorf("%w: internal server error: %s", ErrHealthCheckFailed, body)
+		}
+		if err != nil {
+			return true, err
 		}
 	}
 	// Default: pod is in Pending or Running but not ready yet - should retry
@@ -852,20 +893,21 @@ func (k *kubernetesBackend) updatedMCPPodName(ctx context.Context, url, id strin
 		watchAttempt  int
 		err           error
 		lastErr       error
+		health        podHealthCheckState
 	)
 
 	const watchTimeout = 5 * time.Second
 	start := time.Now()
 	for ; totalWatchDur < server.StartupTimeout; totalWatchDur, watchAttempt = time.Since(start), watchAttempt+1 {
-		_, err := wait.For(ctx, k.cachedClient, &appsv1.Deployment{Name: id, Namespace: k.mcpNamespace},
+		_, err := wait.For(ctx, k.client, &appsv1.Deployment{Name: id, Namespace: k.mcpNamespace},
 			func(dep *appsv1.Deployment) (bool, error) {
-				if dep.Generation == dep.Status.ObservedGeneration && dep.Status.UpdatedReplicas == 1 && dep.Status.ReadyReplicas == 1 && dep.Status.AvailableReplicas == 1 {
+				if dep.Generation == dep.Status.ObservedGeneration && dep.Status.Replicas == 1 && dep.Status.UpdatedReplicas == 1 && dep.Status.ReadyReplicas == 1 && dep.Status.AvailableReplicas == 1 {
 					return true, nil
 				}
 
 				// Deployment not ready yet - check pod status for early failure detection.
 				var pods corev1.PodList
-				if listErr := k.cachedClient.List(ctx, &pods, &kclient.ListOptions{
+				if listErr := k.client.List(ctx, &pods, &kclient.ListOptions{
 					Namespace: k.mcpNamespace,
 					LabelSelector: labels.SelectorFromSet(map[string]string{
 						"app": id,
@@ -884,7 +926,7 @@ func (k *kubernetesBackend) updatedMCPPodName(ctx context.Context, url, id strin
 					return false, nil // Keep waiting
 				}
 
-				shouldRetry, podErr := analyzePodStatus(ctx, newestPod, server)
+				shouldRetry, podErr := analyzePodStatus(ctx, newestPod, server, &health)
 				if !shouldRetry {
 					// Permanent failure - return the error with the appropriate type already wrapped
 					slog.Debug("pod in non-retryable state", "id", id, "attempt", watchAttempt+1, "error", podErr)
@@ -925,7 +967,7 @@ func (k *kubernetesBackend) updatedMCPPodName(ctx context.Context, url, id strin
 		pods    corev1.PodList
 		podName string
 	)
-	if err = k.cachedClient.List(ctx, &pods, &kclient.ListOptions{
+	if err = k.client.List(ctx, &pods, &kclient.ListOptions{
 		Namespace: k.mcpNamespace,
 		LabelSelector: labels.SelectorFromSet(map[string]string{
 			"app": id,
@@ -994,7 +1036,7 @@ func mcpContainerResourcesWithMaximums(serverSpecificResources *corev1.ResourceR
 // capped by ResourceMaximums; explicit K8s settings remain explicit and are
 // validated separately.
 func mcpContainerDefaultResources(runtime types.Runtime, agent bool, k8sSettings v1.K8sSettingsSpec) (corev1.ResourceRequirements, bool) {
-	if runtime == types.RuntimeRemote || runtime == types.RuntimeComposite {
+	if runtime == types.RuntimeRemote {
 		return memoryRequestResources(remoteMemoryRequest), true
 	}
 	if agent {
