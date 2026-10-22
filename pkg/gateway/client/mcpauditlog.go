@@ -1189,9 +1189,11 @@ func (c *Client) encryptMCPAuditLog(ctx context.Context, log *types.MCPAuditLog)
 		)
 	}
 
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
 	log.Encrypted = true
-
-	return errors.Join(errs...)
+	return nil
 }
 
 func (c *Client) decryptMCPAuditLog(ctx context.Context, log *types.MCPAuditLog) error {
