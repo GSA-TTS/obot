@@ -43,6 +43,26 @@ func TestDockerTransformObotHostnameAlwaysRewritesHost(t *testing.T) {
 	}
 }
 
+func TestDockerHostBaseURL(t *testing.T) {
+	tests := []struct {
+		name         string
+		containerEnv bool
+		detectedHost string
+		want         string
+	}{
+		{name: "native ignores VPN-selected address", detectedHost: "100.64.0.1", want: "http://localhost:8080"},
+		{name: "container uses shared network address", containerEnv: true, detectedHost: "172.18.0.4", want: "http://172.18.0.4:8080"},
+		{name: "container brackets IPv6", containerEnv: true, detectedHost: "fd00::4", want: "http://[fd00::4]:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dockerHostBaseURL(tt.containerEnv, tt.detectedHost, 8080); got != tt.want {
+				t.Fatalf("dockerHostBaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDockerBackendNetworkConfigUsesDetectedContainerNetwork(t *testing.T) {
 	localCalled := false
 

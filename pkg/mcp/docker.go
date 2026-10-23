@@ -81,12 +81,11 @@ func newDockerBackend(ctx context.Context, authEnabled bool, exposedPort int, op
 	}
 
 	d := &dockerBackend{
-		client:         cli,
-		containerEnv:   containerEnv,
-		network:        network,
-		httpListenPort: exposedPort,
-		// JoinHostPort brackets an IPv6 address, which the local IP can be on an IPv6-only host.
-		hostBaseURLWithPort:    "http://" + net.JoinHostPort(host, strconv.Itoa(exposedPort)),
+		client:                 cli,
+		containerEnv:           containerEnv,
+		network:                network,
+		httpListenPort:         exposedPort,
+		hostBaseURLWithPort:    dockerHostBaseURL(containerEnv, host, exposedPort),
 		containerizedBaseImage: opts.MCPBaseImage,
 		openAPIImage:           opts.MCPOpenAPIImage,
 		validationOptions:      validationOptions,
@@ -100,6 +99,14 @@ func newDockerBackend(ctx context.Context, authEnabled bool, exposedPort int, op
 	}
 	d.startDeploymentCacheEventWatcher(ctx)
 	return d, nil
+}
+
+func dockerHostBaseURL(containerEnv bool, detectedHost string, port int) string {
+	if !containerEnv {
+		detectedHost = "localhost"
+	}
+	// JoinHostPort brackets an IPv6 address, which the container IP can be on an IPv6-only network.
+	return "http://" + net.JoinHostPort(detectedHost, strconv.Itoa(port))
 }
 
 func detectDockerBackendNetwork(ctx context.Context, cli *client.Client) (bool, string, string, error) {
