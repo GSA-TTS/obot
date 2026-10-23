@@ -275,6 +275,21 @@ func TestServerIDIgnoresPassThroughHeaderValues(t *testing.T) {
 	}
 }
 
+func TestServerIDIgnoresRedactedHeaderNames(t *testing.T) {
+	serverA := ServerConfig{
+		Runtime:             "remote",
+		MCPServerName:       "test-server",
+		URL:                 "https://example.com/mcp",
+		RedactedHeaderNames: []string{"X-First-Header"},
+	}
+	serverB := serverA
+	serverB.RedactedHeaderNames = []string{"X-Second-Header"}
+
+	if serverID(serverA) != serverID(serverB) {
+		t.Fatal("expected same server ID when only audit redaction metadata changes")
+	}
+}
+
 func TestValidateRemoteMCPURL(t *testing.T) {
 	tests := []struct {
 		name              string

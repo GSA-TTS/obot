@@ -462,6 +462,34 @@ func TestServerToServerConfig_MultiUserPassthroughHeaders(t *testing.T) {
 	}
 }
 
+func TestServerToServerConfigRedactsEveryConfiguredHeader(t *testing.T) {
+	server := v1.MCPServer{
+		Name: "test-server",
+		Spec: v1.MCPServerSpec{Manifest: types.MCPServerManifest{
+			Runtime:      types.RuntimeRemote,
+			RemoteConfig: &types.RemoteRuntimeConfig{URL: "https://example.com/mcp"},
+			Config: []types.MCPConfig{
+				{Key: "X-Optional-Header", Usage: types.Header},
+				{Key: "x-sensitive-header", Usage: types.Header, Sensitive: true},
+				{Key: "X-PER-USER-HEADER", Usage: types.Header, UserAllowed: true},
+				{Key: "NOT_A_HEADER", Usage: types.Env, Sensitive: true},
+			},
+		}},
+	}
+
+	config, missing, err := ServerToServerConfig(server, nil, "user", "scope", "catalog", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("missing config = %v, want none", missing)
+	}
+	want := []string{"X-Optional-Header", "X-Sensitive-Header", "X-Per-User-Header"}
+	if !slices.Equal(config.RedactedHeaderNames, want) {
+		t.Fatalf("redacted header names = %v, want %v", config.RedactedHeaderNames, want)
+	}
+}
+
 func TestServerToServerConfig_StaticHeaders_Remote(t *testing.T) {
 	baseURL := "http://localhost:8080"
 	tests := []struct {

@@ -323,6 +323,7 @@ func (d *dockerBackend) ensureServerDeployment(ctx context.Context, server Serve
 	if serverConfig, ok, err := d.cachedDeployment(ctx, server.MCPServerName, serverConfigHash); err != nil {
 		return ServerConfig{}, err
 	} else if ok {
+		serverConfig.RedactedHeaderNames = server.RedactedHeaderNames
 		return serverConfig, nil
 	}
 
@@ -332,13 +333,16 @@ func (d *dockerBackend) ensureServerDeployment(ctx context.Context, server Serve
 	if err != nil {
 		return ServerConfig{}, err
 	}
-	return result.(ServerConfig), nil
+	serverConfig := result.(ServerConfig)
+	serverConfig.RedactedHeaderNames = server.RedactedHeaderNames
+	return serverConfig, nil
 }
 
 func (d *dockerBackend) ensureServerDeploymentSlow(ctx context.Context, server ServerConfig, serverConfigHash string) (ServerConfig, error) {
 	if serverConfig, ok, err := d.cachedDeployment(ctx, server.MCPServerName, serverConfigHash); err != nil {
 		return ServerConfig{}, err
 	} else if ok {
+		serverConfig.RedactedHeaderNames = server.RedactedHeaderNames
 		return serverConfig, nil
 	}
 
@@ -941,6 +945,7 @@ func (d *dockerBackend) buildServerConfig(server ServerConfig, c *container.Summ
 		PassthroughHeaderNames:  server.PassthroughHeaderNames,
 		Headers:                 server.hostedConnectionHeaders(),
 		PassthroughHeaderValues: server.PassthroughHeaderValues,
+		RedactedHeaderNames:     server.RedactedHeaderNames,
 		StartupTimeout:          server.StartupTimeout,
 		Webhooks:                server.Webhooks,
 	}, nil

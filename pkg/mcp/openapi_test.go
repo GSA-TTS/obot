@@ -544,6 +544,7 @@ func TestOpenAPIDockerConnectionHeaders(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "http://localhost:12345/mcp", connection.URL)
 	require.Equal(t, config.Headers, connection.Headers)
+	require.Equal(t, config.RedactedHeaderNames, connection.RedactedHeaderNames)
 	require.Empty(t, connection.Env)
 	require.Empty(t, connection.Files)
 
@@ -596,6 +597,7 @@ func TestOpenAPIKubernetesConnectionHeaders(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "http://openapi-test.mcp.svc.cluster.local/mcp", connection.URL)
 	require.Equal(t, config.Headers, connection.Headers)
+	require.Equal(t, config.RedactedHeaderNames, connection.RedactedHeaderNames)
 
 	config.Runtime = types.RuntimeContainerized
 	backend.setDeploymentCache(config.MCPServerName, kubernetesDeploymentCacheEntry{
