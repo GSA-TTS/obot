@@ -24,6 +24,7 @@ func (c *Client) LogMCPAuditEntry(entry types.MCPAuditLog) {
 
 	if err := c.encryptMCPAuditLog(ctx, &entry); err != nil {
 		slog.Error("Failed to encrypt MCP audit log", "error", err)
+		return
 	}
 
 	c.auditLock.Lock()
