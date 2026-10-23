@@ -54,6 +54,7 @@ type proxyAudit struct {
 	kind            proxyMessageKind
 	initialize      bool
 	proxyExchangeID string
+	redactedHeaders []string
 
 	responseHooksByID       map[string]hookResult
 	streamRequestHooksByID  map[string]hookResult
@@ -83,12 +84,12 @@ type auditSSEBody struct {
 	once       sync.Once
 }
 
-func newProxyAudit(req *http.Request, metadata map[string]string, collector proxyAuditCollector, storageClient kclient.Client) (*proxyAudit, error) {
+func newProxyAudit(req *http.Request, metadata map[string]string, collector proxyAuditCollector, storageClient kclient.Client, redactedHeaders ...string) (*proxyAudit, error) {
 	if collector == nil || metadata[obotmcp.AuditLogIgnore] == "true" {
 		return nil, nil
 	}
 
-	entry := buildMCPProxyAuditEntry(req, metadata)
+	entry := buildMCPProxyAuditEntry(req, metadata, redactedHeaders)
 	kind := proxyMessageUnknown
 	if req.Method == http.MethodDelete {
 		entry.RequestBody = json.RawMessage(mcpSessionDeleteRequest)
@@ -133,6 +134,7 @@ func newProxyAudit(req *http.Request, metadata map[string]string, collector prox
 		method:                 req.Method,
 		kind:                   kind,
 		initialize:             entry.CallType == "initialize",
+		redactedHeaders:        slices.Clone(redactedHeaders),
 		responseHooksByID:      make(map[string]hookResult),
 		streamRequestHooksByID: make(map[string]hookResult),
 	}
@@ -237,8 +239,8 @@ func (a *proxyAudit) recordBlockedRequest(body []byte, err error) {
 	a.recordResponse(body, http.StatusOK, err, a.entry.RequestID)
 }
 
-func buildMCPProxyAuditEntry(req *http.Request, metadata map[string]string) auditlogs.MCPAuditLog {
-	headers, _ := json.Marshal(sanitizedMCPHeaders(req.Header))
+func buildMCPProxyAuditEntry(req *http.Request, metadata map[string]string, redactedHeaders []string) auditlogs.MCPAuditLog {
+	headers, _ := json.Marshal(sanitizedMCPHeaders(req.Header, redactedHeaders))
 	clientIP := req.RemoteAddr
 	if forwarded := req.Header.Get("X-Forwarded-For"); forwarded != "" {
 		clientIP = strings.Split(forwarded, ",")[0]
@@ -349,7 +351,7 @@ func (a *proxyAudit) wrapResponse(resp *http.Response) error {
 	if _, err := saveMCPClientSession(a.ctx, a.storage, &a.entry, virtual); err != nil {
 		slog.Error("failed to save MCP client session for audit logging", "error", err)
 	}
-	responseHeaders, _ := json.Marshal(sanitizedMCPHeaders(resp.Header))
+	responseHeaders, _ := json.Marshal(sanitizedMCPHeaders(resp.Header, a.redactedHeaders))
 	a.entry.ResponseHeaders = responseHeaders
 	a.recordNotification(resp.StatusCode, nil)
 
@@ -685,17 +687,36 @@ func mcpSessionID(headers http.Header, u *url.URL) string {
 	return u.Query().Get("id")
 }
 
-func sanitizedMCPHeaders(headers http.Header) http.Header {
+func sanitizedMCPHeaders(headers http.Header, redactedHeaders []string) http.Header {
+	redacted := make(map[string]struct{}, len(redactedHeaders))
+	for _, key := range redactedHeaders {
+		redacted[strings.ToLower(key)] = struct{}{}
+	}
 	result := make(http.Header, len(headers))
 	for key, values := range headers {
-		switch http.CanonicalHeaderKey(key) {
-		case "Authorization", "Cookie", "Set-Cookie", "X-Api-Key", "X-Auth-Token", "Proxy-Authorization", "X-Obot-Api-Key":
-			result[key] = []string{"[REDACTED]"}
-		default:
-			result[key] = slices.Clone(values)
+		canonicalKey := http.CanonicalHeaderKey(key)
+		if shouldRedactMCPHeader(key, redacted) {
+			result[canonicalKey] = []string{"[REDACTED]"}
+			continue
 		}
+		if slices.Equal(result[canonicalKey], []string{"[REDACTED]"}) {
+			continue
+		}
+		result[canonicalKey] = append(result[canonicalKey], values...)
 	}
 	return result
+}
+
+func shouldRedactMCPHeader(key string, redacted map[string]struct{}) bool {
+	if _, ok := redacted[strings.ToLower(key)]; ok {
+		return true
+	}
+	switch http.CanonicalHeaderKey(key) {
+	case "Authorization", "Cookie", "Set-Cookie", "X-Api-Key", "X-Auth-Token", "Proxy-Authorization", "X-Obot-Api-Key":
+		return true
+	default:
+		return false
+	}
 }
 
 func jsonBody(body []byte) json.RawMessage {

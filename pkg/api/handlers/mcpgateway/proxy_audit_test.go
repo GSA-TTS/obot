@@ -61,8 +61,9 @@ func TestMCPProxyAuditCollectsRequestAndResponseSeparately(t *testing.T) {
 	req.RemoteAddr = "192.0.2.10:1234"
 	req.Header.Set(mcpSessionHeader, "session-1")
 	req.Header.Set("Authorization", "Bearer secret-api-key-that-must-be-redacted")
+	req.Header.Set("X-Custom-Credential", "request-secret-that-must-be-redacted")
 
-	auditor, err := newProxyAudit(req, map[string]string{"mcpID": "mcp-1", "userID": "user-1"}, collector, newMCPProxyTestStorage())
+	auditor, err := newProxyAudit(req, map[string]string{"mcpID": "mcp-1", "userID": "user-1"}, collector, newMCPProxyTestStorage(), "x-custom-credential")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,8 +76,11 @@ func TestMCPProxyAuditCollectsRequestAndResponseSeparately(t *testing.T) {
 	}
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`)),
+		Header: http.Header{
+			"Content-Type":        []string{"application/json"},
+			"X-Custom-Credential": []string{"response-secret-that-must-be-redacted"},
+		},
+		Body: io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`)),
 	}
 	consumeAuditResponse(t, auditor, resp)
 
@@ -99,8 +103,8 @@ func TestMCPProxyAuditCollectsRequestAndResponseSeparately(t *testing.T) {
 	if string(requestEntry.RequestBody) != `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search"}}` {
 		t.Fatalf("unexpected request body: %s", requestEntry.RequestBody)
 	}
-	if strings.Contains(string(requestEntry.RequestHeaders), "secret-api-key") || !strings.Contains(string(requestEntry.RequestHeaders), "[REDACTED]") {
-		t.Fatalf("authorization header was not redacted: %s", requestEntry.RequestHeaders)
+	if strings.Contains(string(requestEntry.RequestHeaders), "secret-api-key") || strings.Contains(string(requestEntry.RequestHeaders), "request-secret") || !strings.Contains(string(requestEntry.RequestHeaders), "[REDACTED]") {
+		t.Fatalf("request headers were not redacted: %s", requestEntry.RequestHeaders)
 	}
 
 	responseEntry := collector.entries[1]
@@ -115,6 +119,9 @@ func TestMCPProxyAuditCollectsRequestAndResponseSeparately(t *testing.T) {
 	}
 	if string(responseEntry.ResponseBody) != `{"jsonrpc":"2.0","id":7,"result":{"content":[]}}` {
 		t.Fatalf("unexpected response body: %s", responseEntry.ResponseBody)
+	}
+	if strings.Contains(string(responseEntry.ResponseHeaders), "response-secret") || !strings.Contains(string(responseEntry.ResponseHeaders), "[REDACTED]") {
+		t.Fatalf("response headers were not redacted: %s", responseEntry.ResponseHeaders)
 	}
 }
 

@@ -474,6 +474,28 @@ func TestFormatLogsExportPayloadRequiresAuditor(t *testing.T) {
 	assertPayload(true, true)
 }
 
+func TestFormatLogsPreservesRedactedMCPHeaders(t *testing.T) {
+	logs := []gatewaytypes.MCPAuditLog{{
+		CreatedAt:  time.Now().UTC(),
+		SourceType: types.AuditLogSourceTypeMCP,
+		UserID:     "user-1",
+		MCPFields: &gatewaytypes.MCPAuditLogFields{
+			MCPID:           "mcp-1",
+			CallType:        "tools/call",
+			RequestHeaders:  json.RawMessage(`{"X-Custom-Credential":["[REDACTED]"]}`),
+			ResponseHeaders: json.RawMessage(`{"X-Custom-Credential":["[REDACTED]"]}`),
+		},
+	}}
+
+	data, err := formatPresentedAuditLogs(logs, auditlog.PresentOptions{IncludeDetails: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "credential-secret") || strings.Count(string(data), "[REDACTED]") != 2 {
+		t.Fatalf("export did not preserve redacted request and response headers: %s", data)
+	}
+}
+
 func TestExportAllSourcesIncludesBothMCPAndLocal(t *testing.T) {
 	c := newExportTestGatewayClient(t)
 	ctx := t.Context()

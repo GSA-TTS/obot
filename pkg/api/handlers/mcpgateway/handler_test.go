@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -338,10 +339,26 @@ func TestProxyStripsInboundGatewayCredentials(t *testing.T) {
 	}
 }
 
-func TestSanitizedMCPHeadersRedactsObotAPIKey(t *testing.T) {
-	got := sanitizedMCPHeaders(http.Header{"X-Obot-Api-Key": {"ok1-secret"}, "Accept": {"application/json"}})
-	if got.Get("X-Obot-Api-Key") != "[REDACTED]" || got.Get("Accept") != "application/json" {
-		t.Fatalf("headers = %v, want the Obot API key redacted", got)
+func TestSanitizedMCPHeadersRedactsFixedAndConfiguredNames(t *testing.T) {
+	headers := http.Header{
+		"X-Obot-Api-Key": {"ok1-secret"},
+		"x-custom-token": {"first-secret", "second-secret"},
+		"X-Custom-Token": {"third-secret"},
+		"Accept":         {"application/json", "text/event-stream"},
+	}
+	original := headers.Clone()
+	got := sanitizedMCPHeaders(headers, []string{"X-Custom-Token"})
+	if values := got.Values("X-Obot-Api-Key"); !slices.Equal(values, []string{"[REDACTED]"}) {
+		t.Fatalf("Obot API key = %v, want redacted", values)
+	}
+	if values := got.Values("X-Custom-Token"); !slices.Equal(values, []string{"[REDACTED]"}) {
+		t.Fatalf("configured header = %v, want one redaction marker", values)
+	}
+	if values := got.Values("Accept"); !slices.Equal(values, []string{"application/json", "text/event-stream"}) {
+		t.Fatalf("Accept = %v, want values preserved", values)
+	}
+	if !reflect.DeepEqual(headers, original) {
+		t.Fatalf("input headers were mutated: %v", headers)
 	}
 }
 

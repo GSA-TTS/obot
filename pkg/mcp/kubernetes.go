@@ -241,6 +241,7 @@ func (k *kubernetesBackend) ensureServerDeployment(ctx context.Context, server S
 		PassthroughHeaderNames:  server.PassthroughHeaderNames,
 		Headers:                 server.hostedConnectionHeaders(),
 		PassthroughHeaderValues: server.PassthroughHeaderValues,
+		RedactedHeaderNames:     server.RedactedHeaderNames,
 		StartupTimeout:          server.StartupTimeout,
 		Webhooks:                server.Webhooks,
 	}, nil

@@ -45,6 +45,7 @@ type ServerConfig struct {
 	Headers                  []string `json:"headers"`
 	PassthroughHeaderNames   []string `json:"passthroughHeaderNames"`
 	PassthroughHeaderValues  []string `json:"passthroughHeaderValues"`
+	RedactedHeaderNames      []string `json:"-"`
 
 	// Containerized configuration.
 	ContainerImage string `json:"containerImage"`
@@ -377,6 +378,27 @@ func configureHeaders(serverConfig *ServerConfig, config []types.MCPConfig, cred
 	return missingRequiredNames
 }
 
+func configuredHeaderNames(config []types.MCPConfig) []string {
+	var result []string
+	seen := map[string]struct{}{}
+	for _, field := range config {
+		if field.Usage != types.Header {
+			continue
+		}
+		name := http.CanonicalHeaderKey(field.Key)
+		if name == "" {
+			continue
+		}
+		lower := strings.ToLower(name)
+		if _, ok := seen[lower]; ok {
+			continue
+		}
+		seen[lower] = struct{}{}
+		result = append(result, name)
+	}
+	return result
+}
+
 // ServerToServerConfig resolves a manifest into runtime configuration.
 // Hosted runtime images are selected by the deployment backend.
 func ServerToServerConfig(mcpServer v1.MCPServer, audiences []string, userID, scope, mcpCatalogName string, credEnv map[string]string, devMode bool) (ServerConfig, []string, error) {
@@ -450,6 +472,7 @@ func ServerToServerConfig(mcpServer v1.MCPServer, audiences []string, userID, sc
 		Runtime:                mcpServer.Spec.Manifest.Runtime,
 		Audiences:              audiences,
 		PassthroughHeaderNames: passthroughHeaderNames,
+		RedactedHeaderNames:    configuredHeaderNames(mcpServer.Spec.Manifest.Config),
 		ComponentMCPServer:     mcpServer.Spec.VMCPComponentID != "",
 		StartupTimeout:         startupTimeout,
 		Resources:              resources,
@@ -589,6 +612,7 @@ func SystemServerToServerConfig(systemServer v1.SystemMCPServer, audiences []str
 		Scope:                fmt.Sprintf("%s-system", systemServer.Name),
 		Audiences:            audiences,
 		UserID:               userID,
+		RedactedHeaderNames:  configuredHeaderNames(systemServer.Spec.Manifest.Config),
 		AuditLogMetadata: map[string]string{
 			"mcpID":                systemServer.Name,
 			"mcpServerDisplayName": displayName,

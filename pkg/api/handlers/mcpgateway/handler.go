@@ -82,7 +82,7 @@ func (r *mcpResponse) write(w http.ResponseWriter, audit *proxyAudit) {
 	w.WriteHeader(r.status)
 	_, _ = w.Write(r.body)
 	if audit != nil {
-		audit.entry.ResponseHeaders, _ = json.Marshal(sanitizedMCPHeaders(w.Header()))
+		audit.entry.ResponseHeaders, _ = json.Marshal(sanitizedMCPHeaders(w.Header(), audit.redactedHeaders))
 	}
 	audit.recordHTTPResponse(r.body, r.status, nil)
 }
@@ -344,7 +344,7 @@ func (h *Handler) Proxy(req api.Context) error {
 
 		hookConfig, hookServers := mcp.ServerHookConfig(serverConfig)
 
-		audit, err := newProxyAudit(req.Request, serverConfig.AuditLogMetadata, h.auditLogCollector, req.Storage)
+		audit, err := newProxyAudit(req.Request, serverConfig.AuditLogMetadata, h.auditLogCollector, req.Storage, serverConfig.RedactedHeaderNames...)
 		if err != nil {
 			return fmt.Errorf("failed to prepare MCP request audit log: %w", err)
 		}

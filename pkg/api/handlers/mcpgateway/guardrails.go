@@ -28,9 +28,13 @@ type mcpGuardrails struct {
 // newMCPGuardrails returns what guardrail filters need to check a request's messages.
 func newMCPGuardrails(engine *guardrails.Engine, identity guardrails.Identity, serverConfig mcp.ServerConfig, header http.Header) *mcpGuardrails {
 	headers := map[string]string{}
+	redacted := make(map[string]struct{}, len(serverConfig.RedactedHeaderNames))
+	for _, name := range serverConfig.RedactedHeaderNames {
+		redacted[strings.ToLower(name)] = struct{}{}
+	}
 	for k, v := range header {
 		lower := strings.ToLower(k)
-		if lower == "authorization" || lower == "cookie" || lower == "x-api-key" || lower == "proxy-authorization" {
+		if shouldRedactMCPHeader(k, redacted) {
 			continue
 		}
 		headers[lower] = strings.Join(v, ",")

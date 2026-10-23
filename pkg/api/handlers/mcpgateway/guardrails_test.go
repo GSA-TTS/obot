@@ -322,6 +322,31 @@ func TestGuardrailFilterChecksResultsOnGETStreams(t *testing.T) {
 	}
 }
 
+func TestMCPGuardrailsExcludeConfiguredHeaders(t *testing.T) {
+	got := newMCPGuardrails(
+		guardrails.New(&guardrailStore{}, nil),
+		guardrails.Identity{UserID: "alice"},
+		mcp.ServerConfig{
+			MCPServerName:       "server",
+			RedactedHeaderNames: []string{"X-Custom-Credential"},
+		},
+		http.Header{
+			"X-Custom-Credential": []string{"secret"},
+			"X-Obot-Api-Key":      []string{"obot-secret"},
+			"X-Request-ID":        []string{"request-1"},
+		},
+	)
+	if _, ok := got.message.Headers["x-custom-credential"]; ok {
+		t.Fatalf("configured credential header reached guardrails: %#v", got.message.Headers)
+	}
+	if _, ok := got.message.Headers["x-obot-api-key"]; ok {
+		t.Fatalf("fixed credential header reached guardrails: %#v", got.message.Headers)
+	}
+	if got.message.Headers["x-request-id"] != "request-1" {
+		t.Fatalf("non-configured header missing from guardrails: %#v", got.message.Headers)
+	}
+}
+
 func TestGuardrailFiltersRunWithoutAHookRunner(t *testing.T) {
 	chain := newGuardrailChain(t, apitypes.MCPGuardrailActionBlock, nil, nil)
 	processor, err := newHookProcessor(mustMCPHookRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write","arguments":{"text":"`+testSecret+`"}}}`), nil, chain.hooks, nil, nil, nil, nil, chain.guardrails)

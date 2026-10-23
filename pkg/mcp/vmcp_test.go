@@ -229,6 +229,9 @@ func TestServerConfigForVMCPBuildsAggregateConfig(t *testing.T) {
 							Manifest: types.MCPServerCatalogEntryManifest{
 								Name:    "Cached Search",
 								Runtime: types.RuntimeRemote,
+								Config: []types.MCPConfig{
+									{Key: "X-Search-Token", Usage: types.Header},
+								},
 							},
 						},
 						ToolPrefix: "search",
@@ -249,6 +252,10 @@ func TestServerConfigForVMCPBuildsAggregateConfig(t *testing.T) {
 							Manifest: types.MCPServerCatalogEntryManifest{
 								Name:    "Cached Files",
 								Runtime: types.RuntimeRemote,
+								Config: []types.MCPConfig{
+									{Key: "x-files-token", Usage: types.Header, Sensitive: true},
+									{Key: "X-SEARCH-TOKEN", Usage: types.Header},
+								},
 							},
 						},
 						ToolPrefix: "files",
@@ -343,6 +350,10 @@ func TestServerConfigForVMCPBuildsAggregateConfig(t *testing.T) {
 	// Audit rows record the vMCP, not the per-user instance that serves the connection.
 	if serverConfig.AuditLogMetadata["mcpID"] != vmcpID || serverConfig.AuditLogMetadata["mcpServerDisplayName"] != vmcp.Spec.Manifest.DisplayName || serverConfig.AuditLogMetadata["userID"] != userID {
 		t.Fatalf("missing vMCP audit attribution: %#v", serverConfig.AuditLogMetadata)
+	}
+	wantRedactedHeaders := []string{"X-Search-Token", "X-Files-Token"}
+	if !slices.Equal(serverConfig.RedactedHeaderNames, wantRedactedHeaders) {
+		t.Fatalf("vMCP redacted header names = %v, want %v", serverConfig.RedactedHeaderNames, wantRedactedHeaders)
 	}
 	if len(serverConfig.Components) != 2 {
 		t.Fatalf("component count = %d, want 2", len(serverConfig.Components))

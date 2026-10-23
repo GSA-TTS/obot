@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/obot-platform/obot/apiclient/types"
@@ -95,6 +96,18 @@ func (sm *SessionManager) serverConfigForVMCP(ctx context.Context, vmcp *v1.VMCP
 	// Components disabled for the user are omitted entirely, so users never need
 	// to configure or authenticate servers they cannot use.
 	configuredComponents := vmcpaccess.EnabledComponents(user, *vmcp, vmcpaccess.ComponentsForInstance(*vmcp, *instance))
+	var redactedHeaderNames []string
+	redactedHeaderNamesSeen := map[string]struct{}{}
+	for _, component := range configuredComponents {
+		for _, name := range configuredHeaderNames(component.CatalogEntry.Manifest.Config) {
+			lower := strings.ToLower(name)
+			if _, ok := redactedHeaderNamesSeen[lower]; ok {
+				continue
+			}
+			redactedHeaderNamesSeen[lower] = struct{}{}
+			redactedHeaderNames = append(redactedHeaderNames, name)
+		}
+	}
 	sharedComponents := make(map[string]struct{}, len(configuredComponents))
 	connectionsNeeded := make(map[string]struct{}, len(configuredComponents))
 	instanceComponents := make(map[string]struct{}, len(configuredComponents))
@@ -207,6 +220,7 @@ func (sm *SessionManager) serverConfigForVMCP(ctx context.Context, vmcp *v1.VMCP
 		OwnerUserID:          vmcp.Spec.UserID,
 		MCPServerNamespace:   vmcp.Namespace,
 		Components:           components,
+		RedactedHeaderNames:  redactedHeaderNames,
 		Webhooks:             webhooks,
 		StartupTimeout:       types.DefaultStartupTimeoutSeconds * time.Second,
 		AuditLogMetadata: map[string]string{
