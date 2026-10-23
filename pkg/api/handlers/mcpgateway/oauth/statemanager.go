@@ -13,7 +13,7 @@ import (
 
 // tokenClientFunc returns the HTTP client for the code exchange with a server-supplied
 // token endpoint, going through the named tunnel when there is one.
-type tokenClientFunc func(tunnelName string) (*http.Client, error)
+type tokenClientFunc func(serverURL, tunnelName string) (*http.Client, error)
 
 type stateManager struct {
 	gatewayClient *client.Client
@@ -62,7 +62,7 @@ func (sm *stateManager) createToken(ctx context.Context, state, code, errorStr, 
 
 	exchangeCtx := ctx
 	if sm.tokenClient != nil {
-		httpClient, err := sm.tokenClient(ps.TunnelName)
+		httpClient, err := sm.tokenClient(ps.URL, ps.TunnelName)
 		if err != nil {
 			_ = sm.gatewayClient.DeleteMCPOAuthPendingState(ctx, ps.HashedState)
 			return "", "", fmt.Errorf("failed to create OAuth token client: %w", err)

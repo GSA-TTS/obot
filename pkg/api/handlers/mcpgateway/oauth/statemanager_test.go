@@ -168,7 +168,7 @@ func TestStateManagerExchangesAuthorizationCodeWithStoredResource(t *testing.T) 
 }
 
 func fixedTokenClient(client *http.Client) tokenClientFunc {
-	return func(string) (*http.Client, error) {
+	return func(string, string) (*http.Client, error) {
 		return client, nil
 	}
 }
@@ -188,8 +188,9 @@ func TestOAuthCallbackExchangeUsesStoredTunnel(t *testing.T) {
 	gatewayClient := gatewayclient.New(t.Context(), db, nil, nil, nil, nil, nil, time.Hour, 10, 90, 90, 90, true)
 	t.Cleanup(func() { require.NoError(t, gatewayClient.Close()) })
 
-	var tunnels []string
-	stateManager := newStateManager(gatewayClient, func(tunnelName string) (*http.Client, error) {
+	var servers, tunnels []string
+	stateManager := newStateManager(gatewayClient, func(serverURL, tunnelName string) (*http.Client, error) {
+		servers = append(servers, serverURL)
 		tunnels = append(tunnels, tunnelName)
 		return tokenServer.Client(), nil
 	})
@@ -206,5 +207,6 @@ func TestOAuthCallbackExchangeUsesStoredTunnel(t *testing.T) {
 	_, _, err = stateManager.createToken(t.Context(), "direct-state", "authorization-code", "", "")
 	require.NoError(t, err)
 
+	require.Equal(t, []string{"https://private.example/mcp", "https://public.example/mcp"}, servers)
 	require.Equal(t, []string{"private-tunnel", ""}, tunnels)
 }

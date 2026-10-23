@@ -3,6 +3,7 @@ package mcp
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -58,8 +59,10 @@ func (sm *SessionManager) HTTPClientForServer(server ServerConfig, opts HTTPClie
 // OAuthClientForServer returns the client for the server's OAuth requests: metadata
 // discovery, dynamic client registration, and token exchange and refresh. Those URLs come
 // from the server's own metadata, so the client follows the server's tunnel when present
-// and otherwise applies the admin's egress policy. Unlike HTTPClientForServer it carries no
-// configured headers, grants no backend-specific exceptions, and has a timeout.
+// and otherwise applies the admin's egress policy. If the configured server uses a backend
+// exception, only that exact host and port are allowed; server-supplied metadata cannot use
+// the backend wildcard to reach a different internal service. Unlike HTTPClientForServer it
+// carries no configured headers and has a timeout.
 func (sm *SessionManager) OAuthClientForServer(server ServerConfig) (*http.Client, error) {
 	const timeout = 30 * time.Second
 	if server.TunnelName != "" {
@@ -69,11 +72,20 @@ func (sm *SessionManager) OAuthClientForServer(server ServerConfig) (*http.Clien
 		return sm.tunnelManager.HTTPClient(server.TunnelName, tunnel.HTTPClientOptions{Timeout: timeout})
 	}
 
-	policy := sm.RemoteMCPURLValidationConfig()
+	policy, backendAllowedHosts := sm.RemoteConfigForBackend()
 	return safehttp.NewClient(safehttp.Options{
 		BlockLoopback:  !policy.AllowLocalhostMCP,
 		BlockPrivateIP: !policy.AllowPrivateIPMCP,
 		BlockLinkLocal: !policy.AllowLinkLocalMCP,
+		AllowList:      oauthServerAllowList(server.URL, backendAllowedHosts),
 		Timeout:        timeout,
 	}), nil
+}
+
+func oauthServerAllowList(rawURL string, backendAllowedHosts []string) []string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" || !safehttp.HostAllowed(backendAllowedHosts, u.Hostname(), safehttp.PortForURL(u)) {
+		return nil
+	}
+	return []string{u.Host}
 }
