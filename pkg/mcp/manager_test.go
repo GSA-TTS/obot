@@ -269,3 +269,48 @@ func TestHTTPClientForServer(t *testing.T) {
 		}
 	})
 }
+
+func TestOAuthClientForServerUsesBackendAllowListWithoutConfiguredHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if got := req.Header.Get("Authorization"); got != "" {
+			t.Errorf("configured Authorization header was forwarded: %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	client, err := (&SessionManager{
+		backend: &kubernetesBackend{serviceFQDN: serverURL.Host},
+	}).OAuthClientForServer(ServerConfig{
+		URL:     server.URL,
+		Headers: []string{"Authorization=Bearer secret"},
+	})
+	require.NoError(t, err)
+
+	response, err := client.Get(server.URL)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusNoContent, response.StatusCode)
+}
+
+func TestOAuthServerAllowListIsLimitedToConfiguredBackendServer(t *testing.T) {
+	backendAllowedHosts := []string{"*.apps.internal:8080"}
+
+	require.Equal(t,
+		[]string{"mcp-cdc-places.apps.internal:8080"},
+		oauthServerAllowList("http://mcp-cdc-places.apps.internal:8080/mcp", backendAllowedHosts),
+	)
+	for _, rawURL := range []string{
+		"http://mcp-cdc-places.apps.internal/mcp",
+		"http://10.255.232.69:8080/mcp",
+		"http://apps.internal:8080/mcp",
+		"http://apps.internal.evil.example:8080/mcp",
+		"http://127.0.0.1:8080/mcp",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			require.Empty(t, oauthServerAllowList(rawURL, backendAllowedHosts))
+		})
+	}
+}

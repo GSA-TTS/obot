@@ -85,8 +85,8 @@ func tokenExchangeClient(sessionManager *mcp.SessionManager) tokenClientFunc {
 	if sessionManager == nil {
 		return nil
 	}
-	return func(tunnelName string) (*http.Client, error) {
-		return sessionManager.OAuthClientForServer(mcp.ServerConfig{TunnelName: tunnelName})
+	return func(serverURL, tunnelName string) (*http.Client, error) {
+		return sessionManager.OAuthClientForServer(mcp.ServerConfig{URL: serverURL, TunnelName: tunnelName})
 	}
 }
 
