@@ -1,11 +1,22 @@
 package mcp
 
 import (
+	"context"
+	"encoding/binary"
 	"errors"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	otypes "github.com/obot-platform/obot/apiclient/types"
 	"github.com/obot-platform/obot/pkg/safehttp"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 var (
@@ -206,10 +217,6 @@ func TestCloudFoundryTransformObotHostnameIsIdentity(t *testing.T) {
 	}
 }
 
-// remoteConfig must return the operator's global validation config untouched and
-// grant no network exceptions. The docker backend has to relax private-IP
-// blocking to reach bridge-network containers; this backend talks to nothing
-// internal, so weakening the operator's posture here would be a regression.
 // remoteConfig must not widen the operator's address-range flags. Only the
 // allow list is the backend's contribution. Widening the flags here would
 // relax blocking for EVERY remote server, including operator- and
@@ -233,8 +240,7 @@ func TestCloudFoundryRemoteConfigDoesNotWidenOperatorFlags(t *testing.T) {
 	}
 }
 
-// The allow list must contain exactly the Cloud Foundry internal domain and MCP
-// listener port.
+// The allow list contains the standard internal listener and one exact DIU exception.
 //
 // MCP servers this backend cannot deploy are instead run as their own CF apps
 // on apps.internal, which resolves into 10.255.0.0/16 -- RFC1918. Without this
@@ -245,12 +251,7 @@ func TestCloudFoundryRemoteConfigAllowsInternalDomain(t *testing.T) {
 
 	_, allowList := backend.remoteConfig(RemoteMCPURLValidationConfig{})
 
-	if len(allowList) != 1 {
-		t.Fatalf("expected exactly one allow-list entry, got %v", allowList)
-	}
-	if allowList[0] != "*.apps.internal:8080" {
-		t.Fatalf("allow list = %q, want %q", allowList[0], "*.apps.internal:8080")
-	}
+	require.Equal(t, []string{"*.apps.internal:8080", "mcp-diu-solutions.apps.internal:8001"}, allowList)
 }
 
 // The allow list is only useful if it admits real internal routes and nothing
@@ -268,6 +269,24 @@ func TestCloudFoundryAllowListScope(t *testing.T) {
 	}{
 		{name: "internal MCP route", host: "mcp-cdc-places.apps.internal", port: "8080", want: true},
 		{name: "another internal route", host: "mcp-nih-reporter.apps.internal", port: "8080", want: true},
+		{
+			name: "DIU listener",
+			host: "mcp-diu-solutions.apps.internal",
+			port: "8001",
+			want: true,
+		},
+		{
+			name: "another internal host on DIU port",
+			host: "mcp-cdc-places.apps.internal",
+			port: "8001",
+			want: false,
+		},
+		{
+			name: "DIU on unapproved port",
+			host: "mcp-diu-solutions.apps.internal",
+			port: "8002",
+			want: false,
+		},
 		{name: "internal route on another port", host: "mcp-cdc-places.apps.internal", port: "80", want: false},
 		{name: "internal apex is not a route", host: "apps.internal", port: "8080", want: false},
 		{name: "lookalike domain", host: "evil-apps.internal", port: "8080", want: false},
@@ -313,67 +332,171 @@ func TestNewCloudFoundryBackendReturnsUsableBackend(t *testing.T) {
 	}
 }
 
-// End-to-end admission check for the Tier 2 topology: an MCP server deployed as
-// its own Cloud Foundry app on apps.internal, registered as a remote server.
-//
-// This is the case that motivated the allow list. apps.internal resolves into
-// 10.255.0.0/16, so with Obot's default DisallowPrivateIPMCP the URL is
-// rejected at admission -- in the admin UI, before any network policy or C2C
-// path is exercised. The test asserts the allow list reaches
-// ValidateRemoteMCPURL, and that it opens nothing wider than that one domain.
-//
-// Hostnames here never resolve, which is the point: the allow list must be
-// consulted BEFORE DNS, exactly as safeDialer.checkHost does. A blocked host
-// therefore fails on resolution rather than on address range, so the assertion
-// is only that it fails.
-func TestCloudFoundryInternalURLPassesRemoteValidation(t *testing.T) {
-	backend := &cloudFoundryBackend{}
-	// The operator's strictest posture, which is also the default.
-	strict := RemoteMCPURLValidationConfig{
-		AllowLocalhostMCP: false,
-		AllowPrivateIPMCP: false,
-		AllowLinkLocalMCP: false,
+// Run tests that replace process-global DNS or leave asynchronous HTTP dials in
+// an isolated copy of the existing test binary. A race-enabled binary remains
+// race-enabled in the child; failures and output propagate to the parent.
+func runMCPTestInSubprocess(t *testing.T) bool {
+	t.Helper()
+	const marker = "OBOT_MCP_ISOLATED_TEST"
+	if os.Getenv(marker) == t.Name() {
+		return false
 	}
-	_, allowList := backend.remoteConfig(strict)
-	strict.AllowedHosts = allowList
+	parts := strings.Split(t.Name(), "/")
+	for i, part := range parts {
+		parts[i] = "^" + regexp.QuoteMeta(part) + "$"
+	}
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, executable, "-test.run="+strings.Join(parts, "/"), "-test.v", "-test.count=1", "-test.timeout=45s")
+	command.Env = append(os.Environ(), marker+"="+t.Name())
+	output, err := command.CombinedOutput()
+	t.Logf("isolated test output:\n%s", output)
+	require.NoError(t, err, "isolated test failed")
+	return true
+}
 
-	t.Run("internal MCP URL is admitted", func(t *testing.T) {
-		for _, rawURL := range []string{
-			"http://mcp-cdc-places.apps.internal:8080/mcp",
-			"http://mcp-nih-reporter.apps.internal:8080/mcp",
-			"http://some-server.apps.internal:8080/mcp",
-		} {
-			if err := ValidateRemoteMCPURL(t.Context(), rawURL, strict); err != nil {
-				t.Errorf("ValidateRemoteMCPURL(%q) = %v, want nil", rawURL, err)
-			}
+// Controlled DNS proves range rejection, not merely failure to resolve. These
+// tests are offline regressions, not live cloud.gov end-to-end verification.
+// Call only in subprocess-isolated tests, never in the parent test process.
+func useCloudFoundryPrivateDNS(t *testing.T) {
+	t.Helper()
+	previous := net.DefaultResolver
+	net.DefaultResolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			client, server := net.Pipe()
+			go answerCloudFoundryDNS(t, server)
+			return client, nil
+		},
+	}
+	t.Cleanup(func() { net.DefaultResolver = previous })
+}
+
+func answerCloudFoundryDNS(t *testing.T, conn net.Conn) {
+	t.Helper()
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Error(err)
+		return
+	}
+	var length [2]byte
+	if _, err := io.ReadFull(conn, length[:]); err != nil {
+		t.Error(err)
+		return
+	}
+	query := make([]byte, binary.BigEndian.Uint16(length[:]))
+	if _, err := io.ReadFull(conn, query); err != nil {
+		t.Error(err)
+		return
+	}
+	var message dnsmessage.Message
+	if err := message.Unpack(query); err != nil {
+		t.Error(err)
+		return
+	}
+	message.Response = true
+	message.RecursionAvailable = true
+	for _, question := range message.Questions {
+		if question.Type == dnsmessage.TypeA {
+			message.Answers = append(message.Answers, dnsmessage.Resource{
+				Header: dnsmessage.ResourceHeader{Name: question.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
+				Body:   &dnsmessage.AResource{A: [4]byte{10, 255, 0, 10}},
+			})
 		}
-	})
+	}
+	response, err := message.Pack()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	binary.BigEndian.PutUint16(length[:], uint16(len(response)))
+	if _, err := conn.Write(append(length[:], response...)); err != nil {
+		t.Error(err)
+	}
+}
 
-	t.Run("the allow list does not admit anything else", func(t *testing.T) {
-		for _, rawURL := range []string{
-			"http://localhost:8080/mcp",
-			"http://127.0.0.1:8080/mcp",
-			"http://169.254.169.254/latest/meta-data/",
-			"http://10.0.0.5:8080/mcp",
-			"http://mcp-cdc-places.apps.internal/mcp",
-			"http://apps.internal/mcp",
-			"http://evil-apps.internal/mcp",
-			"http://apps.internal.attacker.example/mcp",
-		} {
-			if err := ValidateRemoteMCPURL(t.Context(), rawURL, strict); err == nil {
-				t.Errorf("ValidateRemoteMCPURL(%q) = nil, want an error", rawURL)
-			}
-		}
-	})
+func TestCloudFoundryInternalURLPassesRemoteValidation(t *testing.T) {
+	if runMCPTestInSubprocess(t) {
+		return
+	}
+	useCloudFoundryPrivateDNS(t)
+	manager := &SessionManager{backend: &cloudFoundryBackend{}}
+	options := manager.ValidationOptions()
+	require.NoError(t, ValidateCatalogEntryManifest(t.Context(), cloudFoundryRemoteManifest("https://8.8.8.8/mcp"), true, options))
+	for _, rawURL := range []string{
+		"http://mcp-cdc-places.apps.internal:8080/mcp",
+		"http://mcp-nih-reporter.apps.internal:8080/mcp",
+		"http://mcp-diu-solutions.apps.internal:8001/mcp",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			require.NoError(t, ValidateRemoteMCPURL(t.Context(), rawURL, options.RemoteMCPURLValidationConfig))
+			require.NoError(t, ValidateCatalogEntryManifest(t.Context(), cloudFoundryRemoteManifest(rawURL), true, options))
+			got, err := manager.LaunchServer(t.Context(), ServerConfig{Runtime: otypes.RuntimeRemote, URL: rawURL, StartupTimeout: time.Second})
+			require.NoError(t, err)
+			require.Equal(t, rawURL, got.URL)
+		})
+	}
+	for _, rawURL := range []string{
+		"http://mcp-cdc-places.apps.internal:8001/mcp",
+		"http://mcp-diu-solutions.apps.internal:8002/mcp",
+		"http://mcp-cdc-places.apps.internal/mcp",
+		"http://apps.internal:8080/mcp",
+		"http://evil-apps.internal:8080/mcp",
+		"http://mcp-diu-solutions.apps.internal.attacker.example:8001/mcp",
+		"http://mcp-diu-solutions-apps.internal:8001/mcp",
+		"http://10.0.0.5:8080/mcp",
+		"http://[fc00::1]:8080/mcp",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			err := ValidateCatalogEntryManifest(t.Context(), cloudFoundryRemoteManifest(rawURL), true, options)
+			require.ErrorContains(t, err, "private IP")
+			var validationError otypes.RuntimeValidationError
+			require.ErrorAs(t, err, &validationError)
+			require.Equal(t, "fixedURL", validationError.Field)
+			_, err = manager.LaunchServer(t.Context(), ServerConfig{Runtime: otypes.RuntimeRemote, URL: rawURL})
+			require.ErrorContains(t, err, "private IP")
+		})
+	}
+	require.ErrorContains(t, ValidateCatalogEntryManifest(t.Context(), cloudFoundryRemoteManifest(
+		"http://mcp-cdc-places.apps.internal:8080/mcp"), true, ValidationOptions{}), "private IP")
+}
 
-	t.Run("without the allow list the internal URL is rejected", func(t *testing.T) {
-		// Pins the regression this fixes: the same URL under the same operator
-		// policy, minus the backend's contribution, must fail.
-		noAllowList := strict
-		noAllowList.AllowedHosts = nil
+func cloudFoundryRemoteManifest(rawURL string) otypes.MCPServerCatalogEntryManifest {
+	return otypes.MCPServerCatalogEntryManifest{
+		Name:             "Internal MCP",
+		Description:      "Internal MCP",
+		ShortDescription: "Internal MCP",
+		Icon:             "icon",
+		Runtime:          otypes.RuntimeRemote,
+		RemoteConfig:     &otypes.RemoteCatalogConfig{FixedURL: rawURL},
+	}
+}
 
-		if err := ValidateRemoteMCPURL(t.Context(), "http://mcp-cdc-places.apps.internal:8080/mcp", noAllowList); err == nil {
-			t.Error("expected rejection without the backend allow list")
-		}
-	})
+func TestCloudFoundryAdmissionBlocksLocalAndMetadataAddresses(t *testing.T) {
+	options := (&SessionManager{backend: &cloudFoundryBackend{}}).ValidationOptions()
+	for _, rawURL := range []string{
+		"http://localhost:8080/mcp",
+		"http://service.localhost:8080/mcp",
+		"http://127.0.0.1:8080/mcp",
+		"http://[::1]:8080/mcp",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[fe80::1]/mcp",
+		"http://[fd00:ec2::254]/mcp",
+		"http://100.100.100.200/mcp",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			require.Error(t, ValidateCatalogEntryManifest(t.Context(), cloudFoundryRemoteManifest(rawURL), true, options))
+			require.Error(t, safehttp.ValidateURL(t.Context(), rawURL, options.RemoteMCPURLValidationConfig.SafeHTTPOptions()))
+		})
+	}
+	// The metadata classification belongs to link-local policy, independently
+	// of the private-IP flag, just as in the outbound transport.
+	config := options.RemoteMCPURLValidationConfig
+	config.AllowPrivateIPMCP = true
+	require.Error(t, ValidateRemoteMCPURL(t.Context(), "http://[fd00:ec2::254]/mcp", config))
+	require.ErrorContains(t, ValidateRemoteMCPURL(t.Context(), "http://100.100.100.200/mcp", config), "link-local")
+	config.AllowLinkLocalMCP = true
+	require.NoError(t, ValidateRemoteMCPURL(t.Context(), "http://100.100.100.200/mcp", config))
 }

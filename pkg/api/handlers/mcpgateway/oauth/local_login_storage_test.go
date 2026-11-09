@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +29,22 @@ func TestLocalLoginStorageFailure(t *testing.T) {
 			db, err := gatewaydb.New(services.DB.DB, services.DB.SQLDB, true)
 			require.NoError(t, err)
 			require.NoError(t, db.AutoMigrate())
+			storageErr := errors.New("temporary pending-state lookup failure")
+			var armed atomic.Bool
+			var queries atomic.Int64
+			failAt := int64(1)
+			if callback {
+				failAt = 2 // The debugger check performs the first lookup.
+			}
+			// Register callbacks before gateway workers start querying this DB.
+			// Arm injection only after the pending-state setup has completed.
+			require.NoError(t, services.DB.DB.Callback().Query().Before("gorm:query").Register("fail_pending_lookup", func(tx *gorm.DB) {
+				if armed.Load() && tx.Statement.Schema != nil && tx.Statement.Schema.Name == "MCPOAuthPendingState" {
+					if queries.Add(1) == failAt {
+						_ = tx.AddError(storageErr)
+					}
+				}
+			}))
 			gw := gatewayclient.New(t.Context(), db, nil, nil, nil, nil, nil, time.Hour, 10, 90, 90, 90, true)
 			t.Cleanup(func() { require.NoError(t, gw.Close()) })
 			sm := newStateManager(gw, fixedTokenClient(http.DefaultClient))
@@ -43,20 +60,6 @@ func TestLocalLoginStorageFailure(t *testing.T) {
 				Endpoint:    oauth2.Endpoint{AuthURL: "https://provider.example/authorize"},
 			}, "https://provider.example/mcp", "verifier")
 			require.NoError(t, err)
-			storageErr := errors.New("temporary pending-state lookup failure")
-			queries := 0
-			failAt := 1
-			if callback {
-				failAt = 2
-			} // The debugger check performs the first lookup.
-			require.NoError(t, services.DB.DB.Callback().Query().Before("gorm:query").Register("fail_pending_lookup", func(tx *gorm.DB) {
-				if tx.Statement.Schema != nil && tx.Statement.Schema.Name == "MCPOAuthPendingState" {
-					queries++
-					if queries == failAt {
-						_ = tx.AddError(storageErr)
-					}
-				}
-			}))
 			h := handler{oauthChecker: &MCPOAuthHandlerFactory{stateMgr: sm}}
 			fixture := newVMCPOAuthFixture(t)
 			req := fixture.request(t.Context())
@@ -64,6 +67,7 @@ func TestLocalLoginStorageFailure(t *testing.T) {
 			req.SetPathValue("state", state)
 			response := httptest.NewRecorder()
 			req.ResponseWriter = response
+			armed.Store(true)
 			if callback {
 				err = h.oauthCallback(req)
 			} else {
@@ -72,8 +76,9 @@ func TestLocalLoginStorageFailure(t *testing.T) {
 			require.ErrorIs(t, err, storageErr)
 			var httpErr *types.ErrHTTP
 			require.False(t, errors.As(err, &httpErr), "storage failures must not become a consumed-attempt 400")
-			require.Equal(t, failAt, queries, "do not retry the lookup through the hosted callback path")
+			require.Equal(t, failAt, queries.Load(), "do not retry the lookup through the hosted callback path")
 			require.Empty(t, response.Header().Get("Location"))
+			armed.Store(false)
 			_, err = gw.GetMCPOAuthPendingState(t.Context(), state)
 			require.NoError(t, err, "the original attempt remains available after storage recovers")
 		})

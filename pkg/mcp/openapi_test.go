@@ -617,6 +617,10 @@ func (b *openAPILifecycleBackend) ensureServerDeployment(ctx context.Context, co
 	return config, nil
 }
 
+func (*openAPILifecycleBackend) remoteConfig(config RemoteMCPURLValidationConfig) (RemoteMCPURLValidationConfig, []string) {
+	return config, nil
+}
+
 func (b *openAPILifecycleBackend) deployServer(_ context.Context, config ServerConfig) error {
 	b.configured = config
 	return nil

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/obot-platform/obot/pkg/safehttp"
 	v1 "github.com/obot-platform/obot/pkg/storage/apis/obot.obot.ai/v1"
 	storagescheme "github.com/obot-platform/obot/pkg/storage/scheme"
 	"github.com/obot-platform/obot/pkg/system"
@@ -92,6 +93,9 @@ func TestHTTPClientForServer(t *testing.T) {
 	}
 
 	t.Run("Kubernetes service URL dial retries", func(t *testing.T) {
+		if runMCPTestInSubprocess(t) {
+			return
+		}
 		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 		server.Close() // Refuse connections so retrying clients reach the request deadline.
 		serverURL, err := url.Parse(server.URL)
@@ -296,13 +300,19 @@ func TestOAuthClientForServerUsesBackendAllowListWithoutConfiguredHeaders(t *tes
 }
 
 func TestOAuthServerAllowListIsLimitedToConfiguredBackendServer(t *testing.T) {
-	backendAllowedHosts := []string{"*.apps.internal:8080"}
+	_, backendAllowedHosts := (&cloudFoundryBackend{}).remoteConfig(RemoteMCPURLValidationConfig{})
 
 	require.Equal(t,
 		[]string{"mcp-cdc-places.apps.internal:8080"},
 		oauthServerAllowList("http://mcp-cdc-places.apps.internal:8080/mcp", backendAllowedHosts),
 	)
+	require.Equal(t,
+		[]string{"mcp-diu-solutions.apps.internal:8001"},
+		oauthServerAllowList("http://mcp-diu-solutions.apps.internal:8001/mcp", backendAllowedHosts),
+	)
 	for _, rawURL := range []string{
+		"http://mcp-cdc-places.apps.internal:8001/mcp",
+		"http://mcp-diu-solutions.apps.internal:8002/mcp",
 		"http://mcp-cdc-places.apps.internal/mcp",
 		"http://10.255.232.69:8080/mcp",
 		"http://apps.internal:8080/mcp",
@@ -313,4 +323,166 @@ func TestOAuthServerAllowListIsLimitedToConfiguredBackendServer(t *testing.T) {
 			require.Empty(t, oauthServerAllowList(rawURL, backendAllowedHosts))
 		})
 	}
+}
+
+func TestValidationOptionsPreservesGlobalPolicyAndBackendHosts(t *testing.T) {
+	tests := []struct {
+		name    string
+		backend backend
+	}{
+		{
+			name:    "Cloud Foundry",
+			backend: &cloudFoundryBackend{},
+		},
+		{
+			name: "Docker container",
+			backend: &dockerBackend{
+				containerEnv:        true,
+				httpListenPort:      8080,
+				hostBaseURLWithPort: "http://obot:8080",
+			},
+		},
+		{
+			name: "native Docker",
+			backend: &dockerBackend{
+				httpListenPort:      8080,
+				hostBaseURLWithPort: "http://host.docker.internal:8080",
+			},
+		},
+		{
+			name: "Kubernetes",
+			backend: &kubernetesBackend{
+				httpListenPort:   8080,
+				serviceFQDN:      "obot.default.svc.cluster.local",
+				mcpNamespace:     "obot-mcp",
+				mcpClusterDomain: "cluster.local",
+			},
+		},
+		{
+			name: "no backend",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for flags := range 8 {
+				global := RemoteMCPURLValidationConfig{
+					AllowLocalhostMCP: flags&1 != 0,
+					AllowPrivateIPMCP: flags&2 != 0,
+					AllowLinkLocalMCP: flags&4 != 0,
+				}
+				manager := &SessionManager{backend: tt.backend, remoteURLValidationConfig: global, devMode: flags&1 != 0}
+				want := global
+				if tt.backend != nil {
+					_, want.AllowedHosts = tt.backend.remoteConfig(global)
+				}
+				options := manager.ValidationOptions()
+				require.Equal(t, want, options.RemoteMCPURLValidationConfig)
+				require.Equal(t, manager.devMode, options.DevMode)
+				require.Equal(t, global, manager.remoteURLValidationConfig, "startup policy must not mutate")
+			}
+		})
+	}
+}
+
+func TestValidationOptionsDoesNotRelaxDockerAdmission(t *testing.T) {
+	for _, containerEnv := range []bool{false, true} {
+		manager := &SessionManager{backend: &dockerBackend{
+			containerEnv:        containerEnv,
+			httpListenPort:      8080,
+			hostBaseURLWithPort: "http://obot:8080",
+		}}
+		policy, _ := manager.RemoteConfigForBackend()
+		require.Equal(t, containerEnv, policy.AllowPrivateIPMCP)
+		require.Equal(t, !containerEnv, policy.AllowLocalhostMCP)
+		admission := manager.ValidationOptions().RemoteMCPURLValidationConfig
+		require.Error(t, ValidateRemoteMCPURL(t.Context(), "http://10.0.0.5:8001/mcp", admission))
+		require.Error(t, ValidateRemoteMCPURL(t.Context(), "http://localhost:8001/mcp", admission))
+		require.NoError(t, ValidateRemoteMCPURL(t.Context(), "http://localhost:8080/mcp", admission))
+	}
+}
+
+func TestValidationOptionsRetainsKubernetesAdmissionScope(t *testing.T) {
+	if runMCPTestInSubprocess(t) {
+		return
+	}
+	useCloudFoundryPrivateDNS(t)
+	manager := &SessionManager{backend: &kubernetesBackend{
+		httpListenPort:   8080,
+		serviceFQDN:      "obot.default.svc.cluster.local",
+		mcpNamespace:     "obot-mcp",
+		mcpClusterDomain: "cluster.local",
+	}}
+	policy := manager.ValidationOptions().RemoteMCPURLValidationConfig
+	require.NoError(t, ValidateRemoteMCPURL(t.Context(), "http://server.obot-mcp.svc.cluster.local:8080/mcp", policy))
+	require.ErrorContains(t, ValidateRemoteMCPURL(t.Context(), "http://server.other.svc.cluster.local:8080/mcp", policy), "private IP")
+	require.ErrorContains(t, ValidateRemoteMCPURL(t.Context(), "http://mcp-diu-solutions.apps.internal:8001/mcp", policy), "private IP")
+	require.Error(t, ValidateRemoteMCPURL(t.Context(), "http://10.0.0.5:8080/mcp", policy))
+}
+
+// An in-process proxy observes requests only after the real safe transport has
+// checked the controlled private DNS result. No private backend is contacted.
+func TestCloudFoundryHTTPAndOAuthExceptionsAreScoped(t *testing.T) {
+	if runMCPTestInSubprocess(t) {
+		return
+	}
+	useCloudFoundryPrivateDNS(t)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("Authorization") != "" {
+			t.Error("OAuth forwarded configured MCP authorization")
+		}
+		if req.URL.Path == "/redirect" {
+			http.Redirect(w, req, "http://mcp-cdc-places.apps.internal:8080/oauth/token", http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer proxy.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	manager := &SessionManager{backend: &cloudFoundryBackend{}}
+	const diuURL = "http://mcp-diu-solutions.apps.internal:8001/mcp"
+	server := ServerConfig{URL: diuURL, Headers: []string{"Authorization=Bearer test-only"}}
+	// Ordinary MCP HTTP uses the full port-scoped backend allowlist.
+	client, err := manager.HTTPClientForServer(ServerConfig{URL: diuURL}, HTTPClientOptions{Timeout: time.Second})
+	require.NoError(t, err)
+	assertCloudFoundryHTTPStatus(t, client, diuURL)
+	assertCloudFoundryHTTPStatus(t, client, "http://mcp-cdc-places.apps.internal:8080/mcp")
+	assertCloudFoundryHTTPBlocked(t, client, "http://mcp-cdc-places.apps.internal:8001/mcp")
+	assertCloudFoundryHTTPBlocked(t, client, "http://mcp-diu-solutions.apps.internal:8002/mcp")
+	assertCloudFoundryHTTPBlocked(t, client, "http://10.0.0.5:8080/mcp")
+	assertCloudFoundryHTTPBlocked(t, client, "http://127.0.0.1:8080/mcp")
+	assertCloudFoundryHTTPBlocked(t, client, "http://169.254.169.254/latest/meta-data/")
+	// OAuth discovery/token URLs cannot borrow a different backend exception.
+	oauthClient, err := manager.OAuthClientForServer(server)
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Second, oauthClient.Timeout)
+	assertCloudFoundryHTTPStatus(t, oauthClient, diuURL)
+	assertCloudFoundryHTTPBlocked(t, oauthClient, "http://mcp-diu-solutions.apps.internal:8001/redirect")
+	assertCloudFoundryHTTPBlocked(t, oauthClient, "http://mcp-cdc-places.apps.internal:8080/oauth/token")
+	assertCloudFoundryHTTPBlocked(t, oauthClient, "http://mcp-diu-solutions.apps.internal:8080/oauth/token")
+	assertCloudFoundryHTTPBlocked(t, oauthClient, "http://100.100.100.200/latest/meta-data/")
+	// Generic fetchers (catalog/OpenAPI/client metadata) do not receive exceptions.
+	options := manager.ValidationOptions().RemoteMCPURLValidationConfig.SafeHTTPOptions()
+	require.Empty(t, options.AllowList)
+	assertCloudFoundryHTTPBlocked(t, safehttp.NewClient(options), diuURL)
+	require.Empty(t, openAPINetworkOptions(manager.ValidationOptions().RemoteMCPURLValidationConfig).AllowList)
+}
+
+func assertCloudFoundryHTTPStatus(t *testing.T, client *http.Client, rawURL string) {
+	t.Helper()
+	response, err := client.Get(rawURL)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusNoContent, response.StatusCode)
+}
+
+func assertCloudFoundryHTTPBlocked(t *testing.T, client *http.Client, rawURL string) {
+	t.Helper()
+	response, err := client.Get(rawURL)
+	if response != nil {
+		defer response.Body.Close()
+	}
+	var blocked *safehttp.BlockedAddressError
+	require.ErrorAs(t, err, &blocked)
 }

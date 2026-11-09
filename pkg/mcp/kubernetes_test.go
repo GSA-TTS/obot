@@ -1068,15 +1068,17 @@ func TestUpdatedMCPPodName_SucceededPodFailsImmediately(t *testing.T) {
 			}
 
 			watcher := watch.NewFake()
-			go func() {
-				watcher.Add(deployment.DeepCopy())
-				watcher.Stop()
-			}()
-
 			client := &fakeWithWatch{
 				Client:  fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment, pod).Build(),
 				watcher: watcher,
 			}
+			// Fake-client initialization mutates resource versions. Snapshot only
+			// afterward, before the watcher goroutine can read the Deployment.
+			watchedDeployment := deployment.DeepCopy()
+			go func() {
+				watcher.Add(watchedDeployment)
+				watcher.Stop()
+			}()
 
 			k := &kubernetesBackend{
 				client:       client,
