@@ -1,4 +1,5 @@
 import type { DefaultModelAlias, MCPCatalogServer, Model, Version } from '$lib/services';
+import { MCP_MESSAGE_LIMITS } from './message-limits';
 import {
 	MCPTesterSession,
 	normalizeTesterSection,
@@ -344,6 +345,75 @@ describe('testerChatAvailability', () => {
 });
 
 describe('MCPTesterSession', () => {
+	it('rejects an oversized initialize result without overwriting the limit error', async () => {
+		const fetcher = readyFetch({}, (request) => {
+			if (request.method !== 'initialize') return;
+			return Response.json({
+				jsonrpc: '2.0',
+				id: request.id,
+				result: {
+					protocolVersion: request.params?.protocolVersion,
+					capabilities: {},
+					serverInfo: { name: 'test', version: '1' },
+					_meta: { values: Array(1001).fill(null) }
+				}
+			});
+		});
+		const session = new MCPTesterSession(server, { name: 'tester', version: 'test' }, fetcher);
+		await session.initialize();
+		expect(session.status).toBe('error');
+		expect(session.errorDetails).toMatchObject({ code: 'MCP_MESSAGE_LIMIT_EXCEEDED' });
+		expect(session.log.entries.some((entry) => entry.direction === 'incoming')).toBe(false);
+		session.close();
+	});
+
+	it.each(['json', 'sse'])(
+		'makes a rejected %s message visible and supports explicit retry',
+		async (format) => {
+			let oversized = true;
+			const fetcher = readyFetch({ tools: {} }, (request) => {
+				if (request.method !== 'tools/call') return;
+				const message = {
+					jsonrpc: '2.0',
+					id: request.id,
+					result: {
+						content: Array(oversized ? MCP_MESSAGE_LIMITS.containerEntries + 1 : 1).fill({
+							type: 'text',
+							text: 'ok'
+						})
+					}
+				};
+				return format === 'sse'
+					? new Response(`data: ${JSON.stringify(message)}\n\n`, {
+							headers: { 'Content-Type': 'text/event-stream' }
+						})
+					: Response.json(message);
+			});
+			const session = new MCPTesterSession(server, { name: 'tester', version: 'test' }, fetcher);
+			await session.initialize();
+			const originalClient = session.client;
+			const result = await session.callTool('lookup', {});
+			expect(result.status).toBe('transport-error');
+			expect(result.message).toContain('structure limits');
+			expect(session.status).toBe('error');
+			expect(session.error).toContain('structure limits');
+			expect(session.activeWorkflow).toBeUndefined();
+			expect(session.errorDetails).toMatchObject({ code: 'MCP_MESSAGE_LIMIT_EXCEEDED' });
+			expect(
+				session.log.entries.some(
+					(entry) => entry.kind === 'response' && entry.method === 'tools/call'
+				)
+			).toBe(false);
+			oversized = false;
+			await session.initialize(true);
+			expect(session.client).not.toBe(originalClient);
+			expect(session.status).toBe('ready');
+			expect(session.error).toBeUndefined();
+			expect((await session.callTool('lookup', {})).status).toBe('success');
+			session.close();
+		}
+	);
+
 	it('defaults missing and invalid tab values to tools', () => {
 		expect(normalizeTesterSection(undefined)).toBe('tools');
 		expect(normalizeTesterSection('invalid')).toBe('tools');

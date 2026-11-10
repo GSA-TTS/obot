@@ -967,6 +967,7 @@
 	"mcps_tester_not_ready": "MCP テスターの準備ができていません",
 	"mcps_tester_not_set": "未設定",
 	"mcps_tester_not_supported": "サポートされていません",
+	"mcps_tester_message_limit_exceeded": "サーバーがテスターの構造制限を超える MCP メッセージを返したため、接続を閉じました。応答のサイズまたは複雑さを減らしてから再試行してください。",
 	"mcps_tester_op_cancelled_by_user": "ユーザーによってキャンセルされました",
 	"mcps_tester_op_denied": "この MCP 操作へのアクセスは拒否されました",
 	"mcps_tester_op_repeated_cursor": "サーバーがページネーションカーソル {cursor} を繰り返しました",

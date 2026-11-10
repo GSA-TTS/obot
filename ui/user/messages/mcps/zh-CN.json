@@ -967,6 +967,7 @@
 	"mcps_tester_not_ready": "MCP 测试器尚未就绪",
 	"mcps_tester_not_set": "未设置",
 	"mcps_tester_not_supported": "不支持",
+	"mcps_tester_message_limit_exceeded": "服务器返回的 MCP 消息超出了测试器的结构限制，连接已关闭。请减小响应大小或复杂度后重试。",
 	"mcps_tester_op_cancelled_by_user": "已被用户取消",
 	"mcps_tester_op_denied": "对此 MCP 操作的访问被拒绝",
 	"mcps_tester_op_repeated_cursor": "服务器重复返回了分页游标 {cursor}",
