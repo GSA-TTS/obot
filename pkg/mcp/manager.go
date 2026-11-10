@@ -267,10 +267,11 @@ func (sm *SessionManager) RemoteMCPURLValidationConfig() RemoteMCPURLValidationC
 	return config
 }
 
-// ValidationOptions returns the startup destination validation settings.
+// ValidationOptions returns the startup destination validation settings, including
+// backend host exceptions but not the backend's relaxed address-range flags.
 func (sm *SessionManager) ValidationOptions() ValidationOptions {
 	return ValidationOptions{
-		RemoteMCPURLValidationConfig: sm.remoteURLValidationConfig,
+		RemoteMCPURLValidationConfig: sm.RemoteMCPURLValidationConfig(),
 		DevMode:                      sm.devMode,
 	}
 }
@@ -539,7 +540,7 @@ func ValidateRemoteMCPURL(ctx context.Context, rawURL string, config RemoteMCPUR
 		if !config.AllowPrivateIPMCP && safehttp.IsPrivate(ip) {
 			return fmt.Errorf("MCP server URL must not resolve to a private IP address: %s", rawURL)
 		}
-		if !config.AllowLinkLocalMCP && safehttp.IsLinkLocal(ip) {
+		if !config.AllowLinkLocalMCP && (safehttp.IsLinkLocal(ip) || safehttp.IsCloudMetadata(ip)) {
 			return fmt.Errorf("MCP server URL must not resolve to a link-local address: %s", rawURL)
 		}
 	}

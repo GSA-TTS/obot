@@ -354,6 +354,11 @@ const sidebars = {
 				},
 				{
 					"type": "doc",
+					"id": "operations/cloudgov-mcp-admission",
+					"label": "cloud.gov MCP admission"
+				},
+				{
+					"type": "doc",
 					"id": "operations/troubleshooting",
 					"label": "Troubleshooting"
 				},

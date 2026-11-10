@@ -18,6 +18,9 @@ import (
 const (
 	cfInternalDomain  = "apps.internal"
 	cfInternalMCPPort = "8080"
+	// DIU uses a different verified listener port. Keep this exception exact;
+	// other apps.internal services must not inherit access on port 8001.
+	cfDIUMCPHostPort = "mcp-diu-solutions.apps.internal:8001"
 )
 
 // cloudFoundryBackend runs Obot as a Cloud Foundry application without a
@@ -126,7 +129,9 @@ func (c *cloudFoundryBackend) transformObotHostname(url string) string {
 }
 
 // remoteConfig keeps the operator's address-range policy untouched and adds the
-// Cloud Foundry internal domain and MCP listener port to the allow list.
+// Cloud Foundry internal domain on the standard MCP port, plus the exact DIU
+// listener, to the allow list. New nonstandard listeners require reviewed entries,
+// not a wildcard port or a globally relaxed address-range policy.
 //
 // MCP servers that this backend cannot deploy (containerized, uvx, npx) are
 // instead deployed as their own Cloud Foundry apps with a route on
@@ -154,5 +159,5 @@ func (c *cloudFoundryBackend) transformObotHostname(url string) string {
 // one does not need private-IP blocking relaxed wholesale, because every host
 // it legitimately reaches is nameable.
 func (c *cloudFoundryBackend) remoteConfig(globalConfig RemoteMCPURLValidationConfig) (RemoteMCPURLValidationConfig, []string) {
-	return globalConfig, []string{"*." + cfInternalDomain + ":" + cfInternalMCPPort}
+	return globalConfig, []string{"*." + cfInternalDomain + ":" + cfInternalMCPPort, cfDIUMCPHostPort}
 }
