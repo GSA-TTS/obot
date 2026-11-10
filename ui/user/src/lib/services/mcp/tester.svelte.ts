@@ -1,6 +1,7 @@
 import { m } from '$lib/i18n';
 import type { DefaultModelAlias, MCPCatalogServer, Model, Version } from '$lib/services/user/types';
 import { LoggingTransport } from './logging-transport';
+import { MCPMessageLimitError } from './message-limits';
 import { TesterClient, type RejectedTesterTool } from './tester-client';
 import { testerErrorDetails } from './tester-errors';
 import { MCPTesterLog } from './tester-log.svelte';
@@ -427,6 +428,12 @@ export class MCPTesterSession {
 	#createConnection(): { client: TesterClient; transport: LoggingTransport } {
 		const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
 		const client = new TesterClient(this.#clientInfo, { capabilities: {} });
+		client.onerror = (error) => {
+			if (!(error instanceof MCPMessageLimitError) || this.isClosed()) return;
+			this.status = 'error';
+			this.error = error.message;
+			this.errorDetails = testerErrorDetails(error);
+		};
 		// The endpoint is immutable connection configuration, not reactive UI state.
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const endpoint = new URL(`/mcp-connect/${encodeURIComponent(this.server.id)}`, origin);
@@ -471,15 +478,16 @@ export class MCPTesterSession {
 			}
 			this.#connectionAttempted = true;
 			await this.client.connect(this.transport);
-			if (!this.isClosed()) {
+			if (!this.isClosed() && !this.transport.failure) {
 				this.status = 'ready';
 			}
 		} catch (error) {
 			if (this.isClosed()) return;
-			this.error = error instanceof Error ? error.message : String(error);
-			this.errorDetails = testerErrorDetails(error);
-			if (error instanceof StreamableHTTPError) {
-				switch (error.code) {
+			const failure = this.transport.failure ?? error;
+			this.error = failure instanceof Error ? failure.message : String(failure);
+			this.errorDetails = testerErrorDetails(failure);
+			if (failure instanceof StreamableHTTPError) {
+				switch (failure.code) {
 					case 401:
 						this.status = 'reauthentication-required';
 						return;
@@ -612,7 +620,10 @@ export class MCPTesterSession {
 				cache.loaded = false;
 				this.inspectors.tools = {};
 			}
-			const classified = classifyOperationError(error, workflow.abort.signal);
+			const classified = classifyOperationError(
+				this.transport.failure ?? error,
+				workflow.abort.signal
+			);
 			cache.error = classified.message;
 			cache.errorDetails = classified.details;
 			cache.errorStatus = classified.status;
@@ -637,7 +648,10 @@ export class MCPTesterSession {
 					: 'success';
 			return { status, durationMs: performance.now() - started, value };
 		} catch (error) {
-			const classified = classifyOperationError(error, workflow.abort.signal);
+			const classified = classifyOperationError(
+				this.transport.failure ?? error,
+				workflow.abort.signal
+			);
 			if (classified.status === 'denied') this.status = 'access-denied';
 			return { ...classified, durationMs: performance.now() - started };
 		} finally {
@@ -672,7 +686,7 @@ export class MCPTesterSession {
 			if (error instanceof NoValidTesterToolsError && !signal.aborted) {
 				onRejectedTools?.(error.rejectedTools);
 			}
-			const classified = classifyOperationError(error, signal);
+			const classified = classifyOperationError(this.transport.failure ?? error, signal);
 			if (classified.status === 'denied') this.status = 'access-denied';
 			throw new Error(classified.message, { cause: error });
 		}
@@ -695,7 +709,7 @@ export class MCPTesterSession {
 			};
 		} catch (error) {
 			return {
-				...classifyOperationError(error, signal),
+				...classifyOperationError(this.transport.failure ?? error, signal),
 				durationMs: performance.now() - started
 			};
 		}

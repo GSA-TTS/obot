@@ -967,6 +967,7 @@
 	"mcps_tester_not_ready": "MCP 테스터가 준비되지 않았습니다",
 	"mcps_tester_not_set": "설정 안 됨",
 	"mcps_tester_not_supported": "지원되지 않음",
+	"mcps_tester_message_limit_exceeded": "서버가 테스터의 구조 제한을 초과하는 MCP 메시지를 반환하여 연결을 닫았습니다. 응답 크기나 복잡성을 줄인 후 다시 시도하세요.",
 	"mcps_tester_op_cancelled_by_user": "사용자가 취소함",
 	"mcps_tester_op_denied": "이 MCP 작업에 대한 액세스가 거부되었습니다",
 	"mcps_tester_op_repeated_cursor": "서버가 페이지 매김 커서 {cursor}을(를) 반복했습니다",

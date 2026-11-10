@@ -967,6 +967,7 @@
 	"mcps_tester_not_ready": "The MCP tester is not ready",
 	"mcps_tester_not_set": "Not set",
 	"mcps_tester_not_supported": "Not supported",
+	"mcps_tester_message_limit_exceeded": "The server returned an MCP message that exceeds the tester's structure limits. The connection was closed. Retry after reducing the response size or complexity.",
 	"mcps_tester_op_cancelled_by_user": "Cancelled by user",
 	"mcps_tester_op_denied": "Access to this MCP operation was denied",
 	"mcps_tester_op_repeated_cursor": "server repeated pagination cursor {cursor}",
