@@ -15,7 +15,7 @@
  * 3. **New sections** — Add a section header, place it in alphabetical order among other sections,
  *    and keep all types for that domain inside it.
  */
-import type { MCPCatalogEntryServerManifest, MCPConfig } from '../admin/types';
+import type { MCPCatalogEntryServerManifest, MCPConfig, ObotHeader } from '../admin/types';
 
 // Access control rules
 
@@ -401,6 +401,7 @@ export type ClaudeRuntime = {
 	image: string;
 	workerImage: string;
 	allowAllEgress?: boolean;
+	llmProxy?: boolean;
 	egressHosts: string[];
 	worker: {
 		workerReplicas: number;
@@ -911,6 +912,7 @@ export interface MCPServer {
 	description?: string;
 	shortDescription?: string;
 	icon?: string;
+	injectObotHeaders?: ObotHeader[];
 	name?: string;
 	config?: MCPConfig[];
 	toolPreview?: MCPServerTool[];
@@ -1034,7 +1036,6 @@ export interface OrgUser {
 	created: string;
 	username: string;
 	email: string;
-	explicitRole: boolean;
 	role: number;
 	effectiveRole: number;
 	groups: string[];
@@ -1054,7 +1055,7 @@ export interface OrgUser {
 	managementSource?: OrgUserManagementSource;
 }
 export type OrgUserStatus = 'active' | 'disabled' | 'deleted';
-export type OrgUserDisabledReason = 'scim_inactive' | 'scim_unprovisioned';
+export type OrgUserDisabledReason = 'scim_inactive' | 'scim_unprovisioned' | 'scim_deleted';
 export type OrgUserManagementSource = 'obot' | 'scim';
 export interface OrgGroup {
 	id: string;

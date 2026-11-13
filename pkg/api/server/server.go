@@ -64,13 +64,13 @@ type Server struct {
 	rateLimiter             *ratelimiter.RateLimiter
 	baseURL                 string
 	mcpOAuthScope           string
-	registryNoAuth          bool
 	providerEntitlementGate *license.ProviderEntitlementGate
 	// devUI is set when the UI is served by the Vite dev server (dev mode).
 	devUI bool
 
 	mux         *http.ServeMux
 	otelHandler http.Handler
+	middleware  []func(api.HandlerFunc) api.HandlerFunc
 	// scimHandler serves the SCIM endpoint, which HandleSCIM sets.
 	scimHandler http.Handler
 }
@@ -86,7 +86,14 @@ type responseWriter struct {
 	auditLogger audit.Logger
 }
 
-func NewServer(storageClient storage.Client, gatewayClient *gclient.Client, localK8sClient kclient.Client, obotNamespace string, authn *authn.Authenticator, authz *authz.Authorizer, proxyManager *proxy.Manager, auditLogger audit.Logger, rateLimiter *ratelimiter.RateLimiter, baseURL string, oauthScopesSupported []string, registryNoAuth bool, licenseProvider *license.Provider) *Server {
+// tracingResponseWriter retains the writer below OTel's error-discarding Flush hook.
+type tracingResponseWriter struct {
+	http.ResponseWriter
+	original    http.ResponseWriter
+	wroteHeader bool
+}
+
+func NewServer(storageClient storage.Client, gatewayClient *gclient.Client, localK8sClient kclient.Client, obotNamespace string, authn *authn.Authenticator, authz *authz.Authorizer, proxyManager *proxy.Manager, auditLogger audit.Logger, rateLimiter *ratelimiter.RateLimiter, baseURL string, oauthScopesSupported []string, licenseProvider *license.Provider) *Server {
 	var scope string
 	if len(oauthScopesSupported) > 0 {
 		scope = fmt.Sprintf(", scope=\"%s\"", strings.Join(oauthScopesSupported, " "))
@@ -103,7 +110,6 @@ func NewServer(storageClient storage.Client, gatewayClient *gclient.Client, loca
 		mcpOAuthScope:           scope,
 		auditLogger:             auditLogger,
 		rateLimiter:             rateLimiter,
-		registryNoAuth:          registryNoAuth,
 		mux:                     http.NewServeMux(),
 		providerEntitlementGate: license.NewProviderEntitlementGate(licenseProvider, storageClient),
 	}
@@ -129,7 +135,18 @@ func authenticationError[T error](err error) (T, bool) {
 }
 
 func (s *Server) HandleFunc(pattern string, f api.HandlerFunc) {
+	for _, middleware := range slices.Backward(s.middleware) {
+		f = middleware(f)
+	}
 	s.mux.Handle(pattern, s.Wrap(f))
+}
+
+// WithMiddleware shares the server's mux and services, applying middleware only to
+// routes registered through the returned server. Parent middleware runs first.
+func (s *Server) WithMiddleware(middleware ...func(api.HandlerFunc) api.HandlerFunc) *Server {
+	scoped := *s
+	scoped.middleware = append(slices.Clone(s.middleware), middleware...)
+	return &scoped
 }
 
 // HandleSCIM serves the SCIM endpoint with f. SCIM requests bypass the mux, which would answer the base URL without a
@@ -172,12 +189,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // traced traces the requests that h serves, other than health checks and static assets.
 func traced(h http.Handler) http.Handler {
-	return otelhttp.NewHandler(
-		h,
-		"obot/http",
-		otelhttp.WithFilter(func(r *http.Request) bool {
-			return r.URL.Path != "/api/healthz" && !isStaticAssetPath(r.URL.Path)
+	handler := otelhttp.NewHandler(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// OTel's httpsnoop wrapper exposes the original writer through Unwrap.
+			original := w.(interface{ Unwrap() http.ResponseWriter }).Unwrap()
+			h.ServeHTTP(&tracingResponseWriter{ResponseWriter: w, original: original}, r)
 		}),
+		"obot/http",
 		otelhttp.WithSpanNameFormatter(func(operation string, r *http.Request) string {
 			if r.Pattern == "" {
 				return operation
@@ -185,6 +203,60 @@ func traced(h http.Handler) http.Handler {
 			return r.Pattern
 		}),
 	)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Filter before adding the tracing writer so its Unwrap always refers to OTel.
+		if r.URL.Path == "/api/healthz" || isStaticAssetPath(r.URL.Path) {
+			h.ServeHTTP(w, r)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
+}
+
+func (w *tracingResponseWriter) Flush() { _ = w.FlushError() }
+
+func (w *tracingResponseWriter) WriteHeader(status int) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.ResponseWriter.WriteHeader(status)
+	}
+}
+
+func (w *tracingResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *tracingResponseWriter) ReadFrom(r io.Reader) (int64, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	// OTel does not instrument ReaderFrom; copy through Write and hide this method
+	// from io.Copy to avoid recursively calling ReadFrom.
+	return io.Copy(struct{ io.Writer }{w}, r)
+}
+
+func (w *tracingResponseWriter) FlushError() error {
+	// Commit through OTel for status accounting, then flush without its void hook.
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return http.NewResponseController(w.original).Flush()
+}
+
+func (w *tracingResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *tracingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
+
+func (w *tracingResponseWriter) Push(target string, opts *http.PushOptions) error {
+	if p, ok := w.ResponseWriter.(http.Pusher); ok {
+		return p.Push(target, opts)
+	}
+	return http.ErrNotSupported
 }
 
 func (s *Server) Wrap(f api.HandlerFunc) http.HandlerFunc {
@@ -350,8 +422,8 @@ func (s *Server) Wrap(f api.HandlerFunc) http.HandlerFunc {
 					})
 				}
 
-				// Only set WWW-Authenticate if not in no-auth mode
-				if strings.HasPrefix(req.URL.Path, "/v0.1") && !s.registryNoAuth {
+				// Challenge denied anonymous registry requests without reading settings again.
+				if !authenticated && authz.IsMCPRegistryRequest(req) {
 					rw.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="MCP Registry", resource_metadata="%s/.well-known/oauth-protected-resource/v0.1/servers"`, strings.TrimSuffix(s.baseURL, "/api")))
 				}
 
@@ -369,7 +441,7 @@ func (s *Server) Wrap(f api.HandlerFunc) http.HandlerFunc {
 				return
 			}
 
-			if strings.HasPrefix(req.URL.Path, "/api/") {
+			if strings.HasPrefix(req.URL.Path, "/api/") || authz.IsMCPRegistryRequest(req) {
 				rw.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0")
 				rw.Header().Set("Pragma", "no-cache")
 				rw.Header().Set("Expires", "0")
@@ -493,9 +565,15 @@ func (w *headersResponseWriter) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (w *headersResponseWriter) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
+	_ = w.FlushError()
+}
+
+// FlushError preserves failures for ResponseController callers; http.Flusher cannot return them.
+func (w *headersResponseWriter) FlushError() error {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
 	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 func (w *headersResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
@@ -547,9 +625,12 @@ func (rw *responseWriter) WriteHeader(code int) {
 }
 
 func (rw *responseWriter) Flush() {
-	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	_ = rw.FlushError()
+}
+
+// FlushError keeps delivery failures visible through the API audit wrapper.
+func (rw *responseWriter) FlushError() error {
+	return http.NewResponseController(rw.ResponseWriter).Flush()
 }
 
 // Unwrap exposes the writer underneath to http.ResponseController. Without it a

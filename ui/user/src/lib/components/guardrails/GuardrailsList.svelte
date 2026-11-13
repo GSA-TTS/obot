@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import Confirm from '$lib/components/Confirm.svelte';
 	import Search from '$lib/components/Search.svelte';
@@ -22,12 +21,12 @@
 		type GuardrailProvider
 	} from '$lib/services/llm-gateway/guardrails';
 	import { profile } from '$lib/stores';
+	import { resolve, setUrlParamAndUpdateUrl } from '$lib/url';
 	import {
 		clearUrlParams,
 		getTableUrlParamsFilters,
 		getTableUrlParamsSort,
 		goto,
-		replaceState,
 		setFilterUrlParams,
 		setSortUrlParams
 	} from '$lib/url';
@@ -129,12 +128,7 @@
 	);
 
 	function updateQuery(value: string) {
-		if (value) {
-			page.url.searchParams.set('query', value);
-		} else {
-			page.url.searchParams.delete('query');
-		}
-		replaceState(page.url, { query: value });
+		setUrlParamAndUpdateUrl(page.url, 'query', value);
 	}
 
 	function clearFilters() {
@@ -154,11 +148,7 @@
 {/snippet}
 
 {#if loading}
-	<Skeleton
-		type="table"
-		count={5}
-		classes={{ header: 'h-14 rounded-none', body: 'rounded-none' }}
-	/>
+	<Skeleton type="table" count={5} classes={{ header: 'h-14' }} />
 {:else if guardrails.length === 0}
 	<div class="mt-12 flex w-md max-w-full flex-col items-center gap-4 self-center text-center">
 		<ShieldCheck class="text-muted-content size-24 opacity-25" />
@@ -170,11 +160,6 @@
 	</div>
 {:else}
 	<div class="flex flex-col gap-2">
-		<p class="text-muted-content flex items-start gap-2 text-sm">
-			<Info class="mt-0.5 size-4 shrink-0" />
-			<span>{@render pointer()}</span>
-		</p>
-
 		{#if deleteError}
 			<div class="notification-error flex items-center gap-2 p-3 text-sm">
 				<CircleAlert class="size-4 shrink-0" />
@@ -204,7 +189,7 @@
 			sortable={['name', 'typeLabel', 'categoryLabel']}
 			filterable={['typeLabel', 'categoryLabel']}
 			filters={urlFilters}
-			onFilter={setFilterUrlParams}
+			onFilter={(property, values) => setFilterUrlParams({ [property]: values })}
 			onClearAllFilters={clearFilters}
 			onSort={setSortUrlParams}
 			{initSort}
@@ -235,7 +220,12 @@
 						<span class="text-muted-content text-xs">{m.guardrails_used_by_none()}</span>
 					{/if}
 				{:else if property === 'statusLabel'}
-					<span class={twMerge('text-xs', row.error ? 'text-error' : 'text-success')}>
+					<span
+						class={twMerge(
+							'badge badge-xs badge-soft',
+							row.error ? 'badge-error' : 'badge-success'
+						)}
+					>
 						{row.statusLabel}
 					</span>
 				{:else if property === 'categoryLabel'}
@@ -262,6 +252,11 @@
 				{/if}
 			{/snippet}
 		</Table>
+
+		<p class="text-muted-content flex items-start gap-2 text-xs">
+			<Info class="mt-0.5 size-3 shrink-0" />
+			<span>{@render pointer()}</span>
+		</p>
 	</div>
 {/if}
 
