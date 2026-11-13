@@ -9,7 +9,7 @@ Deploying Obot to Google Kubernetes Engine follows the standard Helm workflow. A
 
 * GCP project
 * VPC Network
-* Google Cloud SQL instance running PostgreSQL 17+. Obot also uses a second database on the same server, `<db name>_llm_gateway`, for the LLM gateway. Give Obot's database user `CREATEDB`, create it first with `CREATE DATABASE <db name>_llm_gateway OWNER <db user>;`, or set `OBOT_SERVER_LLM_GATEWAY_POSTGRES_DSN`.
+* Google Cloud SQL instance running PostgreSQL 17+.
 * VPC Network Peering between your VPC Network and the Cloud SQL instance
 * (Optional) Google Cloud KMS key for encrypting sensitive information
 * (Optional) IAM role with necessary permissions if you're using Google Cloud KMS for encryption
@@ -116,10 +116,6 @@ config:
 
   # Enable authentication
   OBOT_SERVER_ENABLE_AUTHENTICATION: true
-
-  # Optionally Preseed admin and owner users
-  OBOT_SERVER_AUTH_ADMIN_EMAILS: "<comma separated list of admin emails>"
-  OBOT_SERVER_AUTH_OWNER_EMAILS: "<comma separated list of owner emails>"
 
 ```
 

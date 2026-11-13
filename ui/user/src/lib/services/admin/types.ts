@@ -281,6 +281,9 @@ export interface AuthProviderSCIM {
 	// While the provider is configured or staged without a SCIM connection, providing these
 	// parameters sets up directory synchronization, and leaving them empty sets up SCIM.
 	directoryParameters: string[];
+	// For a provider without directory parameters, such as Microsoft Entra, the parameter that sets
+	// up SCIM when it is "true". Omitting it sets up directory synchronization. Obot never stores it.
+	choiceParameter?: string;
 	// The parameter that holds the identity provider's issuer, such as the Okta Org URL.
 	issuerParameter: string;
 	// The issuer recorded when the provider's SCIM connection was created. SCIM bindings belong to
@@ -291,6 +294,7 @@ export interface AuthProviderSCIM {
 // A user of the built-in local auth provider. Passwords are never returned by the API.
 export interface LocalAuthUser {
 	id: string;
+	orgUserId?: string;
 	email: string;
 	created: string;
 	requirePasswordChange: boolean;
@@ -809,7 +813,20 @@ export type MCPConfig = Omit<
 	MCPCatalogEntryFieldManifest,
 	'file' | 'dynamicFile' | 'interpolated'
 > & { usage: MCPConfigUsage; userAllowed?: boolean };
+export const OBOT_HEADERS = {
+	apiKeyName: 'X-Obot-Api-Key-Name',
+	apiKeyId: 'X-Obot-Api-Key-Id',
+	userId: 'X-Obot-User-Id',
+	userName: 'X-Obot-User-Name',
+	userEmail: 'X-Obot-User-Email',
+	idpUserId: 'X-Obot-IDP-User-Id',
+	idpGroups: 'X-Obot-IDP-Groups'
+} as const;
+
+export type ObotHeader = (typeof OBOT_HEADERS)[keyof typeof OBOT_HEADERS];
+
 export interface MCPCatalogEntryServerManifest {
+	injectObotHeaders?: ObotHeader[];
 	entryKey?: string;
 	upgradeNote?: string;
 	minObotVersion?: string;
@@ -864,6 +881,7 @@ export type MCPCatalogEntryFormData = Omit<MCPCatalogEntryServerManifest, 'metad
 
 // New runtime-based form data structure
 export interface RuntimeFormData {
+	injectObotHeaders?: ObotHeader[];
 	// Common fields
 	name: string;
 	shortDescription?: string;
@@ -1101,6 +1119,10 @@ export interface ModelAccessPolicy extends Omit<ModelAccessPolicyManifest, 'id'>
 }
 
 // Model proxy
+
+export interface RegistrySettings {
+	anonymousAccessEnabled: boolean;
+}
 
 export interface ModelProxySettings {
 	enabled: boolean;
@@ -1484,9 +1506,25 @@ export interface MDMDevice {
 	hostname?: string;
 	id: number;
 	lastSeenAt?: string;
+	latestScan?: MDMDeviceLatestScan;
 	mdmConfigurationID: number;
 	os?: string;
 	osVersion?: string;
+}
+
+export interface MDMDeviceLatestScan {
+	id: number;
+	scannedAt: string;
+	hostname?: string;
+	username?: string;
+	os?: string;
+	arch?: string;
+	scannerVersion?: string;
+	submittedBy?: string;
+	mcpServerCount: number;
+	skillCount: number;
+	pluginCount: number;
+	clientCount: number;
 }
 
 // MDMAssetField is one property of the assets manifest's fields JSON
@@ -1707,7 +1745,10 @@ export interface SCIMSetupGroup {
 }
 
 export interface SCIMSetupWarning {
-	// 'duplicateName' and 'unreferencedNamesake' name groups whose name a pushed group cannot bind by.
+	// 'duplicateName' names referenced groups that share a name, of which only one can be pushed, and
+	// where groups bind by name, none can be bound. 'unreferencedNamesake' names unreferenced groups
+	// with the name of a referenced group, which keep a group pushed under that name from binding
+	// where groups bind by name.
 	type: 'everyoneGroup' | 'missingGroup' | 'duplicateName' | 'unreferencedNamesake';
 	message: string;
 	groupID: string;

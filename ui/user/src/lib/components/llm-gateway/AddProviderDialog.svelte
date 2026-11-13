@@ -13,10 +13,13 @@
 		CHAT_COMPLETIONS_ONLY_REQUESTS,
 		CUSTOM_PROVIDER_BASES,
 		PROVIDER_CATALOG,
+		authenticationFields,
 		catalogEntry,
 		setPath,
 		type ProviderCatalogEntry
 	} from '$lib/services/llm-gateway/providers';
+	import Toggle from '../Toggle.svelte';
+	import AuthenticationMethodSelector from './AuthenticationMethodSelector.svelte';
 	import { Blocks, ChevronLeft } from '@lucide/svelte';
 
 	interface Props {
@@ -30,10 +33,13 @@
 	let dialog = $state<ReturnType<typeof ResponsiveDialog>>();
 	let selected = $state<ProviderCatalogEntry | 'custom'>();
 	let search = $state('');
+	let authenticationMethod = $state('api-key');
 	let values = $state<Record<string, string>>({});
+	let deployments = $state('');
 	let baseURL = $state('');
 	let customName = $state('');
 	let customBase = $state('openai');
+	let azure = $derived(selected === 'custom' ? customBase === 'azure' : selected?.id === 'azure');
 	let keyless = $state(false);
 	// Whether a custom OpenAI-compatible server serves the Responses API as well as Chat
 	// Completions. Many self-hosted servers serve only Chat Completions.
@@ -41,6 +47,11 @@
 	let allowPrivate = $state(false);
 	let saving = $state(false);
 	let error = $state('');
+	let azureAccount = $state<Record<string, string>>({ subscription: '', group: '', account: '' });
+	let hasAzureAccount = $derived(Object.values(azureAccount).every((v) => v.trim()));
+	let accountComplete = $derived(
+		!Object.values(azureAccount).some((v) => v.trim()) || hasAzureAccount
+	);
 	// Opened for one provider, from its card, rather than to pick one.
 	let direct = $state(false);
 
@@ -56,7 +67,10 @@
 	}
 
 	function reset() {
+		authenticationMethod = 'api-key';
 		values = {};
+		deployments = '';
+		azureAccount = { subscription: '', group: '', account: '' };
 		baseURL = '';
 		customName = '';
 		customBase = 'openai';
@@ -81,13 +95,16 @@
 			? keyless
 				? []
 				: [{ path: 'value', label: m.models_providers_api_key(), sensitive: true, required: false }]
-			: (selected?.keyFields ?? [])
+			: selected
+				? authenticationFields(selected, authenticationMethod)
+				: []
 	);
 
 	let providerID = $derived(selected === 'custom' ? customName.trim() : (selected?.id ?? ''));
 
 	let valid = $derived(
-		!!providerID &&
+		(!(azure && authenticationMethod === 'credentials') || accountComplete) &&
+			!!providerID &&
 			(selected !== 'custom' ||
 				(/^[a-z0-9][a-z0-9_-]*$/.test(providerID) &&
 					!configured.includes(providerID) &&
@@ -133,10 +150,21 @@
 			if (hasKeyValues) {
 				const key: Record<string, unknown> = {
 					name: keyName(),
-					models: ['*'],
+					models:
+						azure && (deployments.trim() || !hasAzureAccount)
+							? deployments
+									.split(',')
+									.map((name) => name.trim())
+									.filter(Boolean)
+							: ['*'],
 					weight: 1,
 					enabled: true
 				};
+				if (azure && authenticationMethod === 'credentials') {
+					key.azure_subscription_id = azureAccount.subscription.trim();
+					key.azure_resource_group = azureAccount.group.trim();
+					key.azure_account_name = azureAccount.account.trim();
+				}
 				if (!fields.some((f) => f.path === 'value')) key.value = '';
 				for (const f of fields) {
 					const v = values[f.path]?.trim();
@@ -227,7 +255,7 @@
 		</div>
 	{:else}
 		<form
-			class="flex flex-col gap-4 pt-4"
+			class="flex flex-col gap-4 p-4 md:p-0"
 			onsubmit={(e) => {
 				e.preventDefault();
 				save();
@@ -293,6 +321,13 @@
 				{/if}
 			{/if}
 
+			{#if selected !== 'custom' && selected.authenticationMethods}
+				<AuthenticationMethodSelector
+					methods={selected.authenticationMethods}
+					bind:value={authenticationMethod}
+				/>
+			{/if}
+
 			{#each fields as field (field.path)}
 				<div class="flex flex-col gap-1">
 					<label for={`new-${field.path}`} class="text-sm font-light">
@@ -320,6 +355,41 @@
 				</div>
 			{/each}
 
+			{#if azure && authenticationMethod === 'credentials'}
+				{#each [{ key: 'subscription', label: m.models_providers_azure_subscription_id() }, { key: 'group', label: m.models_providers_azure_resource_group() }, { key: 'account', label: m.models_providers_azure_account_name() }] as field (field.key)}
+					<div class="flex flex-col gap-1">
+						<label for={`azure-${field.key}`} class="text-sm font-light">{field.label}</label>
+						<input
+							id={`azure-${field.key}`}
+							class="text-input-filled"
+							bind:value={azureAccount[field.key]}
+							aria-describedby="azure-resource-help"
+						/>
+					</div>
+				{/each}
+				<span id="azure-resource-help" class="text-muted-content text-xs"
+					>{m.models_providers_azure_resource_help()}</span
+				>
+			{/if}
+
+			{#if azure}
+				<div class="flex flex-col gap-1">
+					<label for="new-deployments" class="text-sm font-light"
+						>{m.models_providers_key_allowed_models()}</label
+					>
+					<input
+						id="new-deployments"
+						class="text-input-filled"
+						bind:value={deployments}
+						aria-describedby="new-deployments-help"
+					/>
+					<span id="new-deployments-help" class="text-muted-content text-xs"
+						>{hasAzureAccount && authenticationMethod === 'credentials'
+							? m.models_providers_azure_resource_help()
+							: m.models_providers_azure_deployments_help()}</span
+					>
+				</div>
+			{/if}
 			<div class="flex flex-col gap-1">
 				<label for="new-base-url" class="text-sm font-light">
 					{m.models_providers_base_url()}
@@ -336,20 +406,25 @@
 						: m.models_providers_base_url_default_placeholder()}
 				/>
 			</div>
-			<div class="flex flex-col gap-1">
-				<label class="flex items-center gap-2 text-sm">
-					<input
-						type="checkbox"
-						class="checkbox checkbox-sm"
-						bind:checked={allowPrivate}
-						aria-describedby="new-allow-private-help"
-					/>
-					{m.models_providers_allow_private_network()}
-				</label>
-				<span id="new-allow-private-help" class="text-muted-content text-xs">
+
+			<label
+				for="new-allow-private"
+				class="border-base-400 flex flex-col gap-1 rounded-md border p-3 md:col-span-2 cursor-pointer"
+			>
+				<Toggle
+					label={m.models_providers_allow_private_network()}
+					labelInline
+					id="new-allow-private"
+					checked={allowPrivate}
+					onChange={(v) => (allowPrivate = v)}
+					classes={{
+						label: 'flex justify-between items-center text-base-content text-sm'
+					}}
+				/>
+				<span class="text-muted-content text-xs pr-12">
 					{m.models_providers_allow_private_network_help()}
 				</span>
-			</div>
+			</label>
 
 			{#if error}
 				<div class="notification-error rounded-md p-2 text-sm">{error}</div>
