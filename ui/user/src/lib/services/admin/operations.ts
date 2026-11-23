@@ -30,7 +30,6 @@ import type {
 	MCPAllowedSecretBindingTarget,
 	MCPSubField,
 	Skill,
-	VMCP,
 	VMCPInstance
 } from '../user/types';
 import type {
@@ -41,6 +40,7 @@ import type {
 	MCPCatalogServerManifest,
 	ModelAccessPolicy,
 	ModelAccessPolicyManifest,
+	RegistrySettings,
 	ModelProxySettings,
 	ModelProxySettingsUpdateManifest,
 	ModelProxyUsage,
@@ -554,7 +554,10 @@ export async function revokePreviousSCIMToken(
 
 // Local auth provider users
 
-export async function listLocalAuthUsers(opts?: { fetch?: Fetcher }): Promise<LocalAuthUser[]> {
+export async function listLocalAuthUsers(opts?: {
+	fetch?: Fetcher;
+	signal?: AbortSignal;
+}): Promise<LocalAuthUser[]> {
 	const list = (await doGet('/local-auth/users', opts)) as ItemsResponse<LocalAuthUser>;
 	return list.items ?? [];
 }
@@ -1703,6 +1706,18 @@ export async function listModelProviders(opts?: { fetch?: Fetcher }): Promise<Mo
 	return response.items ?? [];
 }
 
+// Registry discovery
+export async function getRegistrySettings(opts?: RequestOptions): Promise<RegistrySettings> {
+	return (await doGet('/registry-settings', opts)) as RegistrySettings;
+}
+
+export async function updateRegistrySettings(
+	settings: RegistrySettings,
+	opts?: RequestOptions
+): Promise<RegistrySettings> {
+	return (await doPut('/registry-settings', settings, opts)) as RegistrySettings;
+}
+
 // Model proxy
 
 export async function getModelProxySettings(opts?: RequestOptions): Promise<ModelProxySettings> {
@@ -1775,14 +1790,6 @@ export async function cancelTempLogin() {
 			dontLogErrors: true
 		}
 	);
-}
-
-export async function listExplicitRoleEmails(opts?: { fetch?: Fetcher }) {
-	const response = (await doGet('/setup/explicit-role-emails', opts)) as {
-		owners: string[] | null;
-		admins: string[] | null;
-	};
-	return response;
 }
 
 // Skills
@@ -2348,6 +2355,19 @@ export async function listMDMDevices(
 	return response.items ?? [];
 }
 
+export async function listAllMDMDevices(opts?: { fetch?: Fetcher }): Promise<MDMDevice[]> {
+	const response = (await doGet('/mdm/devices', opts)) as { items: MDMDevice[] | null };
+	return response.items ?? [];
+}
+
+export async function deleteMDMDevice(
+	deviceID: string,
+	opts?: { deleteScans?: boolean }
+): Promise<void> {
+	const query = opts?.deleteScans ? '?deleteScans=true' : '';
+	await doDelete(`/mdm/devices/${encodeURIComponent(deviceID)}${query}`);
+}
+
 export async function getMDMConfiguration(
 	id: number | string,
 	opts?: { fetch?: Fetcher }
@@ -2465,11 +2485,6 @@ export async function downloadMDMConfig(
 }
 
 // vMCPs
-
-export async function listAllVMCPs(opts?: { fetch?: Fetcher }): Promise<VMCP[]> {
-	const response = (await doGet('/vmcps?all=true', opts)) as ItemsResponse<VMCP>;
-	return response.items ?? [];
-}
 
 export async function listAllVMCPInstances(opts?: {
 	fetch?: Fetcher;

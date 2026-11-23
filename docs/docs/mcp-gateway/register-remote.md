@@ -31,6 +31,10 @@ Remote MCP servers that conform to the MCP spec authentication schema will work 
 
 If Obot cannot directly reach a remote server, use an [MCP tunnel](./filters-tunnels.md#mcp-tunnels-create-an-mcp-tunnel) to route requests through a machine on the server's network. Keep the remote server's real HTTP or HTTPS URL and select the tunnel separately in **Advanced Configuration**.
 
+## Caller attribution headers
+
+Remote MCP servers support [caller attribution headers](./server-configuration.md#caller-attribution-headers). Use them to send selected information about the caller authenticated by Obot to the backend. See the shared configuration guide for setup, available headers, and limits.
+
 ## Localhost OAuth callbacks
 
 Some MCP servers require their OAuth clients to use a localhost callback. For these servers, enable **Localhost OAuth callback** in **Advanced Configuration** when adding or editing the remote server.

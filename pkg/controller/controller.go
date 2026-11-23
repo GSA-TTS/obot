@@ -191,6 +191,21 @@ func (c *Controller) PostStart(ctx context.Context, client kclient.Client) {
 	// notifications, and a peer that was not sending them leaves the cache up to a
 	// poll interval behind. Have every watch list again before acting on it.
 	c.services.StorageDB.Refresh()
+	// The engine starts independently; wait without blocking unrelated leader startup work.
+	go func() {
+		if err := c.services.BifrostEngine.Wait(ctx); err != nil {
+			slog.Warn("legacy provider import skipped because the LLM gateway did not start", "error", err)
+			return
+		}
+		allowPrivateNetwork := c.services.MCPSessionManager.RemoteMCPURLValidationConfig().AllowPrivateIPMCP
+		if err := c.services.BifrostEngine.ImportLegacyModelProviders(ctx, client, c.services.GatewayClient, allowPrivateNetwork); err != nil {
+			slog.Warn("legacy provider import failed; failed families will retry on the next leader startup", "error", err)
+		}
+		// Initial discovery may have run before import; refresh models for all successful families.
+		if err := llmengine.TriggerModelSync(ctx, client); err != nil {
+			slog.Warn("failed to trigger model discovery after legacy provider import", "error", err)
+		}
+	}()
 	if c.services.Substrate != nil {
 		handler := &agentinstance.Handler{Substrate: c.services.Substrate, Gateway: c.services.GatewayClient}
 		go handler.RunMaintenance(ctx, client)
@@ -689,12 +704,6 @@ func (c *Controller) ensureAuthProvidersAndModelProviders(ctx context.Context) e
 	}
 
 	storage := c.services.StorageClient
-	go c.services.BifrostEngine.RunStartupTasks(ctx, storage, c.services.GatewayClient,
-		func(ctx context.Context) (int64, error) {
-			return providerconfigurationchange.CurrentLLMGatewayRevision(ctx, storage)
-		},
-		func(ctx context.Context) (int64, error) {
-			return providerconfigurationchange.AdvanceLLMGatewayRevision(ctx, storage)
-		})
+	go c.services.BifrostEngine.RunStartupTasks(ctx, storage)
 	return nil
 }

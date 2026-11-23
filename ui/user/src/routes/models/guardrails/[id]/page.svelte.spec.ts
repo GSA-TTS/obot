@@ -1,6 +1,7 @@
 import { page as appPage } from '$app/state';
+import { Group } from '$lib/services';
 import { goto } from '$lib/url';
-import { preparePageData } from '../../../../tests/helpers/pageData';
+import { createMockProfile, preparePageData } from '../../../../tests/helpers/pageData';
 import { worker } from '../../../../tests/mocks/worker';
 import GuardrailPage from './+page.svelte';
 import { http, HttpResponse } from 'msw';
@@ -54,13 +55,13 @@ function mockProviders() {
 
 afterEach(() => {
 	delete (appPage.params as Record<string, string>).id;
-	appPage.url.searchParams.delete('type');
+	(appPage.url as URL).searchParams.delete('type');
 });
 
 describe('Guardrail editor', () => {
 	it('creates a guardrail from the provider fields, then enables testing', async () => {
 		mockProviders();
-		appPage.url.searchParams.set('type', 'presidio');
+		(appPage.url as URL).searchParams.set('type', 'presidio');
 		const created = vi.fn();
 		worker.use(
 			http.post('/api/llm-gateway/guardrails', async ({ request }) => {
@@ -75,6 +76,9 @@ describe('Guardrail editor', () => {
 		await expect
 			.element(page.getByLabelText('Name', { exact: true }))
 			.toHaveValue('Microsoft Presidio');
+		await expect
+			.element(page.getByRole('button', { name: 'Delete guardrail' }))
+			.not.toBeInTheDocument();
 		await expect.element(page.getByText('Save the guardrail to test it.')).toBeInTheDocument();
 		await expect.element(page.getByLabelText('Sample text')).toBeDisabled();
 
@@ -103,6 +107,9 @@ describe('Guardrail editor', () => {
 			})
 		);
 		await expect.element(page.getByLabelText('Sample text')).toBeEnabled();
+		await expect
+			.element(page.getByRole('button', { name: 'Delete guardrail' }))
+			.toBeInTheDocument();
 	});
 
 	it('keeps configured secrets when left blank and runs a test', async () => {
@@ -172,7 +179,7 @@ describe('Guardrail editor', () => {
 				HttpResponse.json({ items: [presidioWithChoices] })
 			)
 		);
-		appPage.url.searchParams.set('type', 'presidio');
+		(appPage.url as URL).searchParams.set('type', 'presidio');
 		const created = vi.fn();
 		worker.use(
 			http.post('/api/llm-gateway/guardrails', async ({ request }) => {
@@ -251,7 +258,7 @@ describe('Guardrail editor', () => {
 				HttpResponse.text('Presidio request failed: connection refused', { status: 502 })
 			)
 		);
-		appPage.url.searchParams.set('type', 'presidio');
+		(appPage.url as URL).searchParams.set('type', 'presidio');
 		await preparePageData();
 		render(GuardrailPage);
 
@@ -261,9 +268,102 @@ describe('Guardrail editor', () => {
 			.toBeInTheDocument();
 	});
 
+	it('deletes a guardrail after confirmation', async () => {
+		mockProviders();
+		(appPage.params as Record<string, string>).id = 'p1';
+		const deleted = vi.fn();
+		worker.use(
+			http.get('/api/llm-gateway/guardrails/p1', () =>
+				HttpResponse.json({
+					id: 'p1',
+					name: 'PII',
+					type: 'presidio',
+					config: { analyzerURL: 'http://presidio:3000' },
+					configuredSecrets: []
+				})
+			),
+			http.delete('/api/llm-gateway/guardrails/:id', ({ params }) => {
+				deleted(params.id);
+				return new HttpResponse(null, { status: 204 });
+			})
+		);
+		vi.mocked(goto).mockClear();
+		await preparePageData();
+		render(GuardrailPage);
+
+		await page.getByRole('button', { name: 'Delete guardrail' }).click();
+		await expect.element(page.getByText('Delete PII?')).toBeInTheDocument();
+		await page.getByRole('button', { name: "Yes, I'm sure" }).click();
+
+		await vi.waitFor(() => expect(deleted).toHaveBeenCalledWith('p1'));
+		await vi.waitFor(() => expect(goto).toHaveBeenCalledWith('/models?view=guardrails'));
+	});
+
+	it('shows why a guardrail in use cannot be deleted', async () => {
+		mockProviders();
+		(appPage.params as Record<string, string>).id = 'p1';
+		worker.use(
+			http.get('/api/llm-gateway/guardrails/p1', () =>
+				HttpResponse.json({
+					id: 'p1',
+					name: 'PII',
+					type: 'presidio',
+					config: { analyzerURL: 'http://presidio:3000' },
+					configuredSecrets: []
+				})
+			),
+			http.delete('/api/llm-gateway/guardrails/:id', () =>
+				HttpResponse.json(
+					{ error: 'guardrail is used by policy "Block PII"; remove it from the policy first' },
+					{ status: 409 }
+				)
+			)
+		);
+		vi.mocked(goto).mockClear();
+		await preparePageData();
+		render(GuardrailPage);
+
+		await page.getByRole('button', { name: 'Delete guardrail' }).click();
+		await page.getByRole('button', { name: "Yes, I'm sure" }).click();
+
+		await expect
+			.element(
+				page.getByText('guardrail is used by policy "Block PII"; remove it from the policy first')
+			)
+			.toBeInTheDocument();
+		expect(goto).not.toHaveBeenCalled();
+	});
+
+	it('hides delete from auditors', async () => {
+		mockProviders();
+		(appPage.params as Record<string, string>).id = 'p1';
+		worker.use(
+			http.get('/api/llm-gateway/guardrails/p1', () =>
+				HttpResponse.json({
+					id: 'p1',
+					name: 'PII',
+					type: 'presidio',
+					config: { analyzerURL: 'http://presidio:3000' },
+					configuredSecrets: []
+				})
+			)
+		);
+		await preparePageData({ profile: createMockProfile([Group.USER, Group.AUDITOR]) });
+		render(GuardrailPage);
+
+		await expect.element(page.getByLabelText('Name', { exact: true })).toHaveValue('PII');
+		await expect.element(page.getByLabelText('Name', { exact: true })).toBeDisabled();
+		await expect
+			.element(page.getByRole('button', { name: 'Delete guardrail' }))
+			.not.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Save', exact: true }))
+			.not.toBeInTheDocument();
+	});
+
 	it('returns to the guardrails list on cancel', async () => {
 		mockProviders();
-		appPage.url.searchParams.set('type', 'presidio');
+		(appPage.url as URL).searchParams.set('type', 'presidio');
 		await preparePageData();
 		render(GuardrailPage);
 
@@ -277,7 +377,7 @@ describe('Guardrail editor', () => {
 
 	it('reports an unknown guardrail type', async () => {
 		mockProviders();
-		appPage.url.searchParams.set('type', 'nope');
+		(appPage.url as URL).searchParams.set('type', 'nope');
 		await preparePageData();
 		render(GuardrailPage);
 

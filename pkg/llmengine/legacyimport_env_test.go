@@ -33,7 +33,7 @@ func TestLegacyImportLeavesEnvProviders(t *testing.T) {
 	if err := db.AutoMigrate(); err != nil {
 		t.Fatal(err)
 	}
-	gatewayClient := gatewayclient.New(ctx, db, nil, nil, nil, nil, nil, time.Hour, 10, 90, 90, 90, true)
+	gatewayClient := gatewayclient.New(ctx, db, nil, nil, nil, time.Hour, 10, 90, 90, 90, true)
 	t.Cleanup(func() { _ = gatewayClient.Close() })
 	for name, envVar := range map[string]string{
 		system.OpenAIModelProvider:    "OBOT_OPENAI_MODEL_PROVIDER_API_KEY",
@@ -48,18 +48,8 @@ func TestLegacyImportLeavesEnvProviders(t *testing.T) {
 		}
 	}
 
-	results, err := e.ImportLegacyModelProviders(ctx, nil, gatewayClient)
-	if err != nil {
+	if err := e.ImportLegacyModelProviders(ctx, nil, gatewayClient, false); err != nil {
 		t.Fatal(err)
-	}
-	for _, r := range results {
-		want := "imported"
-		if r.GatewayProvider == "anthropic" {
-			want = "skipped"
-		}
-		if r.Status != want {
-			t.Errorf("%s: status %s (%s), want %s", r.ModelProvider, r.Status, r.Message, want)
-		}
 	}
 
 	mp := ModelProviderResource()

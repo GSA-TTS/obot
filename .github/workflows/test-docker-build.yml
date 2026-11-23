@@ -2,7 +2,6 @@ name: Test Docker Build
 
 permissions:
   contents: read
-  id-token: write
 
 on:
   pull_request:
@@ -12,22 +11,58 @@ on:
     paths-ignore:
       - docs/**
       - chart/**
+      - .claude/**
+      - adr/**
+      - '*.md'
 
 jobs:
   build:
-    runs-on: depot-ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-22.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Depot
-        uses: depot/setup-action@v1
+      # Build each architecture natively; ARM64 UI tooling crashes under QEMU.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build Docker Image
-        uses: depot/build-push-action@v1
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          project: bbqjs4tj1g
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
+          push: false
           build-args: |
             BASE_IMAGE=ghcr.io/obot-platform/obot/base:latest
+
+      - name: Load AMD64 image for embedded PostgreSQL tests
+        if: matrix.platform == 'linux/amd64'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: obot:embedded-postgres-test
+          build-args: |
+            BASE_IMAGE=ghcr.io/obot-platform/obot/base:latest
+
+      - name: Test embedded PostgreSQL startup and migration
+        if: matrix.platform == 'linux/amd64'
+        timeout-minutes: 15
+        run: bash tools/test-embedded-postgres.sh obot:embedded-postgres-test
+
+      - name: Upload embedded PostgreSQL test logs
+        if: failure() && matrix.platform == 'linux/amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-postgres-test-logs
+          path: /tmp/obot-embedded-postgres-*/logs/

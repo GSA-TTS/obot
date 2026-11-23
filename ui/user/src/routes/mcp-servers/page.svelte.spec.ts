@@ -18,12 +18,20 @@ vi.mock('$app/state', async (importOriginal) => {
 	return createAppState(actual);
 });
 
-vi.mock('$app/navigation', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('$app/navigation')>();
+vi.mock('$app/navigation', async () => {
 	const { applyTestGoto } = await import('../../tests/helpers/navigation.svelte');
 	return {
-		...actual,
-		goto: (url: string | URL) => applyTestGoto(url)
+		goto: (url: string | URL) => applyTestGoto(url),
+		invalidate: vi.fn(),
+		invalidateAll: vi.fn(),
+		preloadCode: vi.fn(),
+		preloadData: vi.fn(),
+		beforeNavigate: vi.fn(),
+		afterNavigate: vi.fn(),
+		onNavigate: vi.fn(),
+		pushState: vi.fn(),
+		replaceState: vi.fn(),
+		disableScrollHandling: vi.fn()
 	};
 });
 
@@ -90,7 +98,7 @@ async function renderMcpServersPage({
 	view?: string;
 	groups?: string[];
 } = {}) {
-	appPage.url.searchParams.set('view', view);
+	(appPage.url as URL).searchParams.set('view', view);
 	localStorage.setItem('seenSplashDialog', new Date().toISOString());
 	mockDeploymentsApis();
 	const data = await preparePageData<PageData>({
@@ -155,8 +163,8 @@ async function expectMenuActions(
 }
 
 afterEach(() => {
-	appPage.url.searchParams.delete('view');
-	appPage.url.searchParams.delete('new');
+	(appPage.url as URL).searchParams.delete('view');
+	(appPage.url as URL).searchParams.delete('new');
 });
 
 it('imports OpenAPI from the type picker before opening configuration', async () => {
@@ -176,7 +184,7 @@ it('imports OpenAPI from the type picker before opening configuration', async ()
 	await page.getByRole('button', { name: /OpenAPI/ }).click();
 	await expect.element(page.getByRole('heading', { name: 'Import OpenAPI schema' })).toBeVisible();
 	await expect.element(page.getByCSS(`#${CATALOG_SERVER_FIELD_IDS.name}`)).not.toBeInTheDocument();
-	expect(appPage.url.searchParams.get('new')).not.toBe('openapi');
+	expect((appPage.url as URL).searchParams.get('new')).not.toBe('openapi');
 	await page.getByLabelText('Schema URL', { exact: true }).fill('https://example.com/schema.json');
 	await page.getByRole('button', { name: 'Import', exact: true }).click();
 	await expect
@@ -186,7 +194,7 @@ it('imports OpenAPI from the type picker before opening configuration', async ()
 		.element(page.getByLabelText('API request base URL', { exact: false }))
 		.toBeRequired();
 	await expect.element(page.getByCSS('#runtime-selector')).not.toBeInTheDocument();
-	expect(appPage.url.searchParams.get('new')).toBe('openapi');
+	expect((appPage.url as URL).searchParams.get('new')).toBe('openapi');
 });
 
 describe('MCP Servers Page', () => {
@@ -214,7 +222,7 @@ describe('MCP Servers Page', () => {
 		});
 
 		afterEach(() => {
-			appPage.url.searchParams.delete('new');
+			(appPage.url as URL).searchParams.delete('new');
 		});
 
 		it('offers Create From Guardrail in the Add New Filter menu', async () => {
@@ -245,7 +253,7 @@ describe('MCP Servers Page', () => {
 		});
 
 		it('opens the guardrail filter form for new=guardrail', async () => {
-			appPage.url.searchParams.set('new', 'guardrail');
+			(appPage.url as URL).searchParams.set('new', 'guardrail');
 			await renderMcpServersPage({ view: 'filters' });
 
 			// The layout title repeats the heading.
@@ -257,7 +265,7 @@ describe('MCP Servers Page', () => {
 		});
 
 		it('opens the custom filter form for other new values', async () => {
-			appPage.url.searchParams.set('new', 'true');
+			(appPage.url as URL).searchParams.set('new', 'true');
 			await renderMcpServersPage({ view: 'filters' });
 
 			await expect
@@ -362,7 +370,7 @@ it.each([
 	{ role: 'basic user', groups: [] }
 ])('does not open the direct OpenAPI creation URL for $role', async ({ groups }) => {
 	resetMcpServersAndEntriesStore();
-	appPage.url.searchParams.set('new', 'openapi');
+	(appPage.url as URL).searchParams.set('new', 'openapi');
 	await renderMcpServersPage({ view: 'entries', groups });
 	await expect
 		.element(page.getByRole('heading', { name: 'Import OpenAPI schema' }))
@@ -379,5 +387,5 @@ it('allows an owner to import OpenAPI from the type picker', async () => {
 	await page.getByRole('button', { name: 'Add MCP Server' }).click();
 	await page.getByRole('button', { name: /OpenAPI/ }).click();
 	await expect.element(page.getByRole('heading', { name: 'Import OpenAPI schema' })).toBeVisible();
-	expect(appPage.url.searchParams.get('new')).not.toBe('openapi');
+	expect((appPage.url as URL).searchParams.get('new')).not.toBe('openapi');
 });

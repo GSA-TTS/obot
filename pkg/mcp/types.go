@@ -38,14 +38,15 @@ type ServerConfig struct {
 	Files   []File   `json:"files"`
 
 	// Remote configuration.
-	LocalhostCallbackEnabled bool     `json:"localhostCallbackEnabled,omitempty"`
-	LocalhostCallbackPath    string   `json:"localhostCallbackPath,omitempty"`
-	URL                      string   `json:"url"`
-	TunnelName               string   `json:"tunnelName,omitempty"`
-	Headers                  []string `json:"headers"`
-	PassthroughHeaderNames   []string `json:"passthroughHeaderNames"`
-	PassthroughHeaderValues  []string `json:"passthroughHeaderValues"`
-	RedactedHeaderNames      []string `json:"-"`
+	LocalhostCallbackEnabled bool               `json:"localhostCallbackEnabled,omitempty"`
+	LocalhostCallbackPath    string             `json:"localhostCallbackPath,omitempty"`
+	URL                      string             `json:"url"`
+	TunnelName               string             `json:"tunnelName,omitempty"`
+	Headers                  []string           `json:"headers"`
+	InjectObotHeaders        []types.ObotHeader `json:"injectObotHeaders,omitempty"`
+	PassthroughHeaderNames   []string           `json:"passthroughHeaderNames"`
+	PassthroughHeaderValues  []string           `json:"passthroughHeaderValues"`
+	RedactedHeaderNames      []string           `json:"-"`
 
 	// Containerized configuration.
 	ContainerImage string `json:"containerImage"`
@@ -114,6 +115,15 @@ func (s ServerConfig) hostedConnectionHeaders() []string {
 		return s.Headers
 	}
 	return nil
+}
+
+func (s ServerConfig) hostedConnectionObotHeaders() []types.ObotHeader {
+	// Hosted connections become remote configs, so check the original runtime
+	// before carrying selections into the HTTP gateway.
+	if !types.SupportsObotHeaders(s.Runtime) {
+		return nil
+	}
+	return s.InjectObotHeaders
 }
 
 func CoreResourceRequirements(resources *types.MCPResourceRequirements) (*corev1.ResourceRequirements, error) {
@@ -473,6 +483,7 @@ func ServerToServerConfig(mcpServer v1.MCPServer, audiences []string, userID, sc
 		Audiences:              audiences,
 		PassthroughHeaderNames: passthroughHeaderNames,
 		RedactedHeaderNames:    configuredHeaderNames(mcpServer.Spec.Manifest.Config),
+		InjectObotHeaders:      slices.Clone(mcpServer.Spec.Manifest.InjectObotHeaders),
 		ComponentMCPServer:     mcpServer.Spec.VMCPComponentID != "",
 		StartupTimeout:         startupTimeout,
 		Resources:              resources,
@@ -701,12 +712,4 @@ func SystemServerToServerConfig(systemServer v1.SystemMCPServer, audiences []str
 	}
 
 	return serverConfig, dedupe(missingRequiredNames), nil
-}
-
-func copyHeaders(headers http.Header, keys, values []string) {
-	for i, key := range keys {
-		if i < len(values) {
-			headers.Set(key, values[i])
-		}
-	}
 }

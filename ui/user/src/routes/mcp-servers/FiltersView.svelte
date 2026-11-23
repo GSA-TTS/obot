@@ -76,13 +76,14 @@
 	}
 
 	const updateQuery = (value: string) => {
+		const url = new URL(page.url.toString());
 		if (value) {
-			page.url.searchParams.set('query', value);
+			url.searchParams.set('query', value);
 		} else {
-			page.url.searchParams.delete('query');
+			url.searchParams.delete('query');
 		}
 
-		replaceState(page.url, { query: value });
+		replaceState(url, { query: value });
 	};
 
 	export function openBuiltInPicker() {
@@ -128,7 +129,7 @@
 			}}
 			filterable={['name', 'kind', 'status']}
 			filters={urlFilters}
-			onFilter={setFilterUrlParams}
+			onFilter={(property, values) => setFilterUrlParams({ [property]: values })}
 			onClearAllFilters={clearUrlParams}
 			headers={[
 				{

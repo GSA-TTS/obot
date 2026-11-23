@@ -188,6 +188,9 @@ export interface SecretValue {
 }
 
 export interface ProviderKey {
+	azure_subscription_id?: string;
+	azure_resource_group?: string;
+	azure_account_name?: string;
 	id?: string;
 	name: string;
 	value: SecretValue | string;
@@ -282,8 +285,17 @@ export async function deleteProviderKey(provider: string, id: string, opts?: Opt
 	);
 }
 
-export async function refreshProviderModels(provider: string, opts?: Opts): Promise<void> {
-	await doPost(`${B}/providers/${encodeURIComponent(provider)}/refresh-models`, {}, opts);
+export async function refreshProviderModels(
+	provider: string,
+	opts?: Opts
+): Promise<{ status: 'pending' | 'refreshed' }> {
+	return (await doPost(
+		`${B}/providers/${encodeURIComponent(provider)}/refresh-models`,
+		{},
+		opts
+	)) as {
+		status: 'pending' | 'refreshed';
+	};
 }
 
 export interface GatewayModel {
@@ -343,6 +355,13 @@ export async function listRoutingRules(opts?: Opts): Promise<RoutingRule[]> {
 	return resp.rules ?? [];
 }
 
+export async function getRoutingRule(id: string, opts?: Opts): Promise<RoutingRule> {
+	const resp = (await doGet(`${B}/governance/routing-rules/${encodeURIComponent(id)}`, opts)) as {
+		rule: RoutingRule;
+	};
+	return resp.rule;
+}
+
 export async function createRoutingRule(rule: RoutingRule, opts?: Opts): Promise<RoutingRule> {
 	const resp = (await doPost(`${B}/governance/routing-rules`, rule, opts)) as {
 		rule: RoutingRule;
@@ -378,7 +397,6 @@ export function parseFallback(f: RoutingFallback | string): RoutingFallback {
 export interface ClientConfig {
 	drop_excess_requests: boolean;
 	max_request_body_size_mb: number;
-	prometheus_labels: string[] | null;
 	[key: string]: unknown;
 }
 

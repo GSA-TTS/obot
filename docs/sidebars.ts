@@ -87,6 +87,26 @@ const sidebars = {
 					"label": "Add hosted MCP servers"
 				},
 				{
+					"type": "category",
+					"label": "MCP server configuration",
+					"link": {
+						"type": "doc",
+						"id": "mcp-gateway/server-configuration"
+					},
+					"items": [
+						{
+							"type": "doc",
+							"id": "configuration/tutorials/slack-mcp-server",
+							"label": "Slack MCP Server"
+						},
+						{
+							"type": "doc",
+							"id": "configuration/tutorials/vercel-mcp-server",
+							"label": "Vercel MCP Server"
+						}
+					]
+				},
+				{
 					"type": "doc",
 					"id": "functionality/filters",
 					"label": "Filter MCP traffic"
@@ -266,6 +286,11 @@ const sidebars = {
 				},
 				{
 					"type": "doc",
+					"id": "security/mcp-images",
+					"label": "MCP image maintenance"
+				},
+				{
+					"type": "doc",
 					"id": "security/audit-data",
 					"label": "Audit data and retention"
 				}
@@ -308,6 +333,16 @@ const sidebars = {
 					"type": "doc",
 					"id": "configuration/okta-scim",
 					"label": "Okta SCIM provisioning"
+				},
+				{
+					"type": "doc",
+					"id": "configuration/onelogin-scim",
+					"label": "OneLogin SCIM provisioning"
+				},
+				{
+					"type": "doc",
+					"id": "configuration/entra-scim",
+					"label": "Entra SCIM provisioning"
 				},
 				{
 					"type": "category",
@@ -371,6 +406,11 @@ const sidebars = {
 					"type": "doc",
 					"id": "operations/upgrades",
 					"label": "Upgrades and rollback"
+				},
+				{
+					"type": "doc",
+					"id": "operations/embedded-postgresql-upgrade",
+					"label": "Upgrade embedded PostgreSQL"
 				}
 			]
 		},

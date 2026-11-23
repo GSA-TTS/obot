@@ -1,5 +1,5 @@
 <script module lang="ts">
-	import { resolve } from '$app/paths';
+	import { resolve } from '$lib/url';
 
 	// A notice shown below a configuration parameter.
 	export interface ParameterNotice {
@@ -14,6 +14,13 @@
 		// The parameters that only the `with` option provides. They are required when it is selected,
 		// and never submitted otherwise.
 		parameters: string[];
+		// A hidden parameter that the `without` option submits as "true", for a provider whose options
+		// differ in no parameters of their own.
+		choiceParameter?: string;
+		// The option selected when the form opens, for a choice that choiceParameter makes, since the
+		// form's values never hold it. Otherwise the `with` option is selected when any of its
+		// parameters has a value.
+		selected?: 'with' | 'without';
 		without: ParameterChoiceOption;
 		with: ParameterChoiceOption;
 		// Set when the choice is already made and cannot be changed in this form. Only that option is
@@ -236,6 +243,23 @@
 			: requiredConfigurationParameters
 	);
 
+	const parameterNotices = $derived.by(() => {
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
+		const notices = new Map<string, ParameterNotice>();
+		if (!parameterNotice || !provider) return notices;
+
+		for (const parameter of [
+			...(provider.requiredConfigurationParameters ?? []),
+			...(provider.optionalConfigurationParameters ?? [])
+		]) {
+			if (parameter.hidden) continue;
+			const notice = parameterNotice(parameter, form);
+			if (notice) notices.set(parameter.name, notice);
+		}
+
+		return notices;
+	});
+
 	function initParamValue(param: ProviderParameter): string {
 		let value = values?.[param.name] ? values?.[param.name] : '';
 		if (booleanInputs.has(param.name) && !value && values && param.name in values) {
@@ -260,9 +284,14 @@
 				form[param.name] = initParamValue(param);
 			}
 		}
-		choiceProvides = parameterChoice?.made
-			? parameterChoice.made === 'with'
-			: (parameterChoice?.parameters.some((name) => Boolean(values?.[name]?.trim())) ?? false);
+		if (parameterChoice?.made) {
+			choiceProvides = parameterChoice.made === 'with';
+		} else if (parameterChoice?.choiceParameter) {
+			choiceProvides = parameterChoice.selected === 'with';
+		} else {
+			choiceProvides =
+				parameterChoice?.parameters.some((name) => Boolean(values?.[name]?.trim())) ?? false;
+		}
 	}
 
 	function onClose() {
@@ -334,6 +363,9 @@
 				},
 				{} as Record<string, string>
 			);
+		if (parameterChoice?.choiceParameter && !parameterChoice.made && !choiceProvides) {
+			processedForm[parameterChoice.choiceParameter] = 'true';
+		}
 
 		onConfigure(processedForm);
 	}
@@ -346,25 +378,29 @@
 		'OBOT_AZURE_OPENAI_MODEL_PROVIDER_DEPLOYMENTS'
 	]);
 
-	const booleanInputs = new Set(['OBOT_AUTH_PROVIDER_ENABLE_LOGGING']);
+	const booleanInputs = new Set([
+		'OBOT_AUTH_PROVIDER_ENABLE_LOGGING',
+		'OBOT_KEYCLOAK_AUTH_PROVIDER_INSECURE_ALLOW_UNVERIFIED_EMAIL'
+	]);
 </script>
 
 {#snippet noticeFor(parameter: ProviderParameter)}
-	{@const notice = parameterNotice?.(parameter, form)}
-	{#if notice}
+	{#if parameterNotices.get(parameter.name)}
 		<div
 			class={twMerge(
 				'mt-1 flex items-start gap-2 p-2 text-xs font-light',
-				notice.kind === 'warning' ? 'notification-alert' : 'notification-info'
+				parameterNotices.get(parameter.name)?.kind === 'warning'
+					? 'notification-alert'
+					: 'notification-info'
 			)}
-			role={notice.kind === 'warning' ? 'alert' : 'note'}
+			role={parameterNotices.get(parameter.name)?.kind === 'warning' ? 'alert' : 'note'}
 		>
-			{#if notice.kind === 'warning'}
+			{#if parameterNotices.get(parameter.name)?.kind === 'warning'}
 				<TriangleAlert class="mt-0.5 size-4 shrink-0" />
 			{:else}
 				<Info class="mt-0.5 size-4 shrink-0" />
 			{/if}
-			<span>{notice.text}</span>
+			<span>{parameterNotices.get(parameter.name)?.text}</span>
 		</div>
 	{/if}
 {/snippet}
@@ -565,8 +601,8 @@
 			{/if}
 
 			<!-- A made choice is shown even without parameters of its own, so that the way the provider
-			works stays visible. -->
-			{#if parameterChoice && (choiceParameters.length > 0 || parameterChoice.made)}
+			works stays visible, and so is a choice that a hidden parameter makes. -->
+			{#if parameterChoice && (choiceParameters.length > 0 || parameterChoice.made || parameterChoice.choiceParameter)}
 				{@const option = choiceProvides ? parameterChoice.with : parameterChoice.without}
 				<!-- Outlined rather than filled, so that the choice and the fields it brings in read as one
 				section, apart from the filled inputs around them. -->
@@ -601,7 +637,7 @@
 							</a>
 						{/if}
 					</span>
-					{#if choiceProvides}
+					{#if choiceProvides && choiceParameters.length > 0}
 						<ul class="flex flex-col gap-4" in:slide={{ axis: 'y' }}>
 							{#each choiceParameters as parameter (parameter.name)}
 								{#if parameter.name in form}

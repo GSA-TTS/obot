@@ -2,6 +2,13 @@
 // configuration each one needs. Used by the provider setup forms.
 import { m } from '$lib/i18n';
 
+export interface AuthenticationMethod {
+	id: string;
+	label: string;
+	description: string;
+	paths: string[];
+}
+
 export interface KeyField {
 	// Path of the value in the key payload, e.g. "value" or "azure_key_config.endpoint".
 	path: string;
@@ -16,11 +23,12 @@ export interface KeyField {
 export interface ProviderCatalogEntry {
 	id: string;
 	label: string;
-	icon?: string;
+	icon: string;
 	// A black logo, inverted in dark mode so it stays visible.
 	monochromeIcon?: boolean;
 	description: string;
 	keyFields: KeyField[];
+	authenticationMethods?: AuthenticationMethod[];
 	// Whether a base URL is required (self-hosted providers).
 	baseUrlRequired?: boolean;
 	baseUrlPlaceholder?: string;
@@ -91,16 +99,40 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
 		label: 'AWS Bedrock',
 		icon: '/admin/assets/amazon-bedrock.png',
 		description: m.models_providers_desc_bedrock(),
+		authenticationMethods: [
+			{
+				id: 'api-key',
+				label: m.models_providers_api_key(),
+				description: m.models_providers_auth_api_key_help(),
+				paths: ['value']
+			},
+			{
+				id: 'credentials',
+				label: m.models_providers_auth_aws(),
+				description: m.models_providers_auth_aws_help(),
+				paths: [
+					'bedrock_key_config.access_key',
+					'bedrock_key_config.secret_key',
+					'bedrock_key_config.session_token',
+					'bedrock_key_config.role_arn'
+				]
+			}
+		],
 		keyFields: [
 			{
 				path: 'value',
 				label: m.models_providers_field_bedrock_api_key(),
 				sensitive: true,
-				description: m.models_providers_field_bedrock_api_key_help()
+				required: true
 			},
-			{ path: 'bedrock_key_config.access_key', label: m.models_providers_field_access_key_id() },
+			{
+				path: 'bedrock_key_config.access_key',
+				label: m.models_providers_field_access_key_id(),
+				required: true
+			},
 			{
 				path: 'bedrock_key_config.secret_key',
+				required: true,
 				label: m.models_providers_field_secret_access_key(),
 				sensitive: true
 			},
@@ -127,6 +159,24 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
 		label: 'Azure OpenAI / AI Foundry',
 		icon: '/admin/assets/azure_openai_icon.svg',
 		description: m.models_providers_desc_azure(),
+		authenticationMethods: [
+			{
+				id: 'api-key',
+				label: m.models_providers_api_key(),
+				description: m.models_providers_auth_api_key_help(),
+				paths: ['value']
+			},
+			{
+				id: 'credentials',
+				label: m.models_providers_auth_entra(),
+				description: m.models_providers_auth_entra_help(),
+				paths: [
+					'azure_key_config.client_id',
+					'azure_key_config.client_secret',
+					'azure_key_config.tenant_id'
+				]
+			}
+		],
 		keyFields: [
 			{
 				path: 'azure_key_config.endpoint',
@@ -138,20 +188,30 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
 				path: 'value',
 				label: m.models_providers_api_key(),
 				sensitive: true,
-				description: m.models_providers_field_azure_api_key_help()
+				required: true
 			},
-			{ path: 'azure_key_config.client_id', label: m.models_providers_field_entra_client_id() },
+			{
+				path: 'azure_key_config.client_id',
+				label: m.models_providers_field_entra_client_id(),
+				required: true
+			},
 			{
 				path: 'azure_key_config.client_secret',
+				required: true,
 				label: m.models_providers_field_entra_client_secret(),
 				sensitive: true
 			},
-			{ path: 'azure_key_config.tenant_id', label: m.models_providers_field_entra_tenant_id() }
+			{
+				path: 'azure_key_config.tenant_id',
+				label: m.models_providers_field_entra_tenant_id(),
+				required: true
+			}
 		]
 	},
 	{
 		id: 'mistral',
 		label: 'Mistral AI',
+		icon: '/admin/assets/mistral-logo.svg',
 		description: m.models_providers_desc_mistral(),
 		keyFields: [apiKey('')]
 	},
@@ -181,54 +241,66 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
 	{
 		id: 'openrouter',
 		label: 'OpenRouter',
+		icon: '/admin/assets/openrouter-logo.svg',
+		monochromeIcon: true,
 		description: m.models_providers_desc_openrouter(),
 		keyFields: [apiKey('sk-or-...')]
 	},
 	{
 		id: 'cohere',
 		label: 'Cohere',
+		icon: '/admin/assets/cohere-logo.svg',
 		description: m.models_providers_desc_cohere(),
 		keyFields: [apiKey('')]
 	},
 	{
 		id: 'perplexity',
 		label: 'Perplexity',
+		icon: '/admin/assets/perplexity-logo.svg',
 		description: m.models_providers_desc_perplexity(),
 		keyFields: [apiKey('pplx-...')]
 	},
 	{
 		id: 'cerebras',
 		label: 'Cerebras',
+		icon: '/admin/assets/cerebras-logo.svg',
 		description: m.models_providers_desc_cerebras(),
 		keyFields: [apiKey('csk-...')]
 	},
 	{
 		id: 'fireworks',
 		label: 'Fireworks AI',
+		icon: '/admin/assets/fireworks-logo.svg',
 		description: m.models_providers_desc_fireworks(),
 		keyFields: [apiKey('fw_...')]
 	},
 	{
 		id: 'huggingface',
 		label: 'Hugging Face',
+		icon: '/admin/assets/huggingface-logo.svg',
 		description: m.models_providers_desc_huggingface(),
 		keyFields: [apiKey('hf_...')]
 	},
 	{
 		id: 'nebius',
 		label: 'Nebius Token Factory',
+		icon: '/admin/assets/nebius-logo.svg',
+		monochromeIcon: true,
 		description: m.models_providers_desc_nebius(),
 		keyFields: [apiKey('')]
 	},
 	{
 		id: 'parasail',
 		label: 'Parasail',
+		icon: '/admin/assets/parasail-logo.svg',
+		monochromeIcon: true,
 		description: m.models_providers_desc_parasail(),
 		keyFields: [apiKey('')]
 	},
 	{
 		id: 'databricks',
 		label: 'Databricks',
+		icon: '/admin/assets/databricks-logo.svg',
 		description: m.models_providers_desc_databricks(),
 		keyFields: [
 			{
@@ -243,6 +315,8 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
 	{
 		id: 'ollama',
 		label: 'Ollama',
+		icon: '/admin/assets/ollama-logo.svg',
+		monochromeIcon: true,
 		description: m.models_providers_desc_ollama(),
 		keyFields: [
 			{
@@ -276,6 +350,7 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
 	{
 		id: 'sgl',
 		label: 'SGLang',
+		icon: '/admin/assets/sglang-logo.svg',
 		description: m.models_providers_desc_sglang(),
 		keyFields: [
 			{
@@ -288,12 +363,16 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
 	{
 		id: 'replicate',
 		label: 'Replicate',
+		icon: '/admin/assets/replicate-logo.svg',
+		monochromeIcon: true,
 		description: m.models_providers_desc_replicate(),
 		keyFields: [apiKey('r8_...')]
 	},
 	{
 		id: 'elevenlabs',
 		label: 'ElevenLabs',
+		icon: '/admin/assets/elevenlabs-logo.svg',
+		monochromeIcon: true,
 		description: m.models_providers_desc_elevenlabs(),
 		keyFields: [apiKey('')]
 	}
@@ -352,4 +431,40 @@ export function setPath(obj: Record<string, unknown>, path: string, value: unkno
 		cur = cur[part] as Record<string, unknown>;
 	}
 	cur[parts[parts.length - 1]] = value;
+}
+
+// Fields outside every method are shared (region or endpoint).
+export function authenticationFields(entry: ProviderCatalogEntry, method: string): KeyField[] {
+	const methods = entry.authenticationMethods ?? [];
+	const active = methods.find((m) => m.id === method) ?? methods[0];
+	return entry.keyFields.filter(
+		(f) => !methods.some((m) => m.paths.includes(f.path)) || active?.paths.includes(f.path)
+	);
+}
+
+export function savedAuthenticationMethod(
+	entry: ProviderCatalogEntry,
+	values: Record<string, string>
+): string {
+	// Bifrost prefers a complete Azure service principal over an API key.
+	if (
+		entry.id === 'azure' &&
+		['client_id', 'client_secret', 'tenant_id'].every((field) =>
+			values[`azure_key_config.${field}`]?.trim()
+		)
+	) {
+		return 'credentials';
+	}
+	// An optional role ARN alone does not identify the credential source.
+	return (
+		entry.authenticationMethods?.find((method) =>
+			method.paths.some(
+				(path) =>
+					entry.keyFields.some((field) => field.path === path && field.required) &&
+					values[path]?.trim()
+			)
+		)?.id ??
+		entry.authenticationMethods?.[0]?.id ??
+		''
+	);
 }

@@ -78,6 +78,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/obot-platform/obot/apiclient/types.DeviceClientStat":                          schema_obot_platform_obot_apiclient_types_DeviceClientStat(ref),
 		"github.com/obot-platform/obot/apiclient/types.DeviceEnrollRequest":                       schema_obot_platform_obot_apiclient_types_DeviceEnrollRequest(ref),
 		"github.com/obot-platform/obot/apiclient/types.DeviceEnrollResponse":                      schema_obot_platform_obot_apiclient_types_DeviceEnrollResponse(ref),
+		"github.com/obot-platform/obot/apiclient/types.DeviceLatestScan":                          schema_obot_platform_obot_apiclient_types_DeviceLatestScan(ref),
 		"github.com/obot-platform/obot/apiclient/types.DeviceList":                                schema_obot_platform_obot_apiclient_types_DeviceList(ref),
 		"github.com/obot-platform/obot/apiclient/types.DeviceMCPServerDetail":                     schema_obot_platform_obot_apiclient_types_DeviceMCPServerDetail(ref),
 		"github.com/obot-platform/obot/apiclient/types.DeviceMCPServerOccurrence":                 schema_obot_platform_obot_apiclient_types_DeviceMCPServerOccurrence(ref),
@@ -289,6 +290,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/obot-platform/obot/apiclient/types.RegistryServerRemote":                      schema_obot_platform_obot_apiclient_types_RegistryServerRemote(ref),
 		"github.com/obot-platform/obot/apiclient/types.RegistryServerRepository":                  schema_obot_platform_obot_apiclient_types_RegistryServerRepository(ref),
 		"github.com/obot-platform/obot/apiclient/types.RegistryServerResponse":                    schema_obot_platform_obot_apiclient_types_RegistryServerResponse(ref),
+		"github.com/obot-platform/obot/apiclient/types.RegistrySettings":                          schema_obot_platform_obot_apiclient_types_RegistrySettings(ref),
 		"github.com/obot-platform/obot/apiclient/types.RemoteCatalogConfig":                       schema_obot_platform_obot_apiclient_types_RemoteCatalogConfig(ref),
 		"github.com/obot-platform/obot/apiclient/types.RemoteRuntimeConfig":                       schema_obot_platform_obot_apiclient_types_RemoteRuntimeConfig(ref),
 		"github.com/obot-platform/obot/apiclient/types.ResidualGroupData":                         schema_obot_platform_obot_apiclient_types_ResidualGroupData(ref),
@@ -428,6 +430,13 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		v1.K8sSettingsList{}.OpenAPIModelName():                                                   schema_storage_apis_obotobotai_v1_K8sSettingsList(ref),
 		v1.K8sSettingsSpec{}.OpenAPIModelName():                                                   schema_storage_apis_obotobotai_v1_K8sSettingsSpec(ref),
 		v1.K8sSettingsStatus{}.OpenAPIModelName():                                                 schema_storage_apis_obotobotai_v1_K8sSettingsStatus(ref),
+		v1.LLMGatewayConfig{}.OpenAPIModelName():                                                  schema_storage_apis_obotobotai_v1_LLMGatewayConfig(ref),
+		v1.LLMGatewayConfigList{}.OpenAPIModelName():                                              schema_storage_apis_obotobotai_v1_LLMGatewayConfigList(ref),
+		v1.LLMGatewayProvider{}.OpenAPIModelName():                                                schema_storage_apis_obotobotai_v1_LLMGatewayProvider(ref),
+		v1.LLMGatewayProviderList{}.OpenAPIModelName():                                            schema_storage_apis_obotobotai_v1_LLMGatewayProviderList(ref),
+		v1.LLMGatewayResourceSpec{}.OpenAPIModelName():                                            schema_storage_apis_obotobotai_v1_LLMGatewayResourceSpec(ref),
+		v1.LLMGatewayRoutingRule{}.OpenAPIModelName():                                             schema_storage_apis_obotobotai_v1_LLMGatewayRoutingRule(ref),
+		v1.LLMGatewayRoutingRuleList{}.OpenAPIModelName():                                         schema_storage_apis_obotobotai_v1_LLMGatewayRoutingRuleList(ref),
 		v1.MCPCatalog{}.OpenAPIModelName():                                                        schema_storage_apis_obotobotai_v1_MCPCatalog(ref),
 		v1.MCPCatalogList{}.OpenAPIModelName():                                                    schema_storage_apis_obotobotai_v1_MCPCatalogList(ref),
 		v1.MCPCatalogSpec{}.OpenAPIModelName():                                                    schema_storage_apis_obotobotai_v1_MCPCatalogSpec(ref),
@@ -546,6 +555,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		v1.SystemMCPServerList{}.OpenAPIModelName():                                               schema_storage_apis_obotobotai_v1_SystemMCPServerList(ref),
 		v1.SystemMCPServerSpec{}.OpenAPIModelName():                                               schema_storage_apis_obotobotai_v1_SystemMCPServerSpec(ref),
 		v1.SystemMCPServerStatus{}.OpenAPIModelName():                                             schema_storage_apis_obotobotai_v1_SystemMCPServerStatus(ref),
+		v1.UpstreamOAuthRequirement{}.OpenAPIModelName():                                          schema_storage_apis_obotobotai_v1_UpstreamOAuthRequirement(ref),
 		v1.UserDefaultRoleSetting{}.OpenAPIModelName():                                            schema_storage_apis_obotobotai_v1_UserDefaultRoleSetting(ref),
 		v1.UserDefaultRoleSettingList{}.OpenAPIModelName():                                        schema_storage_apis_obotobotai_v1_UserDefaultRoleSettingList(ref),
 		v1.UserDefaultRoleSettingSpec{}.OpenAPIModelName():                                        schema_storage_apis_obotobotai_v1_UserDefaultRoleSettingSpec(ref),
@@ -2620,6 +2630,13 @@ func schema_obot_platform_obot_apiclient_types_AuthProviderSCIM(ref common.Refer
 							},
 						},
 					},
+					"choiceParameter": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ChoiceParameter names the configuration parameter that chooses SCIM-first setup when it is \"true\", for a provider without directory parameters. Obot drops it from the configuration, so it is never stored. Empty when omitting the directory parameters chooses SCIM.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"issuerParameter": {
 						SchemaProps: spec.SchemaProps{
 							Description: "IssuerParameter names the configuration parameter that holds the identity provider's issuer URL.",
@@ -3377,12 +3394,17 @@ func schema_obot_platform_obot_apiclient_types_Device(ref common.ReferenceCallba
 							Ref: ref("github.com/obot-platform/obot/apiclient/types.Time"),
 						},
 					},
+					"latestScan": {
+						SchemaProps: spec.SchemaProps{
+							Ref: ref("github.com/obot-platform/obot/apiclient/types.DeviceLatestScan"),
+						},
+					},
 				},
 				Required: []string{"id", "deviceID", "mdmConfigurationID", "enrolledAt"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/obot-platform/obot/apiclient/types.Time"},
+			"github.com/obot-platform/obot/apiclient/types.DeviceLatestScan", "github.com/obot-platform/obot/apiclient/types.Time"},
 	}
 }
 
@@ -3681,6 +3703,98 @@ func schema_obot_platform_obot_apiclient_types_DeviceEnrollResponse(ref common.R
 		},
 		Dependencies: []string{
 			"github.com/obot-platform/obot/apiclient/types.Device"},
+	}
+}
+
+func schema_obot_platform_obot_apiclient_types_DeviceLatestScan(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "DeviceLatestScan summarizes an enrolled device's latest scan: the scan's metadata and how many MCP servers, skills, plugins, and clients it found.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"id": {
+						SchemaProps: spec.SchemaProps{
+							Default: 0,
+							Type:    []string{"integer"},
+							Format:  "int32",
+						},
+					},
+					"scannedAt": {
+						SchemaProps: spec.SchemaProps{
+							Ref: ref("github.com/obot-platform/obot/apiclient/types.Time"),
+						},
+					},
+					"hostname": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"username": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"os": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"arch": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"scannerVersion": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"submittedBy": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"mcpServerCount": {
+						SchemaProps: spec.SchemaProps{
+							Default: 0,
+							Type:    []string{"integer"},
+							Format:  "int64",
+						},
+					},
+					"skillCount": {
+						SchemaProps: spec.SchemaProps{
+							Default: 0,
+							Type:    []string{"integer"},
+							Format:  "int64",
+						},
+					},
+					"pluginCount": {
+						SchemaProps: spec.SchemaProps{
+							Default: 0,
+							Type:    []string{"integer"},
+							Format:  "int64",
+						},
+					},
+					"clientCount": {
+						SchemaProps: spec.SchemaProps{
+							Default: 0,
+							Type:    []string{"integer"},
+							Format:  "int64",
+						},
+					},
+				},
+				Required: []string{"id", "scannedAt", "mcpServerCount", "skillCount", "pluginCount", "clientCount"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/obot-platform/obot/apiclient/types.Time"},
 	}
 }
 
@@ -5980,7 +6094,7 @@ func schema_obot_platform_obot_apiclient_types_GroupReference(ref common.Referen
 				Properties: map[string]spec.Schema{
 					"kind": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Kind is accessControlRule, modelAccessPolicy, skillAccessRule, messagePolicy, hostedAgentAccessRule, groupRoleAssignment, or vmcpProfile.",
+							Description: "Kind is accessControlRule, modelAccessPolicy, skillAccessRule, messagePolicy, groupRoleAssignment, vmcpProfile, or mcpGuardrailFilter.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
@@ -6002,7 +6116,7 @@ func schema_obot_platform_obot_apiclient_types_GroupReference(ref common.Referen
 					},
 					"detail": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Detail says where in the object the reference is, such as a published artifact's version, a virtual MCP server's profile, or the role a group role assignment grants.",
+							Description: "Detail says where in the object the reference is, such as a virtual MCP server's profile or the role a group role assignment grants.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -9015,6 +9129,20 @@ func schema_obot_platform_obot_apiclient_types_MCPServerCatalogEntryManifest(ref
 							},
 						},
 					},
+					"injectObotHeaders": {
+						SchemaProps: spec.SchemaProps{
+							Description: "InjectObotHeaders selects non-secret caller attribution sent to this HTTP MCP backend. Empty disables injection. Incoming copies of all supported attribution headers are stripped.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Type:   []string{"string"},
+										Format: "",
+									},
+								},
+							},
+						},
+					},
 					"staticConfigurationRevision": {
 						SchemaProps: spec.SchemaProps{
 							Description: "StaticConfigurationRevision identifies the credential holding the values of Static configuration. It is assigned by Obot; values supplied by clients are ignored.",
@@ -9464,6 +9592,20 @@ func schema_obot_platform_obot_apiclient_types_MCPServerManifest(ref common.Refe
 								Schema: &spec.Schema{
 									SchemaProps: spec.SchemaProps{
 										Ref: ref("github.com/obot-platform/obot/apiclient/types.MCPConfig"),
+									},
+								},
+							},
+						},
+					},
+					"injectObotHeaders": {
+						SchemaProps: spec.SchemaProps{
+							Description: "InjectObotHeaders selects non-secret caller attribution sent to this HTTP MCP backend. Empty disables injection. Incoming copies of all supported attribution headers are stripped.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Type:   []string{"string"},
+										Format: "",
 									},
 								},
 							},
@@ -13250,6 +13392,12 @@ func schema_obot_platform_obot_apiclient_types_OAuthToken(ref common.ReferenceCa
 			SchemaProps: spec.SchemaProps{
 				Type: []string{"object"},
 				Properties: map[string]spec.Schema{
+					"scope": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
 					"access_token": {
 						SchemaProps: spec.SchemaProps{
 							Default: "",
@@ -14207,6 +14355,27 @@ func schema_obot_platform_obot_apiclient_types_RegistryServerResponse(ref common
 		},
 		Dependencies: []string{
 			"github.com/obot-platform/obot/apiclient/types.RegistryMeta", "github.com/obot-platform/obot/apiclient/types.RegistryServerDetail"},
+	}
+}
+
+func schema_obot_platform_obot_apiclient_types_RegistrySettings(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RegistrySettings controls anonymous discovery; authenticated discovery remains available.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"anonymousAccessEnabled": {
+						SchemaProps: spec.SchemaProps{
+							Default: false,
+							Type:    []string{"boolean"},
+							Format:  "",
+						},
+					},
+				},
+				Required: []string{"anonymousAccessEnabled"},
+			},
+		},
 	}
 }
 
@@ -17809,12 +17978,6 @@ func schema_obot_platform_obot_apiclient_types_User(ref common.ReferenceCallback
 							},
 						},
 					},
-					"explicitRole": {
-						SchemaProps: spec.SchemaProps{
-							Type:   []string{"boolean"},
-							Format: "",
-						},
-					},
 					"email": {
 						SchemaProps: spec.SchemaProps{
 							Type:   []string{"string"},
@@ -21189,6 +21352,298 @@ func schema_storage_apis_obotobotai_v1_K8sSettingsStatus(ref common.ReferenceCal
 	}
 }
 
+func schema_storage_apis_obotobotai_v1_LLMGatewayConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(metav1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.LLMGatewayResourceSpec{}.OpenAPIModelName()),
+						},
+					},
+				},
+				Required: []string{"metadata", "spec"},
+			},
+		},
+		Dependencies: []string{
+			v1.LLMGatewayResourceSpec{}.OpenAPIModelName(), metav1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_storage_apis_obotobotai_v1_LLMGatewayConfigList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(metav1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(v1.LLMGatewayConfig{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"metadata", "items"},
+			},
+		},
+		Dependencies: []string{
+			v1.LLMGatewayConfig{}.OpenAPIModelName(), metav1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_storage_apis_obotobotai_v1_LLMGatewayProvider(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(metav1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.LLMGatewayResourceSpec{}.OpenAPIModelName()),
+						},
+					},
+				},
+				Required: []string{"metadata", "spec"},
+			},
+		},
+		Dependencies: []string{
+			v1.LLMGatewayResourceSpec{}.OpenAPIModelName(), metav1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_storage_apis_obotobotai_v1_LLMGatewayProviderList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(metav1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(v1.LLMGatewayProvider{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"metadata", "items"},
+			},
+		},
+		Dependencies: []string{
+			v1.LLMGatewayProvider{}.OpenAPIModelName(), metav1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_storage_apis_obotobotai_v1_LLMGatewayResourceSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "LLMGatewayResourceSpec holds a logical identity and a codec-protected payload. Provider payloads contain both configuration and keys so they change atomically.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"id": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"payload": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+				},
+				Required: []string{"id", "payload"},
+			},
+		},
+	}
+}
+
+func schema_storage_apis_obotobotai_v1_LLMGatewayRoutingRule(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(metav1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.LLMGatewayResourceSpec{}.OpenAPIModelName()),
+						},
+					},
+				},
+				Required: []string{"metadata", "spec"},
+			},
+		},
+		Dependencies: []string{
+			v1.LLMGatewayResourceSpec{}.OpenAPIModelName(), metav1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_storage_apis_obotobotai_v1_LLMGatewayRoutingRuleList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(metav1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(v1.LLMGatewayRoutingRule{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"metadata", "items"},
+			},
+		},
+		Dependencies: []string{
+			v1.LLMGatewayRoutingRule{}.OpenAPIModelName(), metav1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
 func schema_storage_apis_obotobotai_v1_MCPCatalog(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -21470,6 +21925,12 @@ func schema_storage_apis_obotobotai_v1_MCPClientSessionSpec(ref common.Reference
 			SchemaProps: spec.SchemaProps{
 				Type: []string{"object"},
 				Properties: map[string]spec.Schema{
+					"connectionID": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
 					"mcpServerID": {
 						SchemaProps: spec.SchemaProps{
 							Default: "",
@@ -24281,6 +24742,18 @@ func schema_storage_apis_obotobotai_v1_OAuthAuthRequestSpec(ref common.Reference
 			SchemaProps: spec.SchemaProps{
 				Type: []string{"object"},
 				Properties: map[string]spec.Schema{
+					"upstreamOAuth": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(v1.UpstreamOAuthRequirement{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
 					"redirectURI": {
 						SchemaProps: spec.SchemaProps{
 							Default: "",
@@ -24446,6 +24919,8 @@ func schema_storage_apis_obotobotai_v1_OAuthAuthRequestSpec(ref common.Reference
 				Required: []string{"redirectURI", "state", "clientID", "codeChallenge", "scope", "codeChallengeMethod", "grantType", "resource", "hashedAuthCode", "userID", "mcpID", "audience", "authProviderUserID", "authProviderNamespace", "authProviderName", "consentPrepared", "consentMCPConfigRequired", "consentApproved", "consentMCPAuthRequired", "consentMCPAuthURL", "userHasSecondLevelOAuthed", "consentMCPServerName", "consentMCPServerURL"},
 			},
 		},
+		Dependencies: []string{
+			v1.UpstreamOAuthRequirement{}.OpenAPIModelName()},
 	}
 }
 
@@ -26813,6 +27288,116 @@ func schema_storage_apis_obotobotai_v1_SystemMCPServerStatus(ref common.Referenc
 		},
 		Dependencies: []string{
 			v1.DeploymentCondition{}.OpenAPIModelName()},
+	}
+}
+
+func schema_storage_apis_obotobotai_v1_UpstreamOAuthRequirement(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "UpstreamOAuthRequirement is owned by an OAuth transaction after temporary ticket handoff. It contains no credentials or operation payload; completion is recorded only by the callback.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"component": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"realm": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"errorURI": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"connectID": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"url": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"targetHash": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"statusCode": {
+						SchemaProps: spec.SchemaProps{
+							Default: 0,
+							Type:    []string{"integer"},
+							Format:  "int32",
+						},
+					},
+					"resourceMetadata": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"scope": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"errorCode": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"errorDescription": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"started": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"boolean"},
+							Format: "",
+						},
+					},
+					"startedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StartedAt is Unix time, used to distinguish in-flight setup from lost pending state.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"completed": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"boolean"},
+							Format: "",
+						},
+					},
+					"failed": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"boolean"},
+							Format: "",
+						},
+					},
+				},
+				Required: []string{"component", "connectID", "url", "targetHash", "statusCode"},
+			},
+		},
 	}
 }
 

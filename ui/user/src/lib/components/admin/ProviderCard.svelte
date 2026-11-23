@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { tooltip } from '$lib/actions/tooltip.svelte';
 	import { m } from '$lib/i18n';
+	import Loading from '$lib/icons/Loading.svelte';
 	import type { BaseProvider } from '$lib/services/admin/types';
 	import { darkMode } from '$lib/stores';
 	import DotDotDot from '../DotDotDot.svelte';
@@ -19,6 +20,8 @@
 		recommended?: boolean;
 		experimental?: boolean;
 		provider: BaseProvider;
+		// Catalog logos can supply dark-mode inversion without changing authentication provider icons.
+		iconClass?: string;
 		onConfigure: () => void;
 		// Omitted when the provider cannot be deconfigured, so the menu is not offered at all.
 		onDeconfigure?: () => void;
@@ -28,6 +31,8 @@
 		disableConfigure?: boolean;
 		// Shown as a tooltip when disableConfigure hides the reason the button cannot be used.
 		disableConfigureReason?: string;
+		// The configure action is fetching, so the button waits instead of opening early.
+		configureLoading?: boolean;
 		isComingSoon?: boolean;
 		licenseKey?: string;
 		// Settings saved as a replacement while another provider still serves logins.
@@ -38,6 +43,7 @@
 		recommended,
 		experimental,
 		provider,
+		iconClass,
 		onConfigure,
 		onDeconfigure,
 		configuredActions,
@@ -45,6 +51,7 @@
 		readonly,
 		disableConfigure,
 		disableConfigureReason,
+		configureLoading,
 		isComingSoon,
 		licenseKey,
 		staged
@@ -102,10 +109,18 @@
 		<img
 			src={url}
 			alt={provider.name}
-			class={twMerge('size-16 rounded-md p-1', !provider.iconDark && 'bg-base-400')}
+			class={twMerge(
+				'size-16 rounded-md object-contain p-1',
+				!provider.iconDark && !iconClass && 'bg-base-400',
+				iconClass
+			)}
 		/>
 	{:else}
-		<img src={provider.icon} alt={provider.name} class="size-16 rounded-md p-1" />
+		<img
+			src={provider.icon}
+			alt={provider.name}
+			class={twMerge('size-16 rounded-md object-contain p-1', iconClass)}
+		/>
 	{/if}
 	<h4 class="text-center text-lg font-semibold">{provider.name}</h4>
 	<div
@@ -169,11 +184,15 @@
 				<button
 					onclick={onConfigure}
 					class={twMerge(
-						'w-full border-0 text-sm btn',
+						'flex w-full items-center justify-center gap-2 border-0 text-sm btn',
 						provider.configured || staged ? 'btn-secondary' : 'btn-primary'
 					)}
-					disabled={disableConfigure}
+					disabled={disableConfigure || configureLoading}
+					aria-busy={configureLoading || undefined}
 				>
+					{#if configureLoading}
+						<Loading class="size-4" />
+					{/if}
 					{#if readonly}
 						{m.models_providers_view()}
 					{:else if provider.configured}

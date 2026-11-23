@@ -10,7 +10,6 @@ import (
 	"github.com/obot-platform/obot/pkg/api/handlers/registry"
 	"github.com/obot-platform/obot/pkg/api/handlers/setup"
 	"github.com/obot-platform/obot/pkg/api/handlers/wellknown"
-	"github.com/obot-platform/obot/pkg/controller/handlers/providerconfigurationchange"
 	"github.com/obot-platform/obot/pkg/scim"
 	scimsetup "github.com/obot-platform/obot/pkg/scim/setup"
 	"github.com/obot-platform/obot/pkg/services"
@@ -87,6 +86,7 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mdmAssetSources := handlers.NewMDMAssetSourceHandler()
 	mdmAssets := handlers.NewMDMAssetHandler()
 	mdmConfigurations := handlers.NewMDMConfigurationsHandler(services.ServerURL)
+	mdmDevices := handlers.NewMDMDevicesHandler()
 	deviceEnroll := handlers.NewDeviceEnrollHandler(services.LicenseProvider)
 	authProviders := handlers.NewAuthProviderHandler(services.ProviderDispatcher, services.PostgresDSN, services.LicenseProvider)
 	localAuth := handlers.NewLocalAuthHandler(services.LocalAuthProvider)
@@ -101,6 +101,7 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 		GatewayClient: services.GatewayClient,
 		Settings:      services.GatewayClient,
 	})
+	registrySettings := handlers.NewRegistrySettingsHandler(services.GatewayClient)
 	modelProxy := handlers.NewModelProxyHandler(services.GatewayClient, services.ModelProxyConfiguredURL, services.ModelProxyURL, services.ProviderDispatcher, services.LicenseProvider)
 
 	mcpSecretBindings := handlers.NewMCPSecretBindingHandler(services.MCPRuntimeBackend, services.LocalK8sClient, services.ObotNamespace, services.MCPSecretBindingAllowedLabel)
@@ -113,7 +114,7 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	systemMCPServers := handlers.NewSystemMCPServerHandler(services.MCPSessionManager, services.MCPSecretBindingAllowedLabel)
 	userDefaultRoleSettings := handlers.NewUserDefaultRoleSettingHandler()
 	setupHandler := setup.NewHandler(services.ServerURL, services.Bootstrapper, services.ProviderDispatcher)
-	registryHandler := registry.NewHandler(services.AccessControlRuleHelper, services.ServerURL, services.RegistryNoAuth, services.MCPSecretBindingAllowedLabel, services.MCPSessionManager.RemoteMCPURLValidationConfig())
+	registryHandler := registry.NewHandler(services.ServerURL)
 	oauthClients := handlers.NewOAuthClientsHandler(services.OAuthServerConfig, services.ServerURL)
 	imagePullSecretsHandler := handlers.NewImagePullSecretHandler(services.MCPRuntimeBackend, services.MCPImagePullSecrets, services.MCPServerNamespace, services.ServiceNamespace, services.ServiceAccountName, services.LocalK8sClient, services.ServiceAccountIssuerURL, services.ServiceAccountIssuerError)
 	licenseHandler := handlers.NewLicenseHandler(services.LicenseProvider, upgrade.NewCommunityLicenseIssuer(services.GatewayClient, upgrade.ServerBaseURL(), http.DefaultClient))
@@ -513,10 +514,7 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	}))
 
 	// LLM gateway (embedded Bifrost)
-	llmGateway := handlers.NewLLMGatewayHandler(services.BifrostEngine, handlers.LLMGatewayRevisions{
-		Current: providerconfigurationchange.CurrentLLMGatewayRevision,
-		Advance: providerconfigurationchange.AdvanceLLMGatewayRevision,
-	}, services.ModelAccessPolicyHelper)
+	llmGateway := handlers.NewLLMGatewayHandler(services.BifrostEngine, services.ModelAccessPolicyHelper)
 	mux.HandleFunc("GET /api/llm-gateway/status", llmGateway.Status)
 	mux.HandleFunc("GET /api/llm-gateway/metrics", llmGateway.Metrics)
 	mux.HandleFunc("POST /api/llm-gateway/sync-models", llmGateway.SyncModels)
@@ -528,7 +526,7 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("PUT /api/llm-gateway/budgets/{budget_id}", llmGateway.UpdateBudget)
 	mux.HandleFunc("DELETE /api/llm-gateway/budgets/{budget_id}", llmGateway.DeleteBudget)
 	mux.HandleFunc("GET /api/llm-gateway/budgets/{budget_id}/usage", llmGateway.BudgetUsage)
-	mux.HandleFunc("/api/llm-gateway/admin/{path...}", llmGateway.Proxy)
+	llmGateway.RegisterAdminRoutes(mux)
 
 	// Guardrails, for LLM gateway traffic and MCP tool calls
 	guardrailsHandler := handlers.NewGuardrailsHandler(services.GuardrailEngine)
@@ -549,6 +547,8 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 
 	// Model providers
 	mux.HandleFunc("GET /api/model-providers", modelProviders.List)
+	mux.HandleFunc("GET /api/registry-settings", registrySettings.Get)
+	mux.HandleFunc("PUT /api/registry-settings", registrySettings.Update)
 	mux.HandleFunc("GET /api/model-proxy", modelProxy.Get)
 	mux.HandleFunc("PUT /api/model-proxy", modelProxy.Update)
 	mux.HandleFunc("GET /api/model-proxy/usage", modelProxy.Usage)
@@ -596,7 +596,6 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("POST /api/bootstrap/logout", services.Bootstrapper.Logout)
 
 	// Setup endpoints for bootstrap configuration flow
-	mux.HandleFunc("GET /api/setup/explicit-role-emails", setupHandler.ListExplicitRoleEmails)
 	mux.HandleFunc("POST /api/setup/initiate-temp-login", setupHandler.InitiateTempLogin)
 	mux.HandleFunc("GET /api/setup/oauth-complete", setupHandler.OAuthComplete)
 	mux.HandleFunc("GET /api/setup/temp-user", setupHandler.GetTempUser)
@@ -649,6 +648,10 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	mux.HandleFunc("DELETE /api/mdm/configurations/{id}/enrollment-keys/{key_id}", mdmConfigurations.DeleteEnrollmentKey)
 	mux.HandleFunc("GET /api/mdm/configurations/{id}/devices", mdmConfigurations.ListDevices)
 	mux.HandleFunc("GET /api/mdm/configurations/{id}/download/{slug}", mdmConfigurations.DownloadArtifact)
+
+	// Enrolled devices across all configurations (admin).
+	mux.HandleFunc("GET /api/mdm/devices", mdmDevices.List)
+	mux.HandleFunc("DELETE /api/mdm/devices/{device_id}", mdmDevices.Delete)
 
 	// Device enrollment (authenticated by an enrollment token -> MDMConfiguration principal)
 	mux.HandleFunc("POST /api/mdm/enroll", deviceEnroll.Enroll)
@@ -704,7 +707,7 @@ func NewRouter(ctx context.Context, services *services.Services) (*Router, error
 	services.APIServer.HTTPHandle("GET /tunnel/composite/register/{key}", http.HandlerFunc(services.TunnelManager.ServeCompositeRegistration))
 
 	// Well-known
-	wellknown.SetupHandlers(services.ServerURL, services.OAuthServerConfig, services.RegistryNoAuth, mux)
+	wellknown.SetupHandlers(services.ServerURL, services.OAuthServerConfig, mux)
 	// Obot OAuth
 	oauth.SetupHandlers(oauthChecker, services.MCPOAuthTokenStorage, services.PersistentTokenServer, services.OAuthServerConfig, services.MCPSessionManager, services.AccessControlRuleHelper, services.ServerURL, services.MCPOAuthClientSecretExpiration, services.MCPOAuthClientNativeExceptions, mux)
 
